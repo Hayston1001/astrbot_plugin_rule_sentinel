@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches metadata version
+        run: |
+          set -euo pipefail
+          META_VERSION="$(grep '^version:' metadata.yaml | sed 's/version:[[:space:]]*//' | tr -d '[:space:]')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "v${META_VERSION}" != "v${TAG_VERSION}" ]; then
+            echo "::error::tag v${TAG_VERSION} 与 metadata.yaml version ${META_VERSION} 不一致, 终止发布"
+            exit 1
+          fi
+          echo "版本校验通过: v${TAG_VERSION}"
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          NOTES=$(awk -v header="## v${VERSION}" '$0 == header {p=1; next} /^## v/ && p {exit} p' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "::error::CHANGELOG.md 中未找到版本 v${VERSION} 对应的小节, 终止发布"
+            exit 1
+          fi
+          {
+            echo "NOTES<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin package
+        run: python -B scripts/package_plugin.py
+
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          PACKAGE="dist/astrbot_plugin_rule_sentinel-${{ steps.version.outputs.VERSION }}.zip"
+          test -f "$PACKAGE"
+          unzip -l "$PACKAGE" | grep -q "CHANGELOG.md"
+          unzip -l "$PACKAGE" | grep -q "LICENSE"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: v${{ steps.version.outputs.VERSION }}
+          body: ${{ steps.changelog.outputs.NOTES }}
+          files: dist/astrbot_plugin_rule_sentinel-${{ steps.version.outputs.VERSION }}.zip
+          generate_release_notes: false

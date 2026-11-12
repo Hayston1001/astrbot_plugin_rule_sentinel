@@ -44,7 +44,7 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = set(archive.namelist())
             self.assertIsNone(archive.testzip())
-            self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "LICENSE", "sentinel/__init__.py",
+            self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "sentinel/__init__.py",
                              "views/management/index.html", "views/management/app.js", "views/management/style.css",
                              "views/management/motion.js",
                              "scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py"} <= names)
