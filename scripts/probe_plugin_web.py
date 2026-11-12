@@ -53,7 +53,15 @@ def main():
             plugin = plugin_class(context, {"dashboard_admins": ["admin"]})
             await plugin.initialize()
             try:
-                assert plugin.intake is None and len(context.registered_web_apis) == 28
+                assert plugin.intake is None and len(context.registered_web_apis) == 29
+                assert any(route[0].endswith("/quick-start/complete") and route[2] == ["POST"]
+                           for route in context.registered_web_apis)
+                status, settings = await call(plugin.get_settings, "admin")
+                assert status == 200 and settings["quick_start_completed"] is False
+                status, completion = await call(plugin.complete_quick_start, "admin", b"{}")
+                assert status == 200 and completion == {"completed": False}
+                status, _ = await call(plugin.complete_quick_start, "api_key:synthetic", b"{}", forbid_read=True)
+                assert status == 403
                 fields = {"platform_id": "p", "group_id": "g", "rule_id": "r", "expected_version": 0,
                           "text": "rule", "enabled": True, "allowed_actions": ["mute"],
                           "duration_mode": "strict", "severity_seconds": {"low": 30}}

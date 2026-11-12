@@ -45,7 +45,7 @@ let liveCallbacks;
 let discoveryFailed = false;
 let discovery = {groups: [], history_available: true, truncated: false};
 const savedRules = new Map();
-const settings = {action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
+const settings = {quick_start_completed: true, action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
   monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {}, jev_provider: "typesafe",
   decision_backend: "llm", llm_provider_id: "default-model", rule_selection_strategy: "priority", jev_model: "",
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,

@@ -59,6 +59,32 @@ class ManagementService:
                 found.add((platform_id, group_id))
         return groups
 
+    def quick_start_completed(self, actor):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        return self.queue.quick_start_completed()
+
+    def complete_quick_start(self, actor, config):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        if self.queue.quick_start_completed():
+            return {"completed": True}
+        from .plugin_settings import decision_model_unconfigured, read_settings
+        from .settings_store import validate_settings
+        validate_settings(config)
+        if decision_model_unconfigured(config):
+            return {"completed": False}
+        policy = read_settings(config).policy
+        configured = set(config["monitoring_groups"]) | set(config["group_overrides"])
+        groups = self.list_groups(actor, configured)
+        def allowed(item):
+            listed = (item["platform_id"], item["group_id"]) in policy.groups
+            return listed == (policy.mode == "allowlist")
+        if not any(allowed(item) for item in groups) or not any(item["rule_count"] > 0 for item in groups):
+            return {"completed": False}
+        self.queue.complete_quick_start()
+        return {"completed": True}
+
     def save_group_name(self, actor, fields, *, platform_name=False):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")

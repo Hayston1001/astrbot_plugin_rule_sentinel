@@ -107,7 +107,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       if (statusFails) throw new Error("status unavailable");
       return statusResult;
     }
-    if (endpoint === "settings") return {monitoring_mode: "allowlist", monitoring_groups: [],
+    if (endpoint === "settings") return {quick_start_completed: false, monitoring_mode: "allowlist", monitoring_groups: [],
       decision_backend: "", rule_selection_strategy: "model", llm_provider_id: "old-provider", max_duration_seconds: 30,
       model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60, group_rate_per_minute: 30,
       model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,

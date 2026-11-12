@@ -131,6 +131,7 @@ class RuleSentinel(Star):
             ("summary", self.summary, ["GET"]),
             ("ui-state", self.get_ui_state, ["GET"]),
             ("ui-state", self.save_ui_state, ["POST"]),
+            ("quick-start/complete", self.complete_quick_start, ["POST"]),
             ("settings", self.get_settings, ["GET"]),
             ("settings", self.save_settings, ["POST"]),
             ("group-monitoring", self.set_group_monitoring, ["POST"]),
@@ -639,7 +640,25 @@ class RuleSentinel(Star):
             return error_response("Service not initialized", status_code=503)
         if not self.management.actor_allowed(request.username):
             return error_response("Not authorized", status_code=403)
-        return json_response(self._public_settings())
+        try:
+            result = self._public_settings()
+            result["quick_start_completed"] = await asyncio.to_thread(self.management.quick_start_completed, request.username)
+        except Exception:
+            logger.error("Rule Sentinel could not read quick start state")
+            result = self._public_settings()
+            result["quick_start_completed"] = None
+        return json_response(result)
+
+    async def complete_quick_start(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        data = await self._payload()
+        if data != {}:
+            return error_response("Invalid request", status_code=400)
+        async with self._settings_lock:
+            return await self._run(self.management.complete_quick_start, request.username, dict(self.config))
 
     async def list_jev_models(self):
         if self.management is None:

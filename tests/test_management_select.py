@@ -29,7 +29,7 @@ window.AstrBotPluginView = {
   async apiGet(endpoint) {
     const data = {
       status: {monitoring: 'dry_run', backend: 'llm'},
-      settings: {monitoring_mode: 'allowlist', monitoring_groups: [], decision_backend: 'llm',
+      settings: {quick_start_completed: false, monitoring_mode: 'allowlist', monitoring_groups: [], decision_backend: 'llm',
         rule_selection_strategy: 'priority', llm_provider_id: 'test-model', default_action_mode: 'auto',
         default_execution_mode: 'record', protected_target_policy: 'exempt', protected_target_template: 'hello',
         message_retention_days: 30, jev_provider: 'typesafe', llm_no_action_reason_enabled: true},

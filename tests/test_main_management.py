@@ -76,7 +76,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 28)
+        self.assertEqual(len(self.context.routes), 29)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -180,6 +180,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.stream_events())["status_code"], 403)
             self.assertEqual((await self.plugin.get_ui_state())["status_code"], 403)
             self.assertEqual((await self.plugin.save_ui_state())["status_code"], 403)
+            self.assertEqual((await self.plugin.complete_quick_start())["status_code"], 403)
             self.assertEqual((await self.plugin.summary())["status_code"], 403)
             self.assertEqual((await self.plugin.get_settings())["status_code"], 403)
             self.assertEqual((await self.plugin.save_settings())["status_code"], 403)
@@ -271,6 +272,38 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await other_plugin.get_ui_state())["data"], first)
         finally:
             await other_plugin.terminate()
+
+    async def test_quick_start_completion_is_validated_and_persistent(self):
+        self.assertFalse((await self.plugin.get_settings())["data"]["quick_start_completed"])
+        for raw in (b'{"completed":true}', b'{"x":1,"x":2}', b'[]'):
+            self.raw_body = raw
+            self.assertEqual((await self.plugin.complete_quick_start())["status_code"], 400)
+        self.raw_body = b'{}'
+        self.assertEqual((await self.plugin.complete_quick_start())["data"], {"completed": False})
+        self.plugin.config["decision_backend"] = "llm"
+        self.plugin.config["llm_provider_id"] = "model-a"
+        self.plugin.config["monitoring_groups"] = ["p/g"]
+        self.assertEqual((await self.plugin.complete_quick_start())["data"], {"completed": False})
+        await asyncio.to_thread(self.plugin._rules.save, platform_id="p", group_id="g", rule_id="r",
+                                expected_version=0, text="rule", enabled=True, modified_by="admin",
+                                allowed_actions=["mute"], duration_mode="strict", severity_seconds={"low": 30})
+        self.assertEqual((await self.plugin.complete_quick_start())["data"], {"completed": True})
+        self.plugin.config["llm_provider_id"] = ""
+        self.request.username = "another-admin"
+        self.assertTrue((await self.plugin.get_settings())["data"]["quick_start_completed"])
+        self.assertEqual((await self.plugin.complete_quick_start())["data"], {"completed": True})
+        other_plugin = self.module.RuleSentinel(self.context, {})
+        await other_plugin.initialize()
+        try:
+            self.assertTrue((await other_plugin.get_settings())["data"]["quick_start_completed"])
+        finally:
+            await other_plugin.terminate()
+
+    async def test_unavailable_quick_start_state_does_not_block_settings(self):
+        with patch.object(self.plugin.management, "quick_start_completed", side_effect=RuntimeError):
+            settings = (await self.plugin.get_settings())["data"]
+        self.assertIsNone(settings["quick_start_completed"])
+        self.assertIn("decision_backend", settings)
 
     async def test_group_names_are_scoped_persistent_and_validated(self):
         self.raw_body = json.dumps({"platform_id": "qq1", "group_id": "g", "name": "测试群"}).encode()

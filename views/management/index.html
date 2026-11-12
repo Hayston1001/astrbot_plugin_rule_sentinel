@@ -135,6 +135,14 @@
         </section>
 
         <section id="panel-status" role="tabpanel" aria-labelledby="tab-status" hidden>
+          <section id="quick-start" class="status-panel quick-start" aria-labelledby="quick-start-title" hidden>
+            <div class="quick-start-heading"><div><h2 id="quick-start-title">快速引导</h2><p>完成以下设置, 配置群消息监控.</p></div><span id="quick-start-progress" aria-live="polite">正在读取进度...</span></div>
+            <ol class="quick-start-steps">
+              <li><div class="quick-start-step-heading"><span class="quick-start-number" aria-hidden="true">1</span><div><h3>设置判定模型</h3><p>选择默认判定模型.</p></div></div><div class="quick-start-actions"><span id="quick-start-model-state" class="quick-start-state">读取中</span><button id="quick-start-model" class="secondary" type="button">去设置</button></div></li>
+              <li><div class="quick-start-step-heading"><span class="quick-start-number" aria-hidden="true">2</span><div><h3>添加监控群</h3><p>添加群并开启监控.</p></div></div><div class="quick-start-actions"><span id="quick-start-group-state" class="quick-start-state">读取中</span><button id="quick-start-group" class="secondary" type="button">管理群</button></div></li>
+              <li><div class="quick-start-step-heading"><span class="quick-start-number" aria-hidden="true">3</span><div><h3>添加规则</h3><p>设置群内规则.</p></div></div><div class="quick-start-actions"><span id="quick-start-rule-state" class="quick-start-state">读取中</span><button id="quick-start-rule" class="secondary" type="button">添加规则</button></div></li>
+            </ol>
+          </section>
           <div class="status-overview"><section class="status-panel status-main" id="status-main" data-tone="muted"><h2>监控状态</h2><strong id="status-label">正在读取</strong><p id="status-detail">正在读取状态...</p><button id="status-settings" class="secondary" type="button">监控设置</button></section>
             <section class="status-panel status-facts"><h2>运行信息</h2><div class="status-fact"><span>默认判定方式</span><strong id="status-backend">-</strong></div><div class="status-fact"><span>真实执行总开关</span><strong id="status-execution">-</strong></div><div class="status-fact"><span>已知群</span><strong id="status-groups-total">-</strong></div><div class="status-fact"><span>允许监控</span><strong id="status-groups-enabled">-</strong></div></section></div>
           <section class="all-groups-status"><div class="records-heading"><h2>各群状态</h2><button id="refresh-all-groups" class="secondary" type="button">刷新统计</button></div><p class="field-help">最近 24 小时</p><p id="all-groups-status-message" class="notice" aria-live="polite"></p><div class="table-wrap"><table id="groups-status-table"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>群</th><th>监控状态</th><th class="number">消息数</th><th class="number">拟执行</th><th class="number">未违反规则</th><th class="number">P95 延迟</th><th>最近活动</th></tr></thead><tbody id="groups-status-body"></tbody></table></div></section>

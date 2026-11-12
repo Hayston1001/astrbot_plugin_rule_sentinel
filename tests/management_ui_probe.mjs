@@ -79,7 +79,7 @@ globalThis.window = {innerWidth: 800, innerHeight: 600, scrollY: 0,
   async apiGet(endpoint, params) {
     requests.push({endpoint, params});
     if (endpoint === "status") return {monitoring: "disabled_unverified_event_hook"};
-    if (endpoint === "settings") return {monitoring_groups: [], monitoring_mode: "allowlist", default_action_mode: "auto", llm_no_action_reason_enabled: true};
+    if (endpoint === "settings") return {quick_start_completed: false, monitoring_groups: [], monitoring_mode: "allowlist", default_action_mode: "auto", llm_no_action_reason_enabled: true};
     if (endpoint === "providers") return [];
     if (endpoint === "ui-state") return null;
     if (endpoint === "summary") return {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0}, latency_p95_ms: null};

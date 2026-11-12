@@ -97,6 +97,9 @@ class DryRunQueue:
                 CREATE TABLE IF NOT EXISTS dashboard_ui_state (
                     username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS dashboard_quick_start (
+                    id INTEGER PRIMARY KEY CHECK(id = 1)
+                );
                 CREATE TABLE IF NOT EXISTS dashboard_group_names (
                     platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
                     alias TEXT NOT NULL DEFAULT '', platform_name TEXT NOT NULL DEFAULT '',
@@ -786,6 +789,21 @@ class DryRunQueue:
             row = db.execute("SELECT platform_id, group_id FROM dashboard_ui_state WHERE username=?",
                              (username,)).fetchone()
             return dict(row) if row else None
+        finally:
+            db.close()
+
+    def quick_start_completed(self) -> bool:
+        db = self._connect()
+        try:
+            return db.execute("SELECT 1 FROM dashboard_quick_start WHERE id=1").fetchone() is not None
+        finally:
+            db.close()
+
+    def complete_quick_start(self) -> None:
+        db = self._connect()
+        try:
+            db.execute("INSERT OR IGNORE INTO dashboard_quick_start (id) VALUES (1)")
+            db.commit()
         finally:
             db.close()
 

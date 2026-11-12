@@ -159,6 +159,12 @@ const recordNodes = new Map();
 const streamChanges = new Map();
 const expandedMessages = new Set();
 let currentSettings = null;
+let settingsLoadFailed = false;
+let quickStartCompleted = null;
+let quickStartStateFailed = false;
+let quickStartSaving = false;
+let quickStartSaveFailed = false;
+let openGuideGroupAfterAdd = false;
 let groupSettingsSaving = false;
 let groupTemplateDraftInitialized = false;
 let groupReasonDraftInitialized = false;
@@ -302,6 +308,7 @@ if (typeof window.matchMedia === "function") {
 }
 function selectTab(name) {
   if (name !== "rules") stopActionFollow();
+  if (name !== "groups") openGuideGroupAfterAdd = false;
   activeTab = name;
   const titles = {
     records: ["判定记录", "查看所选群的判定和执行结果."],
@@ -1546,9 +1553,12 @@ el("preview").addEventListener("click", async () => {
       const completedRevision = revision;
       await Promise.all([loadCurrentRules(), refreshGroupCounts()]);
       if (revision === completedRevision) showFeedback("规则已保存.");
-    } else if (editingScope === JSON.stringify(scope) && el("rule").value.trim() === fields.rule_id) {
-      showFeedback("规则已保存, 新修改尚未保存.", "warning");
-    } else showFeedback("规则已保存.");
+    } else {
+      await refreshGroupCounts();
+      if (editingScope === JSON.stringify(scope) && el("rule").value.trim() === fields.rule_id) {
+        showFeedback("规则已保存, 新修改尚未保存.", "warning");
+      } else showFeedback("规则已保存.");
+    }
   } catch (error) {
     if (revision === saveRevision) feedbackError(error, "保存失败");
   } finally {
@@ -1659,12 +1669,49 @@ function groupMonitoringState(item) {
   if (!runtimeStatus) return ["状态不可用", "muted"];
   return runtimeStatus.monitoring === "dry_run" ? ["允许监控", "success"] : ["监控未启动", "warning"];
 }
+function renderQuickStart() {
+  if (quickStartCompleted === true) { el("quick-start").hidden = true; return; }
+  const settings = currentSettings;
+  const groups = knownGroups.filter((item) => !item.restored_only);
+  const hasText = (value) => typeof value === "string" && value.trim().length > 0;
+  const model = !settings ? null : settings.decision_backend === "llm" ? hasText(settings.llm_provider_id)
+    : settings.decision_backend === "jev" ? hasText(settings.jev_model) && settings.jev_api_key_set === true : false;
+  const group = !groupsLoaded || !settings || !Array.isArray(settings.monitoring_groups) ? null
+    : groups.some((item) => groupMonitoring(item) === true);
+  const validCount = (item) => Number.isSafeInteger(item.rule_count) && item.rule_count >= 0;
+  const rules = !groupsLoaded ? null : groups.some((item) => validCount(item) && item.rule_count > 0)
+    ? true : groups.every(validCount) ? false : null;
+  const steps = [
+    ["model", model, settingsLoadFailed],
+    ["group", group, groupsLoadFailed || settingsLoadFailed || (!!settings && !Array.isArray(settings.monitoring_groups))],
+    ["rule", rules, groupsLoadFailed || (groupsLoaded && rules === null)],
+  ];
+  for (const [name, done, unavailable] of steps) {
+    const state = el(`quick-start-${name}-state`);
+    state.textContent = done === true ? "已完成" : done === false ? "未完成" : unavailable ? "状态不可用" : "读取中";
+    state.setAttribute("data-state", done === true ? "done" : done === false ? "pending" : "unknown");
+  }
+  const completed = steps.filter(([, done]) => done === true).length;
+  el("quick-start").hidden = false;
+  if (completed === steps.length && quickStartCompleted === false && !quickStartSaving && !quickStartSaveFailed) {
+    quickStartSaving = true;
+    bridge.apiPost("quick-start/complete", {}).then((result) => {
+      if (result?.completed === true) quickStartCompleted = true;
+      else quickStartSaveFailed = true;
+    }).catch(() => { quickStartSaveFailed = true; }).finally(() => { quickStartSaving = false; renderQuickStart(); });
+  }
+  el("quick-start-progress").textContent = quickStartSaving ? "正在保存进度..." : quickStartSaveFailed
+    ? "无法保存进度, 请刷新页面重试." : quickStartStateFailed ? "无法读取进度, 请刷新页面重试."
+    : steps.every(([, done]) => done !== null) ? `已完成 ${completed} / ${steps.length}`
+    : steps.some(([, done, unavailable]) => done === null && unavailable) ? "部分进度不可用" : "正在读取进度...";
+}
 function chooseGroup(item) {
   selectedScope = {platform_id: item.platform_id, group_id: item.group_id};
   updateGroupOptions();
   return selectCurrentGroup();
 }
 function renderGroupList(preserveClosing = false) {
+  renderQuickStart();
   const container = el("groups-list");
   el("groups-count").textContent = groupsLoaded ? `${knownGroups.length} 个群` : "";
   const editor = el("group-detail-panel");
@@ -1764,7 +1811,7 @@ async function refreshGroupCounts() {
     if (!Array.isArray(groups)) return;
     const counts = new Map(groups.map((item) => [groupKey(item), item.rule_count]));
     for (const item of knownGroups) {
-      if (counts.has(groupKey(item))) item.rule_count = counts.get(groupKey(item)) ?? 0;
+      if (counts.has(groupKey(item))) { item.rule_count = counts.get(groupKey(item)); delete item.restored_only; }
     }
     renderGroupList();
   } catch { /* Counts stay as last loaded. */ }
@@ -2310,7 +2357,7 @@ el("add-group").addEventListener("click", async () => {
   try {
     const saved = await bridge.apiPost("group-register", scope);
     const existing = knownGroups.find((item) => groupKey(item) === groupKey(scope));
-    if (existing) Object.assign(existing, saved);
+    if (existing) { Object.assign(existing, saved); delete existing.restored_only; }
     else knownGroups.push({...saved, rule_count: 0, last_activity: null});
     if (!groupsLoaded) {
       try {
@@ -2322,6 +2369,11 @@ el("add-group").addEventListener("click", async () => {
     updateGroupOptions();
     renderAvailableGroups();
     await chooseGroup(scope);
+    if (openGuideGroupAfterAdd && activeTab === "groups") {
+      openGuideGroupAfterAdd = false;
+      groupRows.get(groupKey(scope))?.button.click();
+      focusQuickStartTarget(el("monitor-group"));
+    }
     if (!availableGroups.some((entry) => !knownGroups.some((known) => groupKey(known) === groupKey(entry)))) {
       el("add-group-status").textContent = "暂无可选群. 请在目标群向机器人发送消息, 然后刷新.";
     }
@@ -2582,6 +2634,10 @@ el("group-settings-save").addEventListener("click", async () => {
 function showSettings(settings, submitted = null) {
   const previousActionMode = currentSettings?.default_action_mode;
   currentSettings = settings;
+  settingsLoadFailed = false;
+  if (settings.quick_start_completed === true) quickStartCompleted = true;
+  else if (quickStartCompleted === null && settings.quick_start_completed === false) quickStartCompleted = false;
+  if (!submitted) quickStartStateFailed = typeof settings.quick_start_completed !== "boolean";
   if (previousActionMode && previousActionMode !== settings.default_action_mode && pending?.fields?.actions?.some((action) => action.mode === "inherit")) {
     clearPreview();
     el("save-status").textContent = "全局动作执行方式已更改, 请重新确认.";
@@ -2617,7 +2673,7 @@ el("setting-decision_backend").addEventListener("change", () => {
 });
 async function loadSettings() {
   try { showSettings(await bridge.apiGet("settings")); }
-  catch (error) { showError(el("settings-status"), error); }
+  catch (error) { settingsLoadFailed = true; renderQuickStart(); showError(el("settings-status"), error); }
   try {
     const providers = await bridge.apiGet("providers");
     availableProviders = providers.map((provider) => provider.id);
@@ -2721,6 +2777,25 @@ el("monitor-group").addEventListener("change", async () => {
   } catch { showFeedback("无法保存群监控设置.", "error"); }
   finally { updateGroupMonitoring(); updateGroupSettingsHints(); }
 });
+function focusQuickStartTarget(target) {
+  target?.scrollIntoView?.({block: "center"});
+  target?.focus?.({preventScroll: true});
+}
+el("quick-start-model").addEventListener("click", () => {
+  selectTab("settings");
+  focusQuickStartTarget(el("setting-decision_backend"));
+});
+el("quick-start-group").addEventListener("click", () => {
+  selectTab("groups");
+  openGuideGroupAfterAdd = true;
+  setDetailsOpen(el("add-group-panel"), true);
+  focusQuickStartTarget(el("add-group-panel").querySelector?.("summary"));
+});
+el("quick-start-rule").addEventListener("click", () => {
+  selectTab("rules");
+  if (el("rule-form").hidden && !el("new-rule").disabled) el("new-rule").click();
+  if (!el("rule-form").hidden) focusQuickStartTarget(el("rule"));
+});
 async function initializeSelection() {
   try {
     const saved = await bridge.apiGet("ui-state");
@@ -2734,7 +2809,7 @@ async function initializeSelection() {
     knownGroups = groups.value;
     groupsLoaded = true;
     if (selectedScope.platform_id && selectedScope.group_id && !knownGroups.some((item) => groupKey(item) === groupKey(selectedScope))) {
-      knownGroups.push({...selectedScope, rule_count: 0, last_activity: null});
+      knownGroups.push({...selectedScope, rule_count: 0, last_activity: null, restored_only: true});
     }
   } else groupsLoadFailed = true;
   const platformCounts = new Map();

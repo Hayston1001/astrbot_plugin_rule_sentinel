@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import copy
 from pathlib import Path
 
 from sentinel.dry_run_queue import DryRunQueue
 from sentinel.management_service import ManagementService
 from sentinel.rule_store import RuleStore
+from sentinel.settings_store import DEFAULTS
 
 
 class ManagementTests(unittest.TestCase):
@@ -56,3 +58,24 @@ class ManagementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.confirm("admin", preview)
         self.assertEqual(self.rules.history("p", "g", "r"), [])
+
+    def test_quick_start_completion_checks_saved_settings_and_known_groups(self):
+        config = copy.deepcopy(DEFAULTS)
+        for actor in (None, "", "api_key:123"):
+            with self.subTest(actor=actor), self.assertRaises(PermissionError):
+                self.service.complete_quick_start(actor, config)
+            with self.assertRaises(PermissionError):
+                self.service.quick_start_completed(actor)
+        self.assertFalse(self.service.quick_start_completed("admin"))
+        self.assertEqual(self.service.complete_quick_start("admin", config), {"completed": False})
+        config["llm_provider_id"] = "model-a"
+        self.service.confirm("admin", self.service.preview("admin", self.fields))
+        self.assertEqual(self.service.complete_quick_start("admin", config), {"completed": False})
+        config["monitoring_mode"] = "blocklist"
+        config["monitoring_groups"] = ["p/g"]
+        self.assertEqual(self.service.complete_quick_start("admin", config), {"completed": False})
+        config["monitoring_groups"] = []
+        self.assertEqual(self.service.complete_quick_start("admin", config), {"completed": True})
+        self.assertTrue(ManagementService(self.rules, self.queue).quick_start_completed("other"))
+        config["llm_provider_id"] = ""
+        self.assertEqual(self.service.complete_quick_start("admin", config), {"completed": True})
