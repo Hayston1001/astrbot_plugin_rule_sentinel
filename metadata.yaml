@@ -7,6 +7,7 @@ astrbot_version: ">=4.29.3"
 support_platforms:
   - qq_official
   - qq_official_webhook
+repo: https://github.com/Hayston1001/astrbot_plugin_rule_sentinel
 social_link: https://github.com/Hayston1001
 tags:
   - 规则
