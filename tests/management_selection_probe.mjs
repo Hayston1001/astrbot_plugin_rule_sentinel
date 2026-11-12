@@ -46,8 +46,8 @@ let discoveryFailed = false;
 let discovery = {groups: [], history_available: true, truncated: false};
 const savedRules = new Map();
 const settings = {quick_start_completed: true, action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
-  monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {}, jev_provider: "typesafe",
-  decision_backend: "llm", llm_provider_id: "default-model", rule_selection_strategy: "priority", jev_model: "",
+  monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {},
+  decision_backend: "llm", llm_provider_id: "default-model", rule_selection_strategy: "priority",
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,
   max_duration_seconds: 2592000, model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60,
   group_rate_per_minute: 30, model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
@@ -127,7 +127,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       return {settings: structuredClone(settings)};
     }
     if (endpoint === "settings") {
-      for (const [key, value] of Object.entries(body)) if (key !== "jev_api_key") settings[key] = value;
+      for (const [key, value] of Object.entries(body)) settings[key] = value;
       return {settings: structuredClone(settings)};
     }
     return body;
@@ -151,7 +151,7 @@ assert.equal(elements["groups-list"].children[0].children[0].children[1].textCon
 assert.equal(elements["group-alias"].value, "技术交流群");
 assert.equal(elements["group-policy-inherit"].textContent, "全局(只记录)");
 assert.equal(elements["group-quote-inherit"].textContent, "全局(引用)");
-assert.equal(elements["group-model-inherit"].textContent, "全局(普通 LLM / default-model)");
+assert.equal(elements["group-model-inherit"].textContent, "全局(default-model)");
 assert.equal(elements["group-strategy-inherit"].textContent, "全局(按规则优先级)");
 assert.equal(elements["group-reason-language-inherit"].textContent, "全局(中文)");
 assert.equal(elements["group-reason-language-mode"].value, "");
@@ -161,7 +161,6 @@ assert.match(elements["group-defaults"].textContent, /按规则优先级/);
 assert.equal(elements["group-template-label"].hidden, true);
 assert.equal(elements["group-template-preview"].textContent, "global rule-1: member-1 mute");
 assert.match(elements["group-protected-state"].textContent, /选择只记录时不会发送群提示/);
-assert.match(elements["jev-api-key-help"].textContent, /尚未配置密钥/);
 assert.equal(elements["group-select"].children[1].title, "技术交流群");
 elements["group-alias"].value = "新的备注";
 await elements["get-group-name"].trigger("click");

@@ -3,7 +3,6 @@
 import copy
 import json
 import os
-import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -19,7 +18,6 @@ DEFAULTS = {
     "global_rate_per_minute": 100, "group_rate_per_minute": 60, "model_failure_threshold": 5,
     "model_cooldown_seconds": 120, "notification_target": "", "notification_interval_seconds": 0,
     "decision_backend": "llm", "rule_selection_strategy": "model", "llm_provider_id": "",
-    "jev_model": "", "jev_api_key": "", "jev_provider": "typesafe",
     "protected_target_policy": "exempt", "protected_target_template": "有消息触发了规则 {rule_id}, 但目标是管理员/机器人, {action} 无法执行",
     "protected_target_quote": False,
     "default_execution_mode": "execute", "default_action_mode": "auto", "group_overrides": {},
@@ -27,7 +25,7 @@ DEFAULTS = {
 }
 
 MIGRATED_DEFAULTS = {key: DEFAULTS[key] for key in ("action_execution_enabled", "protected_target_policy",
-    "protected_target_template", "protected_target_quote", "jev_provider", "default_execution_mode", "default_action_mode", "group_overrides",
+    "protected_target_template", "protected_target_quote", "default_execution_mode", "default_action_mode", "group_overrides",
     "message_retention_days", "llm_reason_language", "llm_no_action_reason_enabled")}
 MIGRATED_DEFAULTS["action_execution_enabled"] = False
 
@@ -84,20 +82,12 @@ def validate_settings(config):
     if type(config["action_execution_enabled"]) is not bool:
         raise ValueError("invalid action execution setting")
     validate_protected_target_settings(config)
-    for key in ("llm_provider_id", "jev_model", "jev_api_key", "notification_target"):
+    for key in ("llm_provider_id", "notification_target"):
         if not isinstance(config[key], str):
             raise ValueError("invalid settings text")
     interval = config["notification_interval_seconds"]
     if type(interval) is not int or interval < 0 or bool(config["notification_target"].strip()) != (interval > 0):
         raise ValueError("invalid notification settings")
-    provider, model = config["jev_provider"], config["jev_model"]
-    if not isinstance(provider, str) or provider not in ("typesafe", "openrouter"):
-        raise ValueError("invalid Jev provider")
-    if model and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}" if provider == "typesafe"
-                                  else r"typesafe/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model):
-        raise ValueError("invalid Jev model")
-    if config["decision_backend"] == "jev" and (not model.strip() or not config["jev_api_key"].strip()):
-        raise ValueError("missing Jev model or key")
     from .group_settings import resolve_group_settings, validate_group_key
     overrides = config["group_overrides"]
     if (config["default_execution_mode"] not in ("record", "execute")
@@ -141,6 +131,67 @@ class SettingsStore:
             db.execute(f"UPDATE {table} SET status='inactive', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
                        f"WHERE status IN ({placeholders})", states)
 
+    @staticmethod
+    def _remove_retired_backend(db, config):
+        """Remove old model settings without silently switching monitored groups."""
+        changed = False
+        for key in ("jev_model", "jev_api_key", "jev_provider"):
+            if key in config:
+                del config[key]
+                changed = True
+        global_retired = config.get("decision_backend") == "jev"
+        if global_retired:
+            config["decision_backend"] = "llm"
+            config["llm_provider_id"] = ""
+            changed = True
+        overrides = config.get("group_overrides", {})
+        retired_groups = []
+        if isinstance(overrides, dict):
+            from .group_settings import validate_group_key
+            for key, group in list(overrides.items()):
+                selected = group.get("model") if isinstance(group, dict) else None
+                if isinstance(selected, dict) and selected.get("backend") == "jev":
+                    validate_group_key(key)
+                    if (set(selected) != {"backend", "model"} or not isinstance(selected["model"], str)
+                            or not selected["model"].strip() or len(selected["model"]) > 128):
+                        raise ValueError("invalid group model")
+                    retired_groups.append(key)
+                    del group["model"]
+                    changed = True
+        if retired_groups:
+            groups = config.get("monitoring_groups")
+            mode = config.get("monitoring_mode")
+            if not isinstance(groups, list) or mode not in ("allowlist", "blocklist"):
+                raise ValueError("invalid monitoring settings")
+            for key in retired_groups:
+                if mode == "allowlist":
+                    groups[:] = [group for group in groups if group != key]
+                elif key not in groups:
+                    groups.append(key)
+        if not global_retired and not retired_groups:
+            return changed
+        if global_retired:
+            SettingsStore._retire_disabled_work(db)
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        scopes = [None] if global_retired else [tuple(key.split("/")) for key in retired_groups]
+        for scope in scopes:
+            where = "" if scope is None else " AND platform_id=? AND group_id=?"
+            args = () if scope is None else scope
+            if scope is not None and "execution_intents" in tables:
+                if "protected_target_notices" in tables:
+                    db.execute("UPDATE protected_target_notices SET status='inactive', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                               "WHERE status IN ('pending', 'pending_retry') AND intent_id IN "
+                               "(SELECT id FROM execution_intents WHERE platform_id=? AND group_id=?)", args)
+                db.execute("UPDATE execution_intents SET status='inactive', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                           "WHERE status IN ('pending_auto', 'pending_confirm', 'pending_retry')" + where, args)
+            if {"dry_run_queue", "dry_run_events"} <= tables:
+                db.execute("INSERT INTO dry_run_events (platform_id, group_id, message_id, status, detail) "
+                           "SELECT platform_id, group_id, message_id, 'review', 'decision_model_removed' "
+                           "FROM dry_run_queue WHERE state IN ('pending', 'processing')" + where, args)
+                db.execute("UPDATE dry_run_queue SET state='done', payload=NULL, lease=NULL "
+                           "WHERE state IN ('pending', 'processing')" + where, args)
+        return changed
+
     def load_or_migrate(self, legacy):
         db = sqlite3.connect(self.path, timeout=15)
         try:
@@ -165,6 +216,7 @@ class SettingsStore:
                     config["action_execution_enabled"] = False
                 if legacy.get("monitoring_enabled") is False:
                     self._retire_disabled_work(db)
+                self._remove_retired_backend(db, config)
                 payload = json.dumps(config, ensure_ascii=False, allow_nan=False)
                 db.execute("INSERT INTO dashboard_settings(id, payload) VALUES (1, ?)", (payload,))
             else:
@@ -175,13 +227,14 @@ class SettingsStore:
                 legacy_enabled = config.pop("monitoring_enabled") if removed else None
                 if removed and type(legacy_enabled) is not bool:
                     raise ValueError("invalid legacy monitoring setting")
+                retired = self._remove_retired_backend(db, config)
                 missing = set(DEFAULTS) - set(config)
                 if set(config) - set(DEFAULTS) or missing - set(MIGRATED_DEFAULTS):
                     raise ValueError("invalid stored settings")
                 config.update({key: copy.deepcopy(MIGRATED_DEFAULTS[key]) for key in missing})
                 if legacy_enabled is False:
                     self._retire_disabled_work(db)
-                if removed or missing:
+                if removed or missing or retired:
                     db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1",
                                (json.dumps(config, ensure_ascii=False, allow_nan=False),))
             db.commit()

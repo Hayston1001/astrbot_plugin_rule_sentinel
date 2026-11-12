@@ -55,7 +55,7 @@ def validate_plan_proposal(call, *, sender_id, rules, max_duration_seconds, deci
     def reject(reason):
         return ValidationResult("rejected", reason)
 
-    if decision_backend not in ("llm", "jev"):
+    if decision_backend != "llm":
         return reject("invalid_decision_backend")
     if not isinstance(sender_id, str) or not sender_id.strip():
         return reject("invalid_sender")
@@ -73,13 +73,10 @@ def validate_plan_proposal(call, *, sender_id, rules, max_duration_seconds, deci
     if call.get("violated") is not True:
         return reject("invalid_verdict")
     fields = {"rule_id", "violated"}
-    if decision_backend == "llm":
-        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
-            return reject("invalid_reason")
-        reason = reason.strip()
-        fields.add("reason")
-    elif "reason" in call:
-        return reject("unexpected_reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+        return reject("invalid_reason")
+    reason = reason.strip()
+    fields.add("reason")
     mute = next((item for item in rule.actions if item.get("type") == "mute"), None)
     duration = None
     if mute is not None:
@@ -121,7 +118,7 @@ def validate_proposals(
     def reject(reason: str) -> ValidationResult:
         return ValidationResult("rejected", reason)
 
-    if decision_backend not in ("llm", "jev"):
+    if decision_backend != "llm":
         return reject("invalid_decision_backend")
     if not isinstance(calls, list):
         return reject("invalid_calls")
@@ -150,13 +147,10 @@ def validate_proposals(
         return reject("invalid_rule_version")
     reason = call.get("reason")
     common = {"action", "rule_id"}
-    if decision_backend == "llm":
-        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
-            return reject("invalid_reason")
-        reason = reason.strip()
-        common.add("reason")
-    elif "reason" in call:
-        return reject("unexpected_reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+        return reject("invalid_reason")
+    reason = reason.strip()
+    common.add("reason")
     selected = next((item for item in rule.actions if item.get("type") == action), None)
     if rule.actions and selected is None:
         return reject("rule_not_enabled_for_action")

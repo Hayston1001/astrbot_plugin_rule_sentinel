@@ -86,8 +86,7 @@ class GroupSettingsTests(unittest.TestCase):
 
     def test_router_uses_actual_group_model_and_strategy(self):
         config = copy.deepcopy(self.config)
-        config.update(jev_provider="typesafe", jev_api_key="key")
-        config["group_overrides"] = {"p1/g": {"model": {"backend": "jev", "model": "jev-latest"},
+        config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
                                                "strategy": "priority"}}
         routes = []
         def make(backend, model, strategy, reason_language):
@@ -99,13 +98,11 @@ class GroupSettingsTests(unittest.TestCase):
         async def run():
             return [await router(SimpleNamespace(platform_id=p, group_id="g")) for p in ("p1", "p2", "p1")]
         results = asyncio.run(run())
-        self.assertEqual(routes, [("jev", "jev-latest", "priority", None), ("llm", "global-model", "model", "")])
+        self.assertEqual(routes, [("llm", "local-model", "priority", ""), ("llm", "global-model", "model", "")])
         self.assertEqual(results[0].settings_fingerprint, decision_fingerprint(config, "p1", "g"))
         self.assertNotEqual(results[0].settings_fingerprint, results[1].settings_fingerprint)
-        with self.assertRaises(ValueError):
-            build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
-        runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue, http_session=object())
-        self.assertEqual(runtime.worker.decide.decide.make_decider("jev", "jev-latest", "priority").strategy, "priority")
+        runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
+        self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "local-model", "priority").current().strategy, "priority")
         self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "global-model", "model").current().model, "global-model")
 
     def test_reason_language_changes_reach_runtime_and_invalidate_old_decisions(self):
@@ -116,14 +113,6 @@ class GroupSettingsTests(unittest.TestCase):
         decider = runtime.worker.decide.decide.make_decider("llm", "global-model", "model").current()
         self.assertEqual(decider.invoke.reason_language, "Japanese")
         self.assertNotEqual(decision_fingerprint(config, "p1", "g"), decision_fingerprint(self.config, "p1", "g"))
-        jev_config = copy.deepcopy(config)
-        jev_config["jev_api_key"] = "synthetic"
-        jev_config["group_overrides"] = {"p1/g": {"model": {"backend": "jev", "model": "jev-latest"}}}
-        jev_changed = {**jev_config, "llm_reason_language": "English"}
-        self.assertEqual(decision_fingerprint(jev_config, "p1", "g"), decision_fingerprint(jev_changed, "p1", "g"))
-        jev_group_changed = copy.deepcopy(jev_config)
-        jev_group_changed["group_overrides"]["p1/g"]["llm_reason_language"] = "English"
-        self.assertEqual(decision_fingerprint(jev_config, "p1", "g"), decision_fingerprint(jev_group_changed, "p1", "g"))
         self.assertTrue(runtime.admission.settings_match())
         config["llm_reason_language"] = "English"
         self.assertFalse(runtime.admission.settings_match())
@@ -140,11 +129,6 @@ class GroupSettingsTests(unittest.TestCase):
         self.assertFalse(decider.no_action_reason_enabled)
         self.assertFalse(decider.invoke.no_action_reason_enabled)
         self.assertEqual(decision_fingerprint(config, "p1", "g"), decision_fingerprint(self.config, "p1", "g"))
-        jev_config = copy.deepcopy(config)
-        jev_config["jev_api_key"] = "synthetic"
-        jev_config["group_overrides"] = {"p1/g": {"model": {"backend": "jev", "model": "jev-latest"}}}
-        jev_changed = {**jev_config, "llm_no_action_reason_enabled": True}
-        self.assertEqual(decision_fingerprint(jev_config, "p1", "g"), decision_fingerprint(jev_changed, "p1", "g"))
         self.assertTrue(runtime.admission.settings_match())
         config["llm_no_action_reason_enabled"] = True
         self.assertTrue(runtime.admission.settings_match())
@@ -439,8 +423,7 @@ class GroupSettingsTests(unittest.TestCase):
     def test_no_action_reason_change_preserves_pending_intents(self):
         config = copy.deepcopy(self.config)
         config["monitoring_groups"] += ["p3/g", "p4/g", "p5/g", "p6/g"]
-        config["jev_api_key"] = "synthetic"
-        config["group_overrides"] = {"p2/g": {"model": {"backend": "jev", "model": "jev-latest"}}}
+        config["group_overrides"] = {"p2/g": {"model": {"backend": "llm", "model": "local-model"}}}
         self.store.save(config)
         for platform, mode in (("p1", "auto"), ("p2", "auto"), ("p3", "confirm"),
                                ("p4", "auto"), ("p5", "auto"), ("p6", "auto")):
@@ -492,8 +475,7 @@ class GroupSettingsTests(unittest.TestCase):
 
     def test_group_routes_reach_deciders_and_record_correct_execution_mode(self):
         config = copy.deepcopy(self.config)
-        config["jev_api_key"] = "key"
-        config["group_overrides"] = {"p1/g": {"model": {"backend": "jev", "model": "jev-latest"},
+        config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
                                                "execution_mode": "record"}}
         self.store.save(config)
         for platform in ("p1", "p2"):
@@ -502,7 +484,7 @@ class GroupSettingsTests(unittest.TestCase):
                             severity_seconds={"low": 60}, modified_by="admin")
             self.queue.enqueue(platform_id=platform, group_id="g", message_id="m", capacity=10,
                                payload={"text": "private", "sender_id": "sender"})
-        runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue, http_session=object())
+        runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
         router = runtime.worker.decide.decide
         original = router.make_decider
         seen = []
@@ -510,22 +492,15 @@ class GroupSettingsTests(unittest.TestCase):
             seen.append(("llm", kwargs["model"], kwargs["strategy"]))
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
                 tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
-        async def jev(request):
-            seen.append(("jev", request["model"], "model"))
-            return {"model": "resolved", "answers": {"decision": {"type": "choice", "choice": "r_hit_low_0",
-                "confidence": 0.8, "probabilities": {"no_action": 0.1, "review": 0.1, "r_hit_low_0": 0.8}}}}
         def make(backend, model, strategy, reason_language):
             decider = original(backend, model, strategy, reason_language)
-            if backend == "llm":
-                decider.current().invoke = llm
-            else:
-                decider.send_request = jev
+            decider.current().invoke = llm
             return decider
         router.make_decider = make
         async def run():
             return await asyncio.gather(runtime.worker.drain_group("p1", "g"), runtime.worker.drain_group("p2", "g"))
         self.assertEqual(asyncio.run(run()), [1, 1])
-        self.assertCountEqual(seen, [("llm", "global-model", "model"), ("jev", "jev-latest", "model")])
+        self.assertCountEqual(seen, [("llm", "global-model", "model"), ("llm", "local-model", "model")])
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT platform_id, status FROM execution_intents ORDER BY platform_id").fetchall(),
                              [("p1", "inactive"), ("p2", "pending_auto")])

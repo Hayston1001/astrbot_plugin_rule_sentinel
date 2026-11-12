@@ -32,7 +32,7 @@ window.AstrBotPluginView = {
       settings: {quick_start_completed: false, monitoring_mode: 'allowlist', monitoring_groups: [], decision_backend: 'llm',
         rule_selection_strategy: 'priority', llm_provider_id: 'test-model', default_action_mode: 'auto',
         default_execution_mode: 'record', protected_target_policy: 'exempt', protected_target_template: 'hello',
-        message_retention_days: 30, jev_provider: 'typesafe', llm_no_action_reason_enabled: true},
+        message_retention_days: 30, llm_no_action_reason_enabled: true},
       providers: [{id: 'test-model'}], 'ui-state': {platform_id: 'p', group_id: 'g'},
       platforms: [{id: 'p', type: 'qq_official'}],
       groups: [{platform_id: 'p', group_id: 'g', alias: '测试群', rule_count: 0}],
@@ -257,10 +257,6 @@ class ManagementSelectTests(unittest.TestCase):
         expect(self.trigger("group-select")).to_have_attribute("aria-label", "管理的群: 测试群")
         self.page.locator("#tab-settings").click()
         expect(self.trigger("setting-rule_selection_strategy")).to_have_attribute("aria-label", "默认多规则命中策略: 按规则优先级")
-        self.trigger("setting-decision_backend").click()
-        self.page.get_by_role("option", name="Jev", exact=True).click()
-        expect(self.page.locator("#jev-settings")).to_have_attribute("open", "")
-        expect(self.trigger("setting-decision_backend")).to_have_attribute("aria-label", "默认任务模型类型: Jev")
         self.page.locator("#setting-llm_provider_id").focus()
         expect(self.page.get_by_role("option", name="test-model", exact=True)).to_be_visible()
         self.page.keyboard.press("Escape")

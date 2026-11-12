@@ -49,7 +49,9 @@ class GitSourceArchiveTests(unittest.TestCase):
         }
         packaged = {path.as_posix() for path in package_plugin.archive_files(root)}
         source = self.archive_files(root, "--worktree-attributes", "HEAD")
-        self.assertSetEqual(source, packaged & tracked)
+        # HEAD still contains files removed in an uncommitted working tree.
+        existing = {name for name in tracked if (root / name).is_file()}
+        self.assertSetEqual(source & existing, packaged & tracked)
 
     def test_committed_rules_exclude_known_development_paths(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -13,7 +13,6 @@ from sentinel.dry_run_queue import DryRunQueue
 from sentinel.dry_run_worker import DryRunWorker
 from sentinel.evaluation import compare_group_audits, summarize_group_audit
 from sentinel.framework_session_gate import FrameworkSessionGate
-from sentinel.jev_decider import JevDecider
 from sentinel.llm_decider import LlmDecider
 from sentinel.monitoring_policy import MonitoringPolicy
 from sentinel.rule_store import RuleStore
@@ -89,52 +88,55 @@ class FixturePipelineTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(database)) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue WHERE payload IS NOT NULL").fetchone()[0], 0)
 
-            jev_outcomes = {"positive-01": "r_hit_low_0", "positive-02": "r_hit_low_0", "positive-03": "r_hit_low_0",
+            second_outcomes = {"positive-01": "proposed", "positive-02": "proposed", "positive-03": "proposed",
                             "negative-01": "no_action", "negative-02": "no_action", "negative-03": "no_action",
-                            "negative-04": "no_action", "adversarial-01": "review", "adversarial-02": "no_action",
-                            "adversarial-03": "r_hit_low_0", "adversarial-04": "no_action"}
-            self.assertEqual(set(jev_outcomes), set(outcomes))
-            scripted_jev = {sample["message"]: jev_outcomes[sample["id"]] for sample in fixture["samples"]}
-            jev_database = Path(temp) / "jev.sqlite"
-            jev_rules, jev_queue = RuleStore(jev_database), DryRunQueue(jev_database)
-            jev_rules.initialize()
-            jev_queue.initialize()
-            jev_rules.save(platform_id="qq", group_id="g", rule_id="r", expected_version=0,
+                            "negative-04": "no_action", "adversarial-01": "failed", "adversarial-02": "no_action",
+                            "adversarial-03": "proposed", "adversarial-04": "no_action"}
+            self.assertEqual(set(second_outcomes), set(outcomes))
+            second_script = {sample["message"]: second_outcomes[sample["id"]] for sample in fixture["samples"]}
+            second_database = Path(temp) / "second.sqlite"
+            second_rules, second_queue = RuleStore(second_database), DryRunQueue(second_database)
+            second_rules.initialize()
+            second_queue.initialize()
+            second_rules.save(platform_id="qq", group_id="g", rule_id="r", expected_version=0,
                            text=fixture["rule"], enabled=True, allowed_actions=["mute"], duration_mode="strict",
                            severity_seconds={"low": 60}, modified_by="admin")
-            jev_admission = DryRunAdmission(jev_queue, jev_rules, policy=policy, capacity=100,
-                                            model="synthetic-jev", session_gate=gate)
+            second_admission = DryRunAdmission(second_queue, second_rules, policy=policy, capacity=100,
+                                               model="synthetic-second", session_gate=gate)
             for sample in fixture["samples"]:
                 message = IncomingMessage("qq", "g", sample["id"], "sender", None, sample["message"],
                                           True, False, sender_is_verified_non_bot=True,
                                           session_origin="qq:GroupMessage:g")
-                self.assertEqual(await jev_admission.submit(message), "queued")
-            async def send(request):
-                self.assertEqual(request["model"], "synthetic-jev")
-                self.assertEqual(request["state"]["rules"][0]["text"], fixture["rule"])
-                choice = scripted_jev[request["state"]["message_untrusted"]]
-                probabilities = {option: 0.8 if option == choice else 0.1
-                                 for option in ("r_hit_low_0", "no_action", "review")}
-                return {"model": "synthetic-jev", "answers": {"decision": {"type": "choice", "choice": choice,
-                    "confidence": 0.8, "probabilities": probabilities}}}
-            jev_worker = DryRunWorker(jev_queue, JevDecider(jev_rules, send, model="synthetic-jev",
-                max_duration_seconds=300, queue=jev_queue), concurrency=1, timeout_seconds=2)
-            self.assertEqual(await jev_worker.drain_group("qq", "g"), len(fixture["samples"]))
-            jev_events = jev_queue.list_events(platform_id="qq", group_id="g", limit=100)
-            comparison = compare_group_audits(labels, events, jev_events)
+                self.assertEqual(await second_admission.submit(message), "queued")
+            async def second_invoke(*, model, message, rules, strategy, language):
+                self.assertEqual(model, "synthetic-second")
+                self.assertEqual(rules[0]["text"], fixture["rule"])
+                outcome = second_script[message]
+                if outcome == "failed":
+                    raise RuntimeError("synthetic failure")
+                if outcome == "no_action":
+                    return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
+                                           tools_call_name=[], tools_call_args=[])
+                return SimpleNamespace(role="tool", is_chunk=False, tools_call_name=["propose_action"],
+                    tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "synthetic rule match"}])
+            second_worker = DryRunWorker(second_queue, LlmDecider(second_rules, second_invoke, model="synthetic-second",
+                max_duration_seconds=300, queue=second_queue), concurrency=1, timeout_seconds=2)
+            self.assertEqual(await second_worker.drain_group("qq", "g"), len(fixture["samples"]))
+            second_events = second_queue.list_events(platform_id="qq", group_id="g", limit=100)
+            comparison = compare_group_audits(labels, events, second_events)
             self.assertEqual((comparison["paired_completed"], comparison["not_paired"],
                               comparison["paired_disagreements"]), (8, 3, 2))
             self.assertEqual((comparison["first_paired"]["true_positive"], comparison["first_paired"]["false_negative"],
                               comparison["first_paired"]["false_positive"]), (2, 1, 1))
             self.assertEqual((comparison["second_paired"]["true_positive"], comparison["second_paired"]["false_negative"],
                               comparison["second_paired"]["false_positive"]), (3, 0, 0))
-            self.assertEqual(comparison["second_coverage"]["status_counts"]["review"], 1)
-            for event in jev_events:
+            self.assertEqual(comparison["second_coverage"]["status_counts"]["failed"], 1)
+            for event in second_events:
                 for sample in fixture["samples"]:
                     self.assertNotIn(sample["message"], event["detail"])
                 if event["status"] == "proposed":
                     detail = json.loads(event["detail"])
                     self.assertEqual(detail["proposal"]["target_sender_id"], "sender")
-                    self.assertIsNone(detail["reason"])
-            with closing(sqlite3.connect(jev_database)) as db:
+                    self.assertEqual(detail["proposal"]["reason"], "synthetic rule match")
+            with closing(sqlite3.connect(second_database)) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue WHERE payload IS NOT NULL").fetchone()[0], 0)

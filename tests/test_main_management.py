@@ -76,7 +76,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 29)
+        self.assertEqual(len(self.context.routes), 28)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -128,33 +128,11 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.plugin.host = None
 
-    async def test_jev_models_authorization_and_secrets(self):
-        self.plugin.config["jev_api_key"] = "saved-secret"
-        self.raw_body = b'{"provider":"openrouter"}'
-        self.request.username = "api_key:synthetic"
-        self.assertEqual((await self.plugin.list_jev_models())["status_code"], 403)
-        self.request.username = "admin"
-        result = await self.plugin.list_jev_models()
-        self.assertEqual(result["data"]["models"], ["typesafe/jev-latest"])
+    async def test_public_settings_do_not_expose_unknown_fields(self):
+        self.plugin.config["unknown_secret"] = "saved-secret"
+        result = await self.plugin.get_settings()
         self.assertNotIn("saved-secret", repr(result))
-        self.raw_body = b'{"provider":"openrouter","api_key":"temporary-secret"}'
-        result = await self.plugin.list_jev_models()
-        self.assertNotIn("temporary-secret", repr(result))
-        self.assertEqual(self.plugin.config["jev_api_key"], "saved-secret")
-        self.raw_body = b'{"provider":"typesafe","api_key":"temporary-secret"}'
-        class Session:
-            async def __aenter__(self): return self
-            async def __aexit__(self, *args): return False
-        fake_aiohttp = types.SimpleNamespace(ClientSession=lambda **kwargs: Session())
-        with patch.dict(sys.modules, {"aiohttp": fake_aiohttp}), patch.object(self.module, "list_jev_models", new_callable=AsyncMock) as discover:
-            discover.side_effect = RuntimeError("temporary-secret")
-            with patch.object(self.module.logger, "error") as logged:
-                result = await self.plugin.list_jev_models()
-            self.assertEqual(result["status_code"], 502)
-            self.assertNotIn("temporary-secret", repr(result))
-            logged.assert_not_called()
-            self.assertEqual(discover.await_args.args, ("typesafe", "temporary-secret"))
-        self.assertEqual(self.plugin.config["jev_api_key"], "saved-secret")
+        self.assertNotIn("unknown_secret", result["data"])
 
     async def test_dashboard_users_allowed_but_api_key_and_anonymous_denied(self):
         self.request.query = {"platform_id": "p", "group_id": "g"}
@@ -717,17 +695,17 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await plugin.terminate()
 
-    async def test_settings_save_restarts_and_keeps_secret(self):
+    async def test_settings_save_restarts_monitoring(self):
         first = types.SimpleNamespace(intake=object(), start=AsyncMock(), close=AsyncMock())
         second = types.SimpleNamespace(intake=object(), start=AsyncMock(), close=AsyncMock())
         with patch.object(self.module, "DryRunHost", side_effect=[first, second]):
-            result = await self.plugin._change_settings({"decision_backend": "jev", "jev_model": "model", "jev_api_key": "secret"})
+            result = await self.plugin._change_settings({"decision_backend": "llm", "llm_provider_id": "model"})
             self.assertEqual(result["monitoring"], "dry_run")
             self.assertNotIn("jev_api_key", result["settings"])
-            await self.plugin._change_settings({"model_concurrency": 3, "jev_api_key": ""})
+            await self.plugin._change_settings({"model_concurrency": 3})
             first.close.assert_awaited_once()
             second.start.assert_awaited_once()
-            self.assertEqual(self.plugin.config["jev_api_key"], "secret")
+            self.assertEqual(self.plugin.config["llm_provider_id"], "model")
             with self.assertRaises(ValueError):
                 await self.plugin._change_settings({"model_concurrency": 0})
             await self.plugin._stop_monitoring()
@@ -740,8 +718,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.module, "DryRunHost", side_effect=[first, second]):
             await self.plugin._change_settings({"decision_backend": "llm", "llm_provider_id": "model"})
             fields = {key: value for key, value in self.plugin.config.items()
-                      if key not in ("group_overrides", "monitoring_groups", "jev_api_key")}
-            result = await self.plugin._change_settings({**fields, "llm_no_action_reason_enabled": False, "jev_api_key": ""})
+                      if key not in ("group_overrides", "monitoring_groups")}
+            result = await self.plugin._change_settings({**fields, "llm_no_action_reason_enabled": False})
             self.assertEqual(result["monitoring"], "dry_run")
             self.assertIs(self.plugin.host, first)
             self.assertIs(self.plugin.intake, first.intake)

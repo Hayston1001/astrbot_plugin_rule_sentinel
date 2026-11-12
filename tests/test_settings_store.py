@@ -207,25 +207,114 @@ class SettingsStoreTests(unittest.TestCase):
                     store.save({**migrated, "llm_no_action_reason_enabled": invalid})
             self.assertFalse(store.load_or_migrate({})["llm_no_action_reason_enabled"])
 
-    def test_jev_provider_and_model_validation_and_migration(self):
-        validate_settings({**DEFAULTS, "decision_backend": "jev", "jev_provider": "typesafe",
-                           "jev_model": "jev-latest", "jev_api_key": "key"})
-        validate_settings({**DEFAULTS, "decision_backend": "jev", "jev_provider": "openrouter",
-                           "jev_model": "typesafe/jev-latest", "jev_api_key": "key"})
-        for changes in ({"jev_provider": "bad"}, {"jev_provider": "openrouter", "jev_model": "jev-latest"},
-                        {"jev_provider": "typesafe", "jev_model": "typesafe/jev-latest"},
-                        {"jev_model": ""}, {"jev_api_key": ""}):
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                validate_settings({**DEFAULTS, "decision_backend": "jev", "jev_model": "jev-latest", "jev_api_key": "key", **changes})
+    def test_retired_model_migration_disables_affected_groups_and_work(self):
+        from sentinel.dry_run_queue import DryRunQueue
+        for mode in ("allowlist", "blocklist"):
+            for global_retired in (False, True):
+                with self.subTest(mode=mode, global_retired=global_retired), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    store = SettingsStore(root / "db.sqlite", root / "backup")
+                    queue = DryRunQueue(store.path)
+                    queue.initialize()
+                    old = store.load_or_migrate({})
+                    old.update(decision_backend="jev" if global_retired else "llm", llm_provider_id="previous-llm",
+                               jev_provider="typesafe", jev_model="old-model", jev_api_key="old-secret",
+                               monitoring_mode=mode, monitoring_groups=["p/old", "p/other"] if mode == "allowlist" else [],
+                               group_overrides={"p/old": {"model": {"backend": "jev", "model": "old-model"},
+                                                            "strategy": "priority"}})
+                    for group in ("old", "other"):
+                        queue.enqueue(platform_id="p", group_id=group, message_id="m", capacity=10,
+                                      payload={"text": "private", "sender_id": "sender"})
+                    queue.claim("p", "old")
+                    with closing(sqlite3.connect(store.path)) as db:
+                        db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(old),))
+                        db.commit()
+                    migrated = store.load_or_migrate({})
+                    validate_settings(migrated)
+                    self.assertEqual(migrated["llm_provider_id"], "" if global_retired else "previous-llm")
+                    self.assertEqual(migrated["group_overrides"], {"p/old": {"strategy": "priority"}})
+                    self.assertEqual("p/old" in migrated["monitoring_groups"], mode == "blocklist")
+                    self.assertTrue(all(key not in migrated for key in ("jev_provider", "jev_model", "jev_api_key")))
+                    with closing(sqlite3.connect(store.path)) as db:
+                        persisted = db.execute("SELECT payload FROM dashboard_settings").fetchone()[0]
+                        states = db.execute("SELECT group_id, state, payload, lease FROM dry_run_queue ORDER BY group_id").fetchall()
+                        events = db.execute("SELECT group_id, status, detail FROM dry_run_events ORDER BY group_id").fetchall()
+                    self.assertNotIn("old-secret", persisted)
+                    self.assertEqual(states[0], ("old", "done", None, None))
+                    self.assertEqual(states[1][1], "done" if global_retired else "pending")
+                    self.assertEqual(events, [("old", "review", "decision_model_removed")]
+                                     + ([("other", "review", "decision_model_removed")] if global_retired else []))
+                    self.assertEqual(store.load_or_migrate({}), migrated)
+
+    def test_retired_model_migration_retires_only_affected_actions_and_rolls_back_on_error(self):
+        from sentinel.dry_run_queue import DryRunQueue
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = SettingsStore(root / "db.sqlite", root / "backup")
-            config = store.load_or_migrate({})
-            config.pop("jev_provider")
+            DryRunQueue(store.path).initialize()
+            old = store.load_or_migrate({})
+            old.update(llm_provider_id="model", monitoring_groups=["p/old", "p/other"],
+                       jev_api_key="secret", group_overrides={"p/old": {"model": {"backend": "jev", "model": "old"}}})
             with closing(sqlite3.connect(store.path)) as db:
-                db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(config),))
+                db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps(old),))
+                for index, group in enumerate(("old", "other"), 1):
+                    db.execute("""INSERT INTO execution_intents (source_event_id, source_attempt_id, platform_id, group_id,
+                        message_id, rule_id, rule_version, action, target_sender_id, mode, status, created_at, updated_at,
+                        plan_id, action_index) VALUES (?, ?, 'p', ?, 'm', 'r', 1, 'mute', 's', 'auto', 'pending_auto', '', '', ?, 0)""",
+                               (index, str(index), group, str(index)))
+                    db.execute("INSERT INTO protected_target_notices (intent_id, status, template, quote, created_at, updated_at) "
+                               "VALUES (?, 'pending', '', 0, '', '')", (index,))
+                db.execute("CREATE TRIGGER reject_retirement BEFORE UPDATE ON execution_intents "
+                           "BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
                 db.commit()
-            self.assertEqual(store.load_or_migrate({})["jev_provider"], "typesafe")
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.load_or_migrate({})
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(json.loads(db.execute("SELECT payload FROM dashboard_settings").fetchone()[0]), old)
+                self.assertEqual(db.execute("SELECT status FROM protected_target_notices ORDER BY intent_id").fetchall(),
+                                 [("pending",), ("pending",)])
+                db.execute("DROP TRIGGER reject_retirement")
+                db.commit()
+            store.load_or_migrate({})
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(db.execute("SELECT status FROM execution_intents ORDER BY id").fetchall(),
+                                 [("inactive",), ("pending_auto",)])
+                self.assertEqual(db.execute("SELECT status FROM protected_target_notices ORDER BY intent_id").fetchall(),
+                                 [("inactive",), ("pending",)])
+
+    def test_unused_retired_fields_are_removed_without_changing_llm_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "db.sqlite", Path(directory) / "backup")
+            old = store.load_or_migrate({})
+            old.update(llm_provider_id="model", jev_model="old", jev_api_key="secret", jev_provider="typesafe")
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps(old),))
+                db.commit()
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated["llm_provider_id"], "model")
+            self.assertNotIn("jev_api_key", migrated)
+
+    def test_retired_model_group_remains_discoverable_and_invalid_data_is_not_discarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "db.sqlite", Path(directory) / "backup")
+            old = store.load_or_migrate({})
+            old.update(llm_provider_id="model", monitoring_groups=["p/g"], jev_api_key="secret",
+                       group_overrides={"p/g": {"model": {"backend": "jev", "model": "old"}}})
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps(old),))
+                db.commit()
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated["group_overrides"], {"p/g": {}})
+            self.assertNotIn("p/g", migrated["monitoring_groups"])
+            validate_settings(migrated)
+            old["group_overrides"]["p/g"]["model"]["unexpected"] = True
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps(old),))
+                db.commit()
+            with self.assertRaises(ValueError):
+                store.load_or_migrate({})
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(json.loads(db.execute("SELECT payload FROM dashboard_settings").fetchone()[0]), old)
     def test_protected_target_settings_validation_and_migration(self):
         valid = {**DEFAULTS, "protected_target_policy": "group_message",
                  "protected_target_template": "{sender_id} {rule_id}", "protected_target_quote": True}
@@ -287,8 +376,9 @@ AstrBotConfig(config_path=str(config_path), schema={})
 from test_plugin.sentinel.settings_store import SettingsStore
 data = config_path.parent.parent / 'plugin_data' / 'astrbot_plugin_rule_sentinel'
 settings = SettingsStore(data / 'settings.sqlite3', data / 'legacy-settings.json').load_or_migrate({})
-assert settings['jev_api_key'] == 'secret'
-assert settings['jev_model'] == 'm'
+assert 'jev_api_key' not in settings
+assert settings['decision_backend'] == 'llm'
+assert settings['llm_provider_id'] == ''
 """
             env = {**os.environ, "ASTRBOT_ROOT": str(root)}
             result = subprocess.run([sys.executable, "-B", "-c", code, str(project), str(config)],
@@ -305,7 +395,8 @@ assert settings['jev_model'] == 'm'
             old.write_text("{}", encoding="utf-8")
             store = SettingsStore(root / "db.sqlite3", root / "data" / "legacy-settings.json")
             settings = store.load_or_migrate({})
-            self.assertEqual(settings["jev_api_key"], "secret")
+            self.assertNotIn("jev_api_key", settings)
+            self.assertEqual(settings["llm_provider_id"], "")
             self.assertNotIn("monitoring_enabled", settings)
             self.assertFalse(settings["action_execution_enabled"])
             self.assertFalse(store.backup_path.exists())

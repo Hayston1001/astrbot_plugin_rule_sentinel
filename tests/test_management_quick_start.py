@@ -190,7 +190,7 @@ class ManagementQuickStartTests(unittest.TestCase):
 
         self.page.set_viewport_size({"width": 390, "height": 500})
         self.open_status()
-        target = self.page.locator("label").filter(has=self.page.locator("#setting-decision_backend"))
+        target = self.page.locator("label").filter(has=self.page.locator("#setting-llm_provider_id"))
         for motion in ("reduce", "no-preference"):
             with self.subTest(motion=motion):
                 self.page.emulate_media(reduced_motion=motion)
@@ -198,9 +198,9 @@ class ManagementQuickStartTests(unittest.TestCase):
                 self.page.locator("#quick-start-model").click()
                 expect(self.page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
                 expect(target).to_have_class(re.compile(r"\bquick-start-target\b"))
-                expect(self.page.locator("#setting-decision_backend + .custom-select-trigger")).to_be_focused()
+                expect(self.page.locator("#setting-llm_provider_id")).to_be_focused()
                 self.page.wait_for_function("""() => {
-                  const rect = document.querySelector('#setting-decision_backend').closest('label').getBoundingClientRect();
+                  const rect = document.querySelector('#setting-llm_provider_id').closest('label').getBoundingClientRect();
                   return scrollY > 0 && rect.top >= 0 && rect.bottom <= innerHeight;
                 }""")
                 expect(target).not_to_have_class(re.compile(r"\bquick-start-target\b"), timeout=6000)
@@ -218,7 +218,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         page.locator("#tab-status").click()
         page.locator("#quick-start-model").click()
         expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
-        expect(page.locator("#setting-decision_backend + .custom-select-trigger")).to_be_focused()
+        expect(page.locator("#setting-llm_provider_id")).to_be_focused()
         page.locator("#setting-llm_provider_id").fill("model-a")
         page.locator("#tab-status").click()
         expect(page.locator("#quick-start-model-state")).to_have_text("未完成")
@@ -271,17 +271,35 @@ class ManagementQuickStartTests(unittest.TestCase):
     def test_completion_is_global_and_model_types_are_checked(self):
         from playwright.sync_api import expect
 
-        for scenario in ("complete", "blocklist", "jev-ready", "scope"):
+        for scenario in ("complete", "blocklist", "scope"):
             with self.subTest(scenario=scenario):
                 self.open_status(scenario)
                 expect(self.page.locator("#quick-start")).to_be_hidden()
-        self.open_status("jev")
+        self.open_status("model-missing")
         expect(self.page.locator("#quick-start")).to_be_visible()
         expect(self.page.locator("#quick-start-model-state")).to_have_text("未完成")
         expect(self.page.locator("#quick-start-progress")).to_have_text("已完成 2 / 3")
         self.open_status("stale-group")
         expect(self.page.locator("#quick-start-group-state")).to_have_text("未完成")
         expect(self.page.locator("#quick-start-rule-state")).to_have_text("未完成")
+
+    def test_legacy_unselected_model_requires_explicit_reselection(self):
+        from playwright.sync_api import expect
+
+        self.open_status("legacy-unselected")
+        expect(self.page.locator("#quick-start-model-state")).to_have_text("未完成")
+        self.page.locator("#quick-start-model").click()
+        field = self.page.locator("#setting-llm_provider_id")
+        expect(field).to_have_value("")
+        self.page.locator("#settings-save").click()
+        self.page.wait_for_function("window.quickStartMock.requests.filter(endpoint => endpoint === 'settings').length >= 2")
+        expect(self.page.locator("#settings-save")).to_be_enabled()
+        self.assertEqual(self.page.evaluate("window.quickStartMock.settings.decision_backend"), "")
+        self.assertEqual(self.page.evaluate("window.quickStartMock.settings.llm_provider_id"), "model-a")
+        field.fill("model-a")
+        self.page.locator("#settings-save").click()
+        self.page.wait_for_function("window.quickStartMock.settings.decision_backend === 'llm'")
+        self.assertEqual(self.page.evaluate("window.quickStartMock.settings.llm_provider_id"), "model-a")
 
     def test_failed_reads_do_not_count_as_completed(self):
         from playwright.sync_api import expect

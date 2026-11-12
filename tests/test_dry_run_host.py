@@ -86,37 +86,16 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             await host.start()
         self.assertFalse(path.exists())
 
-    async def test_bad_jev_configuration_releases_lock(self):
-        class Session:
-            async def close(self):
-                self.closed = True
-        session = Session()
+    async def test_unsupported_backend_is_rejected_before_lock(self):
         path = self.directory / "lock"
-        config = {"decision_backend": "jev", "jev_model": "m"}
+        config = {"decision_backend": "jev", "llm_provider_id": "m"}
         host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue,
-                          lock_path=path, session_factory=lambda: session, session_gate=self.session_gate)
+                          lock_path=path, session_gate=self.session_gate)
         with self.assertRaises(ValueError):
             await host.start()
-        self.assertTrue(session.closed)
         competitor = InstanceLock(path)
         self.assertTrue(competitor.acquire())
         competitor.release()
-
-    async def test_group_jev_override_creates_and_closes_session(self):
-        class Session:
-            closed = False
-            async def close(self):
-                self.closed = True
-        session = Session()
-        config = {**self.config, "jev_api_key": "key", "jev_provider": "typesafe",
-                  "group_overrides": {"p/g": {"model": {"backend": "jev", "model": "jev-latest"}}}}
-        host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue,
-                          lock_path=self.directory / "group-jev.lock", session_factory=lambda: session,
-                          session_gate=self.session_gate)
-        await host.start()
-        self.assertIs(host.session, session)
-        await host.close()
-        self.assertTrue(session.closed)
 
     async def test_cancelled_start_waits_for_lock_thread_and_releases(self):
         entered, proceed = threading.Event(), threading.Event()
@@ -215,23 +194,16 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
                 payload={"text": "private", "sender_id": "user", "session_origin": "p:GroupMessage:g"})
         entered, release = asyncio.Event(), asyncio.Event()
         calls = []
-        class Transport:
-            def __init__(self, *args, **kwargs):
-                pass
-            async def __call__(self, request):
-                calls.append(request)
-                entered.set()
-                await release.wait()
-                return {"model": "m", "answers": {"decision": {"type": "choice", "choice": "no_action",
-                    "confidence": 0.8, "probabilities": {"no_action": 0.8, "review": 0.1, "r_hit_low_0": 0.1}}}}
-        class Session:
-            async def close(self):
-                pass
-        config = {"monitoring_groups": ["p/g"], "decision_backend": "jev",
-                  "jev_model": "m", "jev_api_key": "key"}
+        async def invoke(**kwargs):
+            calls.append(kwargs)
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
+                                   tools_call_name=[], tools_call_args=[])
+        config = {"monitoring_groups": ["p/g"], "decision_backend": "llm", "llm_provider_id": "m"}
         host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue,
-                          lock_path=self.directory / "lock", session_factory=Session, session_gate=self.session_gate)
-        with patch("sentinel.runtime_factory.JevTransport", Transport):
+                          lock_path=self.directory / "lock", session_gate=self.session_gate)
+        with patch("sentinel.runtime_factory.AstrBotLlmInvoker", return_value=invoke):
             await host.start()
             await asyncio.wait_for(entered.wait(), timeout=2)
             stopped = asyncio.Event()

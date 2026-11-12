@@ -28,7 +28,7 @@ class FactoryTests(unittest.TestCase):
         config["queue_capacity_per_group"] = 5
         self.assertFalse(runtime.admission.settings_match())
 
-    def test_jev_requires_session_and_secret(self):
+    def test_retired_backend_is_rejected(self):
         config = {"decision_backend": "jev", "jev_model": "m"}
         with self.assertRaises(ValueError):
             build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)

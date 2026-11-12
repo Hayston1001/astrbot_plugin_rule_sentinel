@@ -33,6 +33,12 @@ class PlanProposalTests(unittest.TestCase):
         self.assertEqual(self.validate({"rule_id": "r", "severity": "low", "reason": "violation"}).reason,
                          "invalid_duration")
 
+    def test_removed_backend_cannot_submit_a_plan(self):
+        result = validate_plan_proposal({"violated": True, "rule_id": "r", "severity": "low"},
+                                        sender_id="sender", rules={"r": self.rule}, max_duration_seconds=300,
+                                        decision_backend="jev")
+        self.assertEqual(result.reason, "invalid_decision_backend")
+
 
 if __name__ == "__main__":
     unittest.main()

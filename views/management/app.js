@@ -474,7 +474,7 @@ async function refreshStatus() {
     start_failed: "监控未启动: 启动失败, 请查看 AstrBot 日志."
   };
   const running = status.monitoring === "dry_run";
-  const backendLabel = ({llm: "普通 LLM", jev: "Jev", none: "未选择"})[status.backend] || status.backend || "未选择";
+  const backendLabel = ({llm: "普通 LLM", none: "未选择"})[status.backend] || status.backend || "未选择";
    el("status").setAttribute("data-tone", running ? "success" : "warning");
    el("status").textContent = running ? "运行中" : "未运行";
    el("status-main").setAttribute("data-tone", running ? "success" : "warning");
@@ -675,7 +675,7 @@ function recordFailureReason(row, detail, decision, actions) {
     invalid_assessment: "模型返回的规则判定无效", invalid_assessment_fields: "模型返回的规则判定不完整",
     invalid_parameters: "模型返回的数据未通过校验", invalid_severity: "模型返回的严重级别无效",
     invalid_duration: "禁言时长无效或超过上限", unknown_rule: "模型选择的规则不存在",
-    unsupported_jev_rule_policy: "当前 Jev 模型不支持此规则的禁言时长模式",
+    decision_model_removed: "原判定模型已移除, 需要人工复核",
     rule_snapshot_changed: "判定期间规则已变化", rule_snapshot_changed_at_commit: "判定期间规则已变化"};
   return Object.hasOwn(reasons, value) ? reasons[value] : value && !/^[a-z0-9_]+$/.test(String(value))
     ? String(value) : "暂无具体原因, 请查看原始记录.";
@@ -720,7 +720,9 @@ function recordReason(row, detail, decision, proposal) {
   const value = String(detail.review_reason || decision.review_reason || decision.validation ||
     (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : ""));
   const nonText = row.status === "skipped" && value === "non_text_or_unknown";
-  return {text: nonText ? "消息包含非文本内容或类型无法识别." : value, fallback: nonText};
+  const removedModel = row.status === "review" && value === "decision_model_removed";
+  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : value,
+    fallback: nonText || removedModel};
 }
 function matchesRecord(row) {
   if (currentFilter !== "all" && decisionBucket(row) !== currentFilter) return false;
@@ -1719,8 +1721,7 @@ function renderQuickStart() {
   const settings = currentSettings;
   const groups = knownGroups.filter((item) => !item.restored_only);
   const hasText = (value) => typeof value === "string" && value.trim().length > 0;
-  const model = !settings ? null : settings.decision_backend === "llm" ? hasText(settings.llm_provider_id)
-    : settings.decision_backend === "jev" ? hasText(settings.jev_model) && settings.jev_api_key_set === true : false;
+  const model = !settings ? null : settings.decision_backend === "llm" && hasText(settings.llm_provider_id);
   const group = !groupsLoaded || !settings || !Array.isArray(settings.monitoring_groups) ? null
     : groups.some((item) => groupMonitoring(item) === true);
   const validCount = (item) => Number.isSafeInteger(item.rule_count) && item.rule_count >= 0;
@@ -2503,16 +2504,16 @@ el("rule-group").addEventListener("change", () => {
   editingScope = JSON.stringify(chosen ? {platform_id: chosen.platform_id, group_id: chosen.group_id} : {platform_id: "", group_id: ""});
   clearPreview();
 });
-const settingKeys = ["action_execution_enabled", "monitoring_mode", "decision_backend", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "llm_no_action_reason_enabled",
+const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "llm_no_action_reason_enabled",
   "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
-  "queue_capacity_per_group", "ingress_capacity", "notification_target", "notification_interval_seconds", "jev_provider", "jev_model"];
+  "queue_capacity_per_group", "ingress_capacity", "notification_target", "notification_interval_seconds"];
 const numericSettings = new Set(["message_retention_days", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds"]);
 const booleanSettings = new Set(["action_execution_enabled", "protected_target_quote", "llm_no_action_reason_enabled"]);
-let backendChoiceChanged = false;
+let modelChoiceEdited = false;
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
   "group-protected-policy", "group-protected-quote", "group-protected-template"];
 function rememberGroupDraft() {
@@ -2540,15 +2541,9 @@ function updateGroupMonitoring() {
 function updateGroupModelFields(animate = false) {
   const backend = el("group-model-backend").value;
   setPanelVisibility(el("group-model-label"), !!backend, {animate});
-  el("group-model-name-help").textContent = backend === "jev"
-    ? "填写 Jev 模型名. 提供方和密钥使用监控设置中的全局配置."
-    : backend === "llm" ? "填写 AstrBot 中已配置的模型提供商标识." : "";
+  el("group-model-name-help").textContent = backend === "llm" ? "填写 AstrBot 中已配置的模型提供商标识." : "";
   el("group-model-options").textContent = "";
   if (backend === "llm") for (const provider of availableProviders) addOption(el("group-model-options"), provider, provider);
-  if (backend === "jev") {
-    const model = currentSettings?.jev_provider === "openrouter" ? "typesafe/jev-latest" : "jev-latest";
-    addOption(el("group-model-options"), model, model);
-  }
 }
 function formatNoticeExample(template) {
   if (typeof template !== "string") return null;
@@ -2583,8 +2578,7 @@ function updateGroupSettingsHints(animate = false) {
   if (!settings) return;
   const inheritedPolicy = settings.protected_target_policy === "group_message" ? "发送群提示" : "只记录";
   const inheritedQuote = settings.protected_target_quote === true ? "引用" : "不引用";
-  const model = settings.decision_backend === "llm" ? `普通 LLM / ${settings.llm_provider_id || "未选择模型"}`
-    : settings.decision_backend === "jev" ? `Jev / ${settings.jev_model || "未选择模型"}` : "未选择模型";
+  const model = settings.decision_backend === "llm" ? settings.llm_provider_id || "未选择模型" : "未选择模型";
   const strategy = settings.rule_selection_strategy === "priority" ? "按规则优先级" : settings.rule_selection_strategy === "model" ? "模型选择" : "不可用";
   const groupExecution = settings.default_execution_mode === "record" ? "只记录" : settings.default_execution_mode === "execute" ? "允许执行" : "不可用";
   el("group-model-inherit").textContent = `全局(${model})`;
@@ -2619,7 +2613,7 @@ function showGroupOverrides() {
   const settings = currentSettings;
   const overrides = currentSettings?.group_overrides?.[`${scope.platform_id}/${scope.group_id}`] || {};
   const draft = groupDrafts.get(groupKey(scope));
-  const model = settings?.decision_backend === "llm" ? settings.llm_provider_id : settings?.decision_backend === "jev" ? settings.jev_model : "";
+  const model = settings?.decision_backend === "llm" ? settings.llm_provider_id : "";
   const strategy = settings?.rule_selection_strategy === "priority" ? "按规则优先级" : "模型选择";
   const execution = settings?.default_execution_mode === "record" ? "只记录" : "允许执行";
   el("group-defaults").textContent = settings ? `全局默认: ${model || "未选择模型"} / ${strategy} / ${execution}` : "全局设置不可用.";
@@ -2726,6 +2720,7 @@ el("group-settings-save").addEventListener("click", async () => {
 function showSettings(settings, submitted = null) {
   const previousActionMode = currentSettings?.default_action_mode;
   currentSettings = settings;
+  if (!submitted) modelChoiceEdited = false;
   settingsLoadFailed = false;
   if (settings.quick_start_completed === true) quickStartCompleted = true;
   else if (quickStartCompleted === null && settings.quick_start_completed === false) quickStartCompleted = false;
@@ -2741,16 +2736,10 @@ function showSettings(settings, submitted = null) {
     if (booleanSettings.has(key)) {
       if (!submitted || field.checked === submitted[key]) field.checked = settings[key] === true;
     } else if (!submitted || field.value === String(submitted[key] ?? "")) {
-      field.value = key === "decision_backend" && settings[key] === "" ? "llm" : String(settings[key] ?? "");
+      field.value = key === "llm_provider_id" && settings.decision_backend === "" ? "" : String(settings[key] ?? "");
     }
   }
-  if (!submitted || el("setting-jev_api_key").value === submitted.jev_api_key) el("setting-jev_api_key").value = "";
-  el("setting-jev_api_key").placeholder = settings.jev_api_key_set ? "留空保持现有密钥" : "填写 Jev API Key";
-  el("jev-api-key-help").textContent = settings.jev_api_key_set
-    ? "已配置密钥, 所有使用 Jev 的群共用. 留空可保持现有密钥."
-    : "尚未配置密钥. 使用 Jev 的群共用此密钥.";
   renderNoticeExample("setting-template-preview", el("setting-protected_target_template").value);
-  if (settings.decision_backend === "jev") setDetailsOpen(el("jev-settings"), true);
   updateGroupMonitoring();
   showGroupOverrides();
   renderGroupList();
@@ -2759,10 +2748,7 @@ function showSettings(settings, submitted = null) {
 el("setting-protected_target_template").addEventListener("input", () => {
   renderNoticeExample("setting-template-preview", el("setting-protected_target_template").value);
 });
-el("setting-decision_backend").addEventListener("change", () => {
-  backendChoiceChanged = true;
-  if (el("setting-decision_backend").value === "jev") setDetailsOpen(el("jev-settings"), true, true);
-});
+el("setting-llm_provider_id").addEventListener("input", () => { modelChoiceEdited = true; });
 async function loadSettings() {
   try { showSettings(await bridge.apiGet("settings")); }
   catch (error) { settingsLoadFailed = true; renderQuickStart(); showError(el("settings-status"), error); }
@@ -2774,29 +2760,6 @@ async function loadSettings() {
     updateGroupModelFields();
   } catch { /* The model input remains available without a provider list. */ }
 }
-el("setting-jev_provider").addEventListener("change", () => {
-  el("jev-model-options").textContent = "";
-  el("jev-models-status").textContent = "";
-});
-el("jev-models-fetch").addEventListener("click", async () => {
-  const button = el("jev-models-fetch");
-  const provider = el("setting-jev_provider").value;
-  const key = el("setting-jev_api_key").value;
-  const model = el("setting-jev_model").value;
-  button.disabled = true;
-  el("jev-models-status").textContent = "";
-  try {
-    const result = await bridge.apiPost("jev/models", {provider, api_key: key});
-    const expected = provider === "openrouter" ? "typesafe/jev-latest" : "jev-latest";
-    if (!Array.isArray(result.models) || result.models.length !== 1 || result.models[0] !== expected) throw new Error();
-    if (provider !== el("setting-jev_provider").value || key !== el("setting-jev_api_key").value) return;
-    el("jev-model-options").textContent = "";
-    addOption(el("jev-model-options"), expected, expected);
-    if (el("setting-jev_model").value === model) el("setting-jev_model").value = expected;
-    showFeedback("模型列表已更新.");
-  } catch { showFeedback("获取模型列表失败.", "error"); }
-  finally { button.disabled = false; }
-});
 el("settings-save").addEventListener("click", async () => {
   el("settings-save").disabled = true;
   try {
@@ -2817,7 +2780,6 @@ el("settings-save").addEventListener("click", async () => {
         if (!Number.isSafeInteger(data[key])) invalid("数值必须为整数");
       } else data[key] = field.value;
     }
-    data.jev_api_key = el("setting-jev_api_key").value;
     const template = data.protected_target_template;
     if (formatNoticeExample(template) === null || (data.protected_target_policy === "group_message" && !template.trim())) {
       el("setting-protected_target_template").focus?.();
@@ -2835,15 +2797,15 @@ el("settings-save").addEventListener("click", async () => {
       const item = knownGroups.find((entry) => `${entry.platform_id}/${entry.group_id}` === key);
       throw new Error(`${item ? groupName(item) : "某个群"} 的单独提示内容为空, 请在群管理中填写或调整处理方式`);
     }
-    const requestData = {...data};
-    if (currentSettings?.decision_backend === "" && data.decision_backend === "llm" && !backendChoiceChanged
-        && data.llm_provider_id === currentSettings.llm_provider_id) requestData.decision_backend = "";
+    const preserveUnselectedModel = currentSettings?.decision_backend === "" && !modelChoiceEdited;
+    const requestData = {...data, decision_backend: preserveUnselectedModel ? "" : "llm"};
+    if (preserveUnselectedModel) requestData.llm_provider_id = currentSettings.llm_provider_id;
     const result = await postSettings("settings", requestData);
     const changedSinceSubmit = settingKeys.some((key) => booleanSettings.has(key)
       ? el(`setting-${key}`).checked !== data[key]
-      : el(`setting-${key}`).value !== String(data[key] ?? "")) || el("setting-jev_api_key").value !== data.jev_api_key;
+      : el(`setting-${key}`).value !== String(data[key] ?? ""));
     showSettings(result.settings, data);
-    if (el("setting-decision_backend").value === data.decision_backend) backendChoiceChanged = false;
+    if (el("setting-llm_provider_id").value === data.llm_provider_id) modelChoiceEdited = false;
     const message = result.start_error === "model_not_configured"
       ? `${changedSinceSubmit ? "设置已保存, 新修改尚未保存." : "设置已保存."} 请选择默认判定模型.`
       : result.start_error ? "设置已保存, 但监控启动失败; 请查看状态页."
@@ -2890,7 +2852,7 @@ function focusQuickStartTarget(target, {highlight = false} = {}) {
 el("quick-start-model").addEventListener("click", () => {
   selectTab("settings");
   const showTarget = () => {
-    if (activeTab === "settings") focusQuickStartTarget(el("setting-decision_backend"), {highlight: true});
+    if (activeTab === "settings") focusQuickStartTarget(el("setting-llm_provider_id"), {highlight: true});
   };
   if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(showTarget);
   else setTimeout(showTarget, 0);

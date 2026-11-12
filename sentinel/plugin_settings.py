@@ -1,7 +1,6 @@
 """Fail-closed parsing of administrator-provided monitoring settings."""
 
 from dataclasses import dataclass
-import re
 
 from .monitoring_policy import MonitoringPolicy
 from .dry_run_queue import SYSTEM_PLATFORM
@@ -64,21 +63,15 @@ def read_settings(config, *, require_model=True) -> Settings:
         raise ValueError("numeric limits must be positive integers")
     if duration > 2592000:
         raise ValueError("duration exceeds QQ official limit")
-    if backend not in ("", "llm", "jev"):
+    if backend not in ("", "llm"):
         raise ValueError("invalid decision backend")
     if strategy not in ("model", "priority"):
         raise ValueError("invalid rule selection strategy")
     if type(no_action_reason) is not bool:
         raise ValueError("invalid no-action reason setting")
-    model = config.get("llm_provider_id", "") if backend == "llm" else config.get("jev_model", "") if backend == "jev" else ""
-    provider = config.get("jev_provider", "typesafe")
-    if not isinstance(provider, str) or provider not in ("typesafe", "openrouter"):
-        raise ValueError("invalid Jev provider")
+    model = config.get("llm_provider_id", "") if backend == "llm" else ""
     if not isinstance(model, str) or (require_model and (not backend or not model.strip())):
         raise ValueError("explicit decision model is required")
-    if backend == "jev" and model and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}" if provider == "typesafe"
-                                                       else r"typesafe/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model):
-        raise ValueError("invalid Jev model")
     return Settings(MonitoringPolicy(mode, frozenset(groups)), capacity, backend,
                     model, duration, concurrency, timeout, global_rate, group_rate, failure_threshold, cooldown, ingress_capacity, strategy,
                     no_action_reason)

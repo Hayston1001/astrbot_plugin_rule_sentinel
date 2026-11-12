@@ -6,7 +6,6 @@ const settings = {
   default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30,
   llm_reason_language: "", llm_no_action_reason_enabled: true, group_overrides: {},
   protected_target_policy: "exempt", protected_target_template: "hello {rule_id}", protected_target_quote: false,
-  jev_provider: "typesafe", jev_model: "", jev_api_key_set: false,
   quick_start_completed: sessionStorage.getItem(`fixture-${scenario}`) === "true", max_duration_seconds: 2592000,
   model_concurrency: 20, model_timeout_seconds: 35, global_rate_per_minute: 100,
   group_rate_per_minute: 60, model_failure_threshold: 5, model_cooldown_seconds: 120,
@@ -21,7 +20,7 @@ const initialUiState = scenario === "scope" ? {platform_id: "p", group_id: "othe
   : ["state-delay", "bridge-delay", "state-held", "status-held"].includes(scenario)
     ? {platform_id: "", group_id: "", active_tab: "records"} : null;
 let uiState = JSON.parse(sessionStorage.getItem(uiStateKey) || "null") || initialUiState;
-if (["complete", "blocklist", "jev", "jev-ready", "scope", "groups-error", "settings-error", "state-error", "save-error"].includes(scenario)) {
+if (["complete", "blocklist", "model-missing", "scope", "groups-error", "settings-error", "state-error", "save-error"].includes(scenario)) {
   groups.push({...testGroup, rule_count: 1});
   rules.push({rule_id: "first-rule", version: 1, enabled: true, text: "test", priority: 0, actions: []});
   settings.llm_provider_id = "model-a";
@@ -29,6 +28,7 @@ if (["complete", "blocklist", "jev", "jev-ready", "scope", "groups-error", "sett
 }
 if (scenario === "blocklist") { settings.monitoring_mode = "blocklist"; settings.monitoring_groups = []; }
 if (scenario === "model-ready") settings.llm_provider_id = "model-a";
+if (scenario === "legacy-unselected") { settings.decision_backend = ""; settings.llm_provider_id = "model-a"; }
 if (scenario === "save-stability") {
   groups.push({...testGroup, rule_count: 1});
   groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 1});
@@ -44,9 +44,7 @@ if (scenario === "save-stability") {
 if (scenario === "stale-group") { settings.monitoring_mode = "blocklist"; settings.llm_provider_id = "model-a"; }
 if (scenario === "scope") groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 0});
 if (scenario === "state-error") settings.quick_start_completed = null;
-if (["jev", "jev-ready"].includes(scenario)) {
-  settings.decision_backend = "jev"; settings.jev_model = "jev-latest"; settings.jev_api_key_set = scenario === "jev-ready";
-}
+if (scenario === "model-missing") settings.llm_provider_id = "";
 window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: []};
 window.quickStartMock.holdNextRuleRead = () => {
   let release;
@@ -111,7 +109,7 @@ window.AstrBotPluginView = {
       return saved;
     }
     const data = {
-      status: {monitoring: settings.llm_provider_id || settings.jev_model ? "dry_run" : "disabled", backend: settings.decision_backend},
+      status: {monitoring: settings.decision_backend === "llm" && settings.llm_provider_id ? "dry_run" : "disabled", backend: settings.decision_backend},
       settings, providers: [{id: "model-a"}], "ui-state": uiState,
       platforms: [{id: "p", type: "qq_official"}], groups, rules, messages: [],
       "available-groups": {groups: [{platform_id: "p", group_id: "g", name: "测试群"}], history_available: true},
@@ -132,8 +130,6 @@ window.AstrBotPluginView = {
     }
     if (endpoint === "settings") {
       Object.assign(settings, body);
-      if (body.jev_api_key) settings.jev_api_key_set = true;
-      delete settings.jev_api_key;
       return {settings: structuredClone(settings)};
     }
     if (endpoint === "quick-start/complete") {

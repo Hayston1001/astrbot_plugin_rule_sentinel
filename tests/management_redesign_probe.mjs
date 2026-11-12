@@ -26,7 +26,6 @@ globalThis.setTimeout = (callback) => { timer = callback; return 1; };
 globalThis.clearTimeout = () => { timer = null; };
 const requests = [];
 let noRecords = false;
-let modelFetchFails = false;
 let statusResult = {monitoring: "dry_run", backend: "llm"};
 let statusFails = false;
 const firstPage = Array.from({length: 50}, (_, index) => ({id: 100 - index, message_id: `m${index}`,
@@ -111,7 +110,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       decision_backend: "", rule_selection_strategy: "model", llm_provider_id: "old-provider", max_duration_seconds: 30,
       model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60, group_rate_per_minute: 30,
       model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
-      ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0, jev_model: "", jev_provider: "typesafe", jev_api_key_set: true,
+      ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
       default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "", llm_no_action_reason_enabled: true,
       protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true};
     if (endpoint === "providers") return [{id: "example"}];
@@ -128,11 +127,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
   },
   async apiPost(endpoint, body) {
     requests.push({endpoint, body});
-    if (endpoint === "jev/models") {
-      if (modelFetchFails) throw new Error("private provider message");
-      return {models: [body.provider === "openrouter" ? "typesafe/jev-latest" : "jev-latest"]};
-    }
-    return {settings: {...body, monitoring_groups: [], jev_api_key_set: true}};
+    return {settings: {...body, monitoring_groups: []}};
   },
 }};
 const source = await readFile(process.argv[2], "utf8");
@@ -140,7 +135,8 @@ const html = await readFile(process.argv[2].replace(/app\.js$/, "index.html"), "
 const headings = [...html.match(/<thead><tr>(.*?)<\/tr><\/thead>/s)[1].matchAll(/<th[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
 assert.deepEqual(headings, ["时间", "结果", "理由摘要", "规则 ID / 版本", "模型延迟"]);
 const options = (id) => [...html.match(new RegExp(`<select id="${id}">(.*?)</select>`, "s"))[1].matchAll(/<option[^>]*>(.*?)<\/option>/g)].map((match) => match[1]);
-assert.deepEqual(options("setting-decision_backend"), ["普通 LLM", "Jev"]);
+assert.ok(!html.includes('id="setting-decision_backend"'));
+assert.ok(!html.toLowerCase().includes("jev"));
 assert.deepEqual(options("records-decision-filter"), ["全部", "拟执行", "全部成功", "部分失败", "已撤回", "全部无法执行", "无法撤回", "已超时不可撤回", "全部失败", "撤回失败", "结果不明", "待确认", "未违反规则", "跳过", "其他"]);
 assert.deepEqual(options("records-execution-filter"), ["全部", "全部成功", "部分失败", "已撤回", "无法执行", "无法撤回", "已超时不可撤回", "执行失败", "撤回失败", "结果不明", "待确认", "无执行"]);
 assert.ok(!html.includes('class="chip'));
@@ -155,10 +151,9 @@ assert.equal(elements.status.textContent, "运行中");
 for (const [value, label, tone] of [
   [{monitoring: "dry_run", backend: "llm", action_execution_available: true}, "运行中", "success"],
   [{monitoring: "dry_run", backend: "llm", action_execution_available: false}, "运行中", "success"],
-  [{monitoring: "dry_run", backend: "jev", action_execution_available: false}, "运行中", "success"],
   [{monitoring: "disabled", backend: "llm"}, "未运行", "warning"],
   [{monitoring: "invalid_configuration", backend: "llm", start_error: "invalid_configuration"}, "未运行", "warning"],
-  [{monitoring: "disabled", backend: "jev", start_error: "start_failed"}, "未运行", "warning"],
+  [{monitoring: "disabled", backend: "llm", start_error: "start_failed"}, "未运行", "warning"],
 ]) {
   statusResult = value;
   await refreshStatusForTest();
@@ -400,58 +395,25 @@ for (const [sort, first] of [["time_asc", "m49"], ["time_desc", "m0"], ["latency
 elements["records-sort"].value = "time_desc";
 await elements["records-sort"].trigger("change");
 await elements["tab-settings"].trigger("click");
-assert.equal(elements["setting-jev_api_key"].value, "");
-assert.match(elements["jev-api-key-help"].textContent, /已配置密钥/);
 assert.equal(elements["setting-model_concurrency"].value, "2");
 assert.equal(elements["setting-protected_target_policy"].value, "group_message");
 assert.equal(elements["setting-protected_target_template"].value, "hello {sender_id}");
 assert.equal(elements["setting-protected_target_quote"].checked, true);
 assert.equal(elements["setting-llm_no_action_reason_enabled"].checked, true);
-assert.equal(elements["setting-jev_provider"].value, "typesafe");
-assert.equal(elements["setting-decision_backend"].value, "llm");
+assert.equal(elements["setting-llm_provider_id"].value, "");
 await elements["settings-save"].trigger("click");
 assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.decision_backend, "");
-assert.equal(elements["setting-decision_backend"].value, "llm");
-elements["setting-llm_provider_id"].value = "new-provider";
+assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.llm_provider_id, "old-provider");
+elements["setting-llm_provider_id"].value = "old-provider";
+await elements["setting-llm_provider_id"].trigger("input");
 await elements["settings-save"].trigger("click");
 assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.decision_backend, "llm");
-elements["setting-decision_backend"].value = "jev";
-await elements["setting-decision_backend"].trigger("change");
-assert.equal(elements["jev-settings"].open, true);
-elements["setting-jev_api_key"].value = "temporary-key";
-await elements["jev-models-fetch"].trigger("click");
-assert.deepEqual(requests.at(-1), {endpoint: "jev/models", body: {provider: "typesafe", api_key: "temporary-key"}});
-assert.equal(elements["setting-jev_model"].value, "jev-latest");
-assert.deepEqual(elements["jev-model-options"].children.map((item) => item.value), ["jev-latest"]);
-elements["setting-jev_provider"].value = "openrouter";
-await elements["setting-jev_provider"].trigger("change");
-assert.equal(elements["setting-jev_model"].value, "jev-latest");
-assert.deepEqual(elements["jev-model-options"].children, []);
-await elements["jev-models-fetch"].trigger("click");
-assert.equal(elements["setting-jev_model"].value, "typesafe/jev-latest");
-assert.deepEqual(elements["jev-model-options"].children.map((item) => item.value), ["typesafe/jev-latest"]);
-elements["setting-jev_model"].value = "manual-model";
-modelFetchFails = true;
-await elements["jev-models-fetch"].trigger("click");
-assert.equal(elements["setting-jev_model"].value, "manual-model");
-assert.equal(latestFeedback().children[0].textContent, "获取模型列表失败.");
-assert.equal(latestFeedback().attributes["data-tone"], "error");
-const dismissedFeedback = latestFeedback();
-await dismissedFeedback.children[1].trigger("click");
-assert.ok(dismissedFeedback.classList.contains("is-leaving"));
-assert.ok(elements["feedback-region"].children.includes(dismissedFeedback));
-timer();
-assert.ok(!elements["feedback-region"].children.includes(dismissedFeedback));
-assert.deepEqual(elements["jev-model-options"].children.map((item) => item.value), ["typesafe/jev-latest"]);
-elements["setting-jev_provider"].value = "typesafe";
-elements["setting-jev_api_key"].value = "new secret";
+assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.llm_provider_id, "old-provider");
 elements["setting-llm_no_action_reason_enabled"].checked = false;
 await elements["settings-save"].trigger("click");
-assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.jev_api_key, "new secret");
 assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.protected_target_quote, true);
 assert.equal(requests.findLast((request) => request.endpoint === "settings" && request.body).body.llm_no_action_reason_enabled, false);
 assert.equal(elements["setting-llm_no_action_reason_enabled"].checked, false);
-assert.equal(elements["setting-jev_api_key"].value, "");
 const timeoutField = elements["setting-model_timeout_seconds"];
 const advancedSection = {open: false};
 timeoutField.closest = (selector) => selector === "details" ? advancedSection : {firstChild: {textContent: "单次判定超时, 秒 "}};

@@ -25,7 +25,6 @@ from .sentinel.management_service import ManagementService
 from .sentinel.plugin_settings import decision_model_unconfigured, read_settings
 from .sentinel.qq_official_snapshot import extract
 from .sentinel.message_entry import is_activated_command, strip_wake_prefix
-from .sentinel.jev_models import list_jev_models
 from .sentinel.rule_store import RuleStore, VersionConflict
 from .sentinel.settings_store import DEFAULTS, SettingsStore, capture_legacy_config, validate_settings
 
@@ -137,7 +136,6 @@ class RuleSentinel(Star):
             ("group-monitoring", self.set_group_monitoring, ["POST"]),
             ("group-settings", self.save_group_settings, ["POST"]),
             ("providers", self.list_providers, ["GET"]),
-            ("jev/models", self.list_jev_models, ["POST"]),
         ):
             context.register_web_api(f"/{PLUGIN_NAME}/{route}", handler, methods, route)
 
@@ -631,9 +629,7 @@ class RuleSentinel(Star):
         return await self._run(self.management.save_ui_state, request.username, data)
 
     def _public_settings(self):
-        result = {key: value for key, value in self.config.items() if key != "jev_api_key"}
-        result["jev_api_key_set"] = bool(self.config.get("jev_api_key", ""))
-        return result
+        return {key: self.config[key] for key in DEFAULTS if key in self.config}
 
     async def get_settings(self):
         if self.management is None:
@@ -659,31 +655,6 @@ class RuleSentinel(Star):
             return error_response("Invalid request", status_code=400)
         async with self._settings_lock:
             return await self._run(self.management.complete_quick_start, request.username, dict(self.config))
-
-    async def list_jev_models(self):
-        if self.management is None:
-            return error_response("Service not initialized", status_code=503)
-        if not self.management.actor_allowed(request.username):
-            return error_response("Not authorized", status_code=403)
-        data = await self._payload()
-        if not isinstance(data, dict) or set(data) - {"provider", "api_key"} or "provider" not in data:
-            return error_response("Invalid request", status_code=400)
-        provider, key = data["provider"], data.get("api_key", "")
-        if not isinstance(key, str):
-            return error_response("Invalid request", status_code=400)
-        key = key or self.config.get("jev_api_key", "")
-        try:
-            if provider == "openrouter":
-                models = await list_jev_models(provider, key)
-            else:
-                import aiohttp
-                async with aiohttp.ClientSession(trust_env=False) as session:
-                    models = await list_jev_models(provider, key, session=session)
-            return json_response({"models": models})
-        except (ValueError, TypeError):
-            return error_response("Invalid request", status_code=400)
-        except Exception:
-            return error_response("Model request failed", status_code=502)
 
     async def _change_settings(self, data, group_change=False, group_settings=False):
         async with self._settings_lock:
@@ -723,10 +694,7 @@ class RuleSentinel(Star):
             else:
                 if not data or set(data) - (set(DEFAULTS) - {"group_overrides"}):
                     raise ValueError("invalid settings")
-                updates = dict(data)
-                if updates.get("jev_api_key") == "":
-                    updates.pop("jev_api_key")
-                candidate.update(updates)
+                candidate.update(data)
             validate_settings(candidate)
             remember_group = f"{data['platform_id']}/{data['group_id']}" if group_change or group_settings else None
             changed = {key for key in candidate if candidate[key] != self.config.get(key)}

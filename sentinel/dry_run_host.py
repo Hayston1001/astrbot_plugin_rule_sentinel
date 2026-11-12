@@ -23,14 +23,12 @@ class DryRunHost:
     are available only when explicitly enabled.
     """
 
-    def __init__(self, *, context, config, rules, queue, lock_path, session_factory=None, session_gate=None,
+    def __init__(self, *, context, config, rules, queue, lock_path, session_gate=None,
                  on_failure=None):
         self.context, self.config, self.rules, self.queue = context, config, rules, queue
         self.lock = InstanceLock(lock_path)
-        self.session_factory = session_factory
         self.session_gate = session_gate
         self.on_failure = on_failure
-        self.session = None
         self.mute_session = None
         self.mute_executor = None
         self._mute_tasks = set()
@@ -107,16 +105,6 @@ class DryRunHost:
                 self.mute_session = aiohttp.ClientSession(trust_env=False)
                 self.mute_executor = MuteExecutor(store, QQMutePlatform(self.mute_session,
                     lambda platform_id: resolve_qq_credentials(self.context, platform_id)))
-            overrides = self.config.get("group_overrides", {})
-            jev_needed = settings.backend == "jev" or (isinstance(overrides, dict) and any(
-                isinstance(item, dict) and isinstance(item.get("model"), dict) and item["model"].get("backend") == "jev"
-                for item in overrides.values()))
-            if jev_needed:
-                if self.session_factory is None:
-                    import aiohttp
-                    self.session = aiohttp.ClientSession()
-                else:
-                    self.session = self.session_factory()
             if interval > 0:
                 self.notifications = build_notification_dispatcher(context=self.context, queue=self.queue,
                     recipient=target, interval_seconds=interval,
@@ -124,7 +112,7 @@ class DryRunHost:
                         and self.config.get("notification_interval_seconds", 0) == interval), on_failure=self._report_failure)
                 self.notifications.start()
             self.runtime = build_runtime(context=self.context, config=self.config, rules=self.rules,
-                                         queue=self.queue, http_session=self.session,
+                                         queue=self.queue,
                                          notify=self.notifications.offer if self.notifications else None,
                                           session_gate=self.session_gate, on_failure=self._report_failure)
             if self.mute_executor is not None:
@@ -212,8 +200,6 @@ class DryRunHost:
                 self._report_failure("notification_audit_failed")
             if self.notifications.dropped:
                 self._report_failure("notification_buffer_full")
-        if self.session is not None:
-            await self.session.close()
         if self.mute_session is not None:
             await self.mute_session.close()
         await run_sync_safely(self.lock.release)

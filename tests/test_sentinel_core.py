@@ -47,21 +47,11 @@ class ProposalValidationTests(unittest.TestCase):
         self.assertEqual(self.validate([{**self.call, "reason": " "}]).reason, "invalid_reason")
         self.assertEqual(self.validate([self.call], limit=True).reason, "invalid_duration_limit")
 
-    def test_jev_proposal_records_no_fabricated_reason(self):
+    def test_reasons_are_required_and_unsupported_backends_are_rejected(self):
         call = {key: value for key, value in self.call.items() if key != "reason"}
-        result = self.validate([call], backend="jev")
-        self.assertEqual(result.status, "proposed")
-        self.assertIsNone(result.proposal.reason)
-        self.assertEqual(result.proposal.decision_backend, "jev")
         self.assertEqual(self.validate([call]).reason, "invalid_reason")
-        self.assertEqual(self.validate([self.call], backend="jev").reason, "unexpected_reason")
         self.assertEqual(self.validate([], backend="unknown").reason, "invalid_decision_backend")
-
-    def test_jev_has_the_same_target_and_duration_safeguards(self):
-        call = {key: value for key, value in self.call.items() if key != "reason"}
-        self.assertEqual(self.validate([{**call, "target_sender_id": "other"}], backend="jev").reason, "invalid_parameters")
-        self.assertEqual(self.validate([call], backend="jev", limit=30).reason, "invalid_duration")
-        self.assertEqual(self.validate([call, call], backend="jev").reason, "multiple_tool_calls")
+        self.assertEqual(self.validate([self.call], backend="jev").reason, "invalid_decision_backend")
 
     def test_actions_must_be_allowed_and_reply_text_is_trusted(self):
         action = {"type": "reply", "mode": "confirm", "template": "{sender_id} / {rule_id}"}
