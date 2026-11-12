@@ -17,6 +17,7 @@ const rules = [];
 const uiStateKey = `fixture-ui-${scenario}`;
 const initialUiState = scenario === "scope" ? {platform_id: "p", group_id: "other"}
   : scenario === "stale-group" ? {platform_id: "p", group_id: "deleted"}
+  : scenario === "save-stability" ? {platform_id: "p", group_id: "g", active_tab: "rules"}
   : ["state-delay", "bridge-delay", "state-held", "status-held"].includes(scenario)
     ? {platform_id: "", group_id: "", active_tab: "records"} : null;
 let uiState = JSON.parse(sessionStorage.getItem(uiStateKey) || "null") || initialUiState;
@@ -28,6 +29,18 @@ if (["complete", "blocklist", "jev", "jev-ready", "scope", "groups-error", "sett
 }
 if (scenario === "blocklist") { settings.monitoring_mode = "blocklist"; settings.monitoring_groups = []; }
 if (scenario === "model-ready") settings.llm_provider_id = "model-a";
+if (scenario === "save-stability") {
+  groups.push({...testGroup, rule_count: 1});
+  groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 1});
+  rules.push({platform_id: "p", group_id: "g", rule_id: "rule-a", version: 1, enabled: true, text: "original rule", priority: 0,
+    actions: [{type: "recall", mode: "auto"},
+      {type: "mute", mode: "auto", duration_mode: "strict", severity_seconds: {low: 60}}]});
+  rules.push({platform_id: "p", group_id: "other", rule_id: "rule-b", version: 1, enabled: true,
+    text: "other group rule", priority: 0, actions: []});
+  settings.llm_provider_id = "model-a";
+  settings.monitoring_groups = ["p/g"];
+  settings.quick_start_completed = true;
+}
 if (scenario === "stale-group") { settings.monitoring_mode = "blocklist"; settings.llm_provider_id = "model-a"; }
 if (scenario === "scope") groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 0});
 if (scenario === "state-error") settings.quick_start_completed = null;
@@ -35,6 +48,20 @@ if (["jev", "jev-ready"].includes(scenario)) {
   settings.decision_backend = "jev"; settings.jev_model = "jev-latest"; settings.jev_api_key_set = scenario === "jev-ready";
 }
 window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: []};
+window.quickStartMock.holdNextRuleRead = () => {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  window.quickStartMock.heldRuleRead = {promise, release, started: false};
+  window.quickStartMock.releaseRuleRead = release;
+  window.quickStartMock.ruleReadStarted = false;
+};
+window.quickStartMock.holdNextRuleConfirm = () => {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  window.quickStartMock.heldRuleConfirm = {promise, release};
+  window.quickStartMock.releaseRuleConfirm = release;
+  window.quickStartMock.ruleConfirmStarted = false;
+};
 let releaseReady = null;
 const ready = scenario === "bridge-delay" ? new Promise((resolve) => { releaseReady = resolve; }) : Promise.resolve();
 window.quickStartMock.releaseReady = () => releaseReady?.();
@@ -46,11 +73,30 @@ const statusReady = scenario === "status-held" ? new Promise((resolve) => { rele
 window.quickStartMock.releaseStatus = () => releaseStatus?.();
 window.AstrBotPluginView = {
   async ready() { await ready; },
-  async apiGet(endpoint) {
+  async apiGet(endpoint, params) {
     window.quickStartMock.requests.push(endpoint);
     if (endpoint === "settings" && scenario === "settings-error") throw new Error("unavailable");
     if (endpoint === "groups" && scenario === "groups-error") throw new Error("unavailable");
     if (endpoint === "ui-state" && scenario === "ui-state-error") throw new Error("unavailable");
+    if (endpoint === "rules" && window.quickStartMock.heldRuleRead) {
+      const held = window.quickStartMock.heldRuleRead;
+      held.started = true;
+      window.quickStartMock.ruleReadStarted = true;
+      window.quickStartMock.heldRuleRead = null;
+      await held.promise;
+    }
+    if (endpoint === "rules" && window.quickStartMock.failNextRuleRead) {
+      window.quickStartMock.failNextRuleRead = false;
+      throw new Error("rule read unavailable");
+    }
+    if (endpoint === "rules" && scenario === "save-stability") {
+      const result = rules.filter((rule) => rule.platform_id === params.platform_id && rule.group_id === params.group_id);
+      if (window.quickStartMock.malformedNextRuleRead) {
+        window.quickStartMock.malformedNextRuleRead = false;
+        result.push(null);
+      }
+      return structuredClone(result);
+    }
     if (endpoint === "status") await statusReady;
     if (endpoint === "ui-state" && scenario === "state-held") {
       const saved = structuredClone(uiState);
@@ -101,8 +147,37 @@ window.AstrBotPluginView = {
       settings.monitoring_groups = body.enabled ? ["p/g"] : [];
       return {settings: structuredClone(settings)};
     }
+    if (endpoint === "group-settings") {
+      const key = `${body.platform_id}/${body.group_id}`;
+      if (Object.keys(body.overrides).length) settings.group_overrides[key] = body.overrides;
+      else delete settings.group_overrides[key];
+      return {settings: structuredClone(settings)};
+    }
+    if (endpoint === "group-alias") {
+      const item = groups.find((entry) => entry.platform_id === body.platform_id && entry.group_id === body.group_id);
+      if (item) item.alias = body.name;
+      return {...body, alias: body.name, platform_name: ""};
+    }
     if (endpoint === "rules/preview") return {fields: body};
     if (endpoint === "rules/confirm") {
+      if (scenario === "save-stability") {
+        if (window.quickStartMock.heldRuleConfirm) {
+          const held = window.quickStartMock.heldRuleConfirm;
+          window.quickStartMock.heldRuleConfirm = null;
+          window.quickStartMock.ruleConfirmStarted = true;
+          await held.promise;
+        }
+        if (window.quickStartMock.failNextRuleConfirm) {
+          window.quickStartMock.failNextRuleConfirm = false;
+          throw new Error("version conflict");
+        }
+        const rule = rules.find((entry) => entry.platform_id === body.fields.platform_id &&
+          entry.group_id === body.fields.group_id && entry.rule_id === body.fields.rule_id);
+        if ((rule?.version || 0) !== body.fields.expected_version) throw new Error("version conflict");
+        if (rule) Object.assign(rule, body.fields, {version: body.fields.expected_version + 1});
+        else rules.push({...body.fields, version: 1});
+        return {version: body.fields.expected_version + 1};
+      }
       rules.push({...body.fields, version: 1});
       groups[0].rule_count = rules.length;
       return {version: 1};

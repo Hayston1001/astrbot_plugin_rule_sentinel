@@ -712,6 +712,7 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
   .feedback-countdown { display: none; }
   .is-loading::before { border-right-color: currentColor; opacity: .55; }
   .action-drop-placeholder { animation: none; }
+  #action-list .form-panel { animation: none; }
   #action-list .form-panel:not(.is-dragging), #action-list .form-panel.is-dragging, #action-list .action-drop-placeholder { transition: none; }
 }
 

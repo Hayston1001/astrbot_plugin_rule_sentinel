@@ -1581,7 +1581,9 @@ el("preview").addEventListener("click", async () => {
     if (revision !== saveRevision) return;
     pending = received;
     const saved = await bridge.apiPost("rules/confirm", received);
-    if (revision === saveRevision) {
+    const changedDuringConfirm = revision !== saveRevision;
+    const sameDraft = () => editingScope === JSON.stringify(scope) && el("rule").value.trim() === fields.rule_id;
+    if (!changedDuringConfirm || (sameDraft() && Number(el("version").value) === version)) {
       if (Number.isSafeInteger(saved.version)) {
         el("version").value = String(saved.version);
         el("rule").readOnly = true;
@@ -1591,8 +1593,11 @@ el("preview").addEventListener("click", async () => {
       }
       clearPreview();
       const completedRevision = revision;
-      await Promise.all([loadCurrentRules(), refreshGroupCounts()]);
-      if (revision === completedRevision) showFeedback("规则已保存.");
+      const currentScope = allGroups() || JSON.stringify(group()) === JSON.stringify(scope);
+      await Promise.all([currentScope ? loadCurrentRules() : Promise.resolve(), refreshGroupCounts()]);
+      if ((changedDuringConfirm || revision !== completedRevision) && sameDraft()) {
+        showFeedback("规则已保存, 新修改尚未保存.", "warning");
+      } else showFeedback("规则已保存.");
     } else {
       await refreshGroupCounts();
       if (editingScope === JSON.stringify(scope) && el("rule").value.trim() === fields.rule_id) {
@@ -1987,7 +1992,7 @@ function parkRuleEditor() {
   if (parent && parent !== panel) {
     parent.classList?.remove("is-editing");
     const button = parent.querySelector?.(".rule-edit");
-    if (button) { button.setAttribute("aria-expanded", "false"); button.textContent = "编辑"; }
+    if (button) { button.setAttribute("aria-expanded", "false"); button.textContent = "编辑"; button.title = ""; }
     panel.insertBefore(form, el("current-rules"));
   }
   updateNewRuleButton();
@@ -1998,7 +2003,8 @@ function attachRuleEditor(card, button) {
   expandedRuleCard = card;
   card.classList?.add("is-editing");
   button.setAttribute("aria-expanded", "true");
-  button.textContent = "取消";
+  button.textContent = "收起";
+  button.title = "收起并放弃未保存的修改";
   if (form.parentNode !== card) card.appendChild(form);
   updateNewRuleButton();
 }
@@ -2013,7 +2019,7 @@ function closeRuleEditor() {
   if (expandedRuleCard === parent) expandedRuleCard = null;
   parent?.classList?.remove("is-editing");
   const button = parent?.querySelector?.(".rule-edit");
-  if (button) { button.setAttribute("aria-expanded", "false"); button.textContent = "编辑"; }
+  if (button) { button.setAttribute("aria-expanded", "false"); button.textContent = "编辑"; button.title = ""; }
   updateNewRuleButton();
   setPanelVisibility(form, false, {onHidden: parkRuleEditor});
   el("save-status").textContent = "";
@@ -2022,9 +2028,8 @@ async function loadCurrentRules() {
   const grouped = allGroups();
   const scopes = grouped ? knownGroups.map((item) => ({platform_id: item.platform_id, group_id: item.group_id})) : [group()];
   const requestRevision = ++rulesRevision;
-  parkRuleEditor();
-  ruleDescriptions.length = 0;
-  el("current-rules").textContent = "正在读取规则...";
+  const container = el("current-rules");
+  if (!container.children.length) container.textContent = "正在读取规则...";
   try {
     const batches = scopes.map((scope) => ({scope, rules: null, error: null}));
     let next = 0;
@@ -2037,12 +2042,26 @@ async function loadCurrentRules() {
     }
     await Promise.all(Array.from({length: Math.min(batches.length, 6)}, worker));
     if (requestRevision !== rulesRevision) return;
-    const container = el("current-rules");
-    container.textContent = "";
-    if (!batches.length) container.textContent = groupsLoadFailed ? "群列表不可用." : "还没有已知群.";
+    const form = el("rule-form");
+    const anchorBefore = !form.hidden && form.getClientRects?.().length ? form.getBoundingClientRect().top : null;
+    const focused = form.contains?.(document.activeElement) ? document.activeElement : null;
+    let selection = null;
+    try {
+      if (Number.isInteger(focused?.selectionStart) && Number.isInteger(focused?.selectionEnd)) {
+        selection = [focused.selectionStart, focused.selectionEnd, focused.selectionDirection];
+      }
+    } catch { /* Some input types do not expose a text selection. */ }
+    if (expandedRuleCard && form.parentNode === expandedRuleCard) {
+      for (const {row} of actionRows) row.style.animation = "none";
+    }
+    parkRuleEditor();
+    ruleDescriptions.length = 0;
+    const nextContainer = document.createElement("div");
+    let editorDestination = null;
+    if (!batches.length) nextContainer.textContent = groupsLoadFailed ? "群列表不可用." : "还没有已知群.";
     for (const batch of batches) {
       const current = batch.scope;
-      let destination = container;
+      let destination = nextContainer;
       if (grouped) {
         const section = document.createElement("section");
         section.className = "rule-group";
@@ -2053,7 +2072,7 @@ async function loadCurrentRules() {
         destination = document.createElement("div");
         destination.className = "rule-group-items";
         section.appendChild(destination);
-        container.appendChild(section);
+        nextContainer.appendChild(section);
       }
       if (batch.error) { showError(destination, batch.error); continue; }
       const rules = batch.rules;
@@ -2186,7 +2205,6 @@ async function loadCurrentRules() {
       content.appendChild(text);
       content.appendChild(currentConfig);
       item.appendChild(content);
-      item.appendChild(edit);
       const historyButton = document.createElement("button");
       historyButton.type = "button";
       historyButton.textContent = "历史版本";
@@ -2240,14 +2258,30 @@ async function loadCurrentRules() {
         }
       });
       item.appendChild(historyButton);
+      item.appendChild(edit);
       item.appendChild(historyPanel);
       destination.appendChild(item);
-      if (!el("rule-form").hidden && editingScope === JSON.stringify(current) && el("rule").readOnly && el("rule").value === rule.rule_id) {
-        attachRuleEditor(item, edit);
+      if (!form.hidden && editingScope === JSON.stringify(current) && el("rule").readOnly && el("rule").value === rule.rule_id) {
+        editorDestination = {item, edit};
       }
       }
     }
-  } catch (error) { if (requestRevision === rulesRevision) showError(el("current-rules"), error); }
+    container.textContent = "";
+    if (nextContainer.children.length) {
+      while (nextContainer.children.length) container.appendChild(nextContainer.children[0]);
+    } else container.textContent = nextContainer.textContent;
+    if (editorDestination) attachRuleEditor(editorDestination.item, editorDestination.edit);
+    if (anchorBefore !== null && !form.hidden && form.getClientRects?.().length) {
+      const delta = form.getBoundingClientRect().top - anchorBefore;
+      if (Math.abs(delta) > 1) window.scrollBy?.({top: delta, behavior: "instant"});
+    }
+    if (focused?.isConnected && !focused.disabled && document.activeElement !== focused) {
+      focused.focus?.({preventScroll: true});
+      if (selection) focused.setSelectionRange?.(...selection);
+    }
+  } catch (error) {
+    if (requestRevision === rulesRevision) { parkRuleEditor(); showError(container, error); }
+  }
 }
 function selectCurrentGroup(remember = true) {
   stopActionFollow();

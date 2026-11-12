@@ -13,7 +13,10 @@ const elements = Object.fromEntries(ids.map((id) => [id, {
 const latestFeedback = () => elements["feedback-region"].children[0];
 function makeNode(tag) {
   const classes = new Set();
-  return {tag, children: [], handlers: {}, attributes: {}, hidden: false, textContent: "",
+  let text = "";
+  return {tag, children: [], handlers: {}, attributes: {}, hidden: false,
+    set textContent(value) { text = value; for (const child of this.children) child.parent = null; this.children = []; },
+    get textContent() { return text; },
     style: {setProperty(name, value) { this[name] = value; }, getPropertyValue(name) { return this[name] || ""; }},
     classList: {add(value) { classes.add(value); }, remove(value) { classes.delete(value); }, contains(value) { return classes.has(value); }},
     get parentNode() { return this.parent || null; },
@@ -46,6 +49,7 @@ function makeNode(tag) {
     set innerHTML(value) { throw new Error("untrusted HTML must not be rendered"); },
   };
 }
+elements["current-rules"] = makeNode("div");
 elements["records-body"].children = [];
 elements["records-body"].appendChild = function(child) { child.parent = this; this.children.push(child); };
 elements["records-body"].insertBefore = function(child, anchor) {
