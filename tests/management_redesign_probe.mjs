@@ -115,7 +115,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "", llm_no_action_reason_enabled: true,
       protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true};
     if (endpoint === "providers") return [{id: "example"}];
-    if (endpoint === "ui-state") return {platform_id: "p", group_id: "g"};
+    if (endpoint === "ui-state") return {platform_id: "p", group_id: "g", active_tab: "records"};
     if (endpoint === "platforms") return [{id: "p", type: "qq_official"}];
     if (endpoint === "groups") return [{platform_id: "p", group_id: "g", rule_count: 0}];
     if (endpoint === "rules") return [];
@@ -464,7 +464,7 @@ assert.equal(advancedSection.open, true);
 assert.equal(timeoutField.focused, true);
 assert.match(latestFeedback().children[0].textContent, /单次判定超时, 秒: 数值不能为空/);
 timeoutField.value = "30";
-const count = requests.length;
+const count = requests.filter((request) => !(request.endpoint === "ui-state" && request.body?.active_tab)).length;
 await elements["tab-rules"].trigger("click");
 assert.equal(elements["panel-rules"].hidden, false);
 assert.equal(elements["panel-records"].hidden, true);
@@ -473,7 +473,7 @@ assert.equal(elements["current-rules"].textContent, "该群还没有规则.");
 await elements["tab-status"].trigger("click");
 assert.equal(elements["panel-status"].hidden, false);
 await elements["tab-records"].trigger("click");
-assert.equal(requests.length, count + 1);
+assert.equal(requests.filter((request) => !(request.endpoint === "ui-state" && request.body?.active_tab)).length, count + 1);
 elements["records-decision-filter"].value = "proposed";
 await elements["records-decision-filter"].trigger("change");
 assert.ok(elements["records-body"].children.length > 0);

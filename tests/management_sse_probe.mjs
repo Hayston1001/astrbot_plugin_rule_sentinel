@@ -56,7 +56,7 @@ const parent = {postMessage(message) {
     } else if (message.action === "sse:unsubscribe") {
       post({kind: "response", requestId: message.requestId, ok: true});
     } else if (message.action === "api:get") {
-      const data = {status: {monitoring: "disabled"}, "ui-state": {platform_id: "p", group_id: "g"},
+      const data = {status: {monitoring: "disabled"}, "ui-state": {platform_id: "p", group_id: "g", active_tab: "records"},
         platforms: [], groups: [], rules: [], messages: [row], providers: [],
         settings: {monitoring_groups: [], monitoring_mode: "allowlist"},
         summary: {total_messages: 1, status_counts: {}, recent_24h: {messages: 1, proposed: 0, no_action: 0}}}[message.endpoint];

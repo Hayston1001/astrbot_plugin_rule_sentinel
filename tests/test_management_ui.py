@@ -205,7 +205,7 @@ class ManagementUiTests(unittest.TestCase):
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
-        actions = html.split('<div id="records-actions" class="records-actions">', 1)[1].split('</div>', 1)[0]
+        actions = html.split('<div id="records-actions" class="records-actions" hidden>', 1)[1].split('</div>', 1)[0]
         self.assertIn('id="live-status" class="badge live-status"', actions)
         self.assertIn('id="refresh-group"', actions)
         self.assertIn('.records-actions { display: flex; align-items: center; gap: 10px; }', css)
@@ -265,7 +265,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('.tabs.has-glide button[aria-selected="true"]::after', css)
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn('behavior: "smooth"', script)
-        self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 4)
+        self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 5)
 
     def test_rule_and_group_hover_share_a_strong_animated_outline(self):
         root = Path(__file__).resolve().parents[1]

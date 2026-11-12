@@ -95,7 +95,8 @@ class DryRunQueue:
                     PRIMARY KEY(intent_id, attempt)
                 );
                 CREATE TABLE IF NOT EXISTS dashboard_ui_state (
-                    username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL
+                    username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                    active_tab TEXT NOT NULL DEFAULT 'status'
                 );
                 CREATE TABLE IF NOT EXISTS dashboard_quick_start (
                     id INTEGER PRIMARY KEY CHECK(id = 1)
@@ -120,6 +121,9 @@ class DryRunQueue:
             # SQLite databases created by early development versions lack the
             # attempt column. Serialize the migration across processes.
             db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(dashboard_ui_state)")}
+            if "active_tab" not in columns:
+                db.execute("ALTER TABLE dashboard_ui_state ADD COLUMN active_tab TEXT NOT NULL DEFAULT 'status'")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dry_run_events)")}
             if "attempt_id" not in columns:
                 db.execute("ALTER TABLE dry_run_events ADD COLUMN attempt_id TEXT")
@@ -786,7 +790,7 @@ class DryRunQueue:
     def get_ui_state(self, username: str) -> dict | None:
         db = self._connect()
         try:
-            row = db.execute("SELECT platform_id, group_id FROM dashboard_ui_state WHERE username=?",
+            row = db.execute("SELECT platform_id, group_id, active_tab FROM dashboard_ui_state WHERE username=?",
                              (username,)).fetchone()
             return dict(row) if row else None
         finally:
@@ -815,6 +819,17 @@ class DryRunQueue:
                 (username, platform_id, group_id))
             db.commit()
             return {"platform_id": platform_id, "group_id": group_id}
+        finally:
+            db.close()
+
+    def save_active_tab(self, username: str, active_tab: str) -> dict:
+        db = self._connect()
+        try:
+            db.execute("""INSERT INTO dashboard_ui_state (username, platform_id, group_id, active_tab)
+                VALUES (?, '', '', ?) ON CONFLICT(username) DO UPDATE SET active_tab=excluded.active_tab""",
+                (username, active_tab))
+            db.commit()
+            return {"active_tab": active_tab}
         finally:
             db.close()
 

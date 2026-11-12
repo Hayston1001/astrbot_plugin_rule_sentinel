@@ -142,7 +142,13 @@ let currentExecutionFilter = "all";
 let recordSearch = "";
 let searchTimer = null;
 let recordSort = "time_desc";
-let activeTab = "records";
+const TAB_NAMES = ["status", "records", "rules", "groups", "settings"];
+let activeTab = "status";
+let tabInteracted = false;
+let tabDataReady = false;
+let tabSave = Promise.resolve();
+let tabRevision = 0;
+let actionFollow = null;
 let refreshTimer = null;
 let autoRefreshing = false;
 let resyncPending = false;
@@ -306,10 +312,25 @@ if (typeof window.matchMedia === "function") {
   setDetailsOpen(el("filter-options"), !compactFilters.matches);
   compactFilters.addEventListener("change", (event) => { setDetailsOpen(el("filter-options"), !event.matches); });
 }
-function selectTab(name) {
+function rememberTab(name) {
+  tabInteracted = true;
+  const currentRevision = ++tabRevision;
+  tabSave = tabSave.catch(() => {}).then(async () => {
+    try {
+      await bridge.ready();
+      if (currentRevision !== tabRevision) return;
+      await bridge.apiPost("ui-state", {active_tab: name});
+    } catch {
+      if (currentRevision === tabRevision) showFeedback("无法保存上次打开的页面.", "error");
+    }
+  });
+}
+function selectTab(name, {remember = true, updateData = true} = {}) {
+  if (!TAB_NAMES.includes(name)) return;
   if (name !== "rules") stopActionFollow();
   if (name !== "groups") openGuideGroupAfterAdd = false;
   activeTab = name;
+  if (remember) rememberTab(name);
   const titles = {
     records: ["判定记录", "查看所选群的判定和执行结果."],
     rules: ["群规则", "管理所选群的规则和处理动作."],
@@ -324,13 +345,17 @@ function selectTab(name) {
   el("records-actions").hidden = name !== "records";
   el("new-rule").hidden = name !== "rules";
   el("group-picker").hidden = name === "groups" || name === "settings";
-  for (const tab of ["status", "records", "rules", "groups", "settings"]) {
+  for (const tab of TAB_NAMES) {
     el(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     el(`panel-${tab}`).hidden = tab !== name;
   }
-  if (name === "records") startLive(); else stopLive();
-  if (name === "status") loadAllGroupSummaries();
-  if (name === "groups" && groupsLoaded) refreshGroupCounts();
+  el("tab-loading").hidden = true;
+  el("page-content").hidden = false;
+  if (updateData && tabDataReady) {
+    if (name === "records") startLive(); else stopLive();
+    if (name === "status") loadAllGroupSummaries();
+    if (name === "groups" && groupsLoaded) refreshGroupCounts();
+  }
 }
 el("records-execution-filter").addEventListener("change", () => {
   currentExecutionFilter = el("records-execution-filter").value;
@@ -352,10 +377,10 @@ el("records-sort").addEventListener("change", () => {
   loadedRecords.sort(compareRecords);
   renderRecords(loadedRecords);
 });
-for (const tab of ["status", "records", "rules", "groups", "settings"]) {
+for (const tab of TAB_NAMES) {
   el(`tab-${tab}`).addEventListener("click", () => selectTab(tab));
   el(`tab-${tab}`).addEventListener("keydown", (event) => {
-    const tabs = ["status", "records", "rules", "groups", "settings"];
+    const tabs = TAB_NAMES;
     const index = tabs.indexOf(tab);
     const next = event.key === "ArrowRight" || event.key === "ArrowDown" ? (index + 1) % tabs.length :
       event.key === "ArrowLeft" || event.key === "ArrowUp" ? (index + tabs.length - 1) % tabs.length :
@@ -421,7 +446,23 @@ for (const id of ["rule", "version", "priority", "text", "enabled"]) {
   el(id).addEventListener("input", onChange);
   el(id).addEventListener("change", onChange);
 }
+async function restoreUiState() {
+  try {
+    const saved = await bridge.apiGet("ui-state");
+    if (!stateRevision && saved && typeof saved.platform_id === "string" && typeof saved.group_id === "string") {
+      selectedScope = {platform_id: saved.platform_id, group_id: saved.group_id};
+    }
+    if (!tabInteracted) {
+      const tab = TAB_NAMES.includes(saved?.active_tab) ? saved.active_tab : "status";
+      selectTab(tab, {remember: false, updateData: false});
+    }
+  } catch {
+    if (!tabInteracted) selectTab("status", {remember: false, updateData: false});
+    el("selection-status").textContent = "无法读取上次选择.";
+  }
+}
 await bridge.ready();
+const uiStateRead = restoreUiState();
 async function refreshStatus() {
  try {
   const status = await bridge.apiGet("status");
@@ -450,7 +491,7 @@ async function refreshStatus() {
   renderAllGroupStatus();
   if (currentSettings) updateGroupSettingsHints();
 }
-await refreshStatus();
+const statusRead = refreshStatus();
 el("status-settings").addEventListener("click", () => selectTab("settings"));
 async function showQuery(endpoint, params) {
   const requestRevision = ++outputRevision;
@@ -1096,7 +1137,6 @@ let actionRows = [];
 let actionSequence = 0;
 let actionDrag = null;
 const actionAnimations = new WeakMap();
-let actionFollow = null;
 function prefersReducedMotion() {
   return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -1688,8 +1728,10 @@ function renderQuickStart() {
   ];
   for (const [name, done, unavailable] of steps) {
     const state = el(`quick-start-${name}-state`);
+    const value = done === true ? "done" : done === false ? "pending" : "unknown";
     state.textContent = done === true ? "已完成" : done === false ? "未完成" : unavailable ? "状态不可用" : "读取中";
-    state.setAttribute("data-state", done === true ? "done" : done === false ? "pending" : "unknown");
+    state.setAttribute("data-state", value);
+    state.closest?.("li")?.setAttribute("data-state", value);
   }
   const completed = steps.filter(([, done]) => done === true).length;
   el("quick-start").hidden = false;
@@ -2777,13 +2819,31 @@ el("monitor-group").addEventListener("change", async () => {
   } catch { showFeedback("无法保存群监控设置.", "error"); }
   finally { updateGroupMonitoring(); updateGroupSettingsHints(); }
 });
-function focusQuickStartTarget(target) {
-  target?.scrollIntoView?.({block: "center"});
+let quickStartHighlight = null;
+let quickStartHighlightTimer = null;
+function focusQuickStartTarget(target, {highlight = false} = {}) {
+  const visibleTarget = highlight ? target?.closest?.("label") || target : target;
+  visibleTarget?.scrollIntoView?.(highlight
+    ? {behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center"} : {block: "center"});
   target?.focus?.({preventScroll: true});
+  if (!highlight || !visibleTarget?.classList) return;
+  if (quickStartHighlightTimer !== null) clearTimeout(quickStartHighlightTimer);
+  quickStartHighlight?.classList.remove("quick-start-target");
+  quickStartHighlight = visibleTarget;
+  visibleTarget.classList.add("quick-start-target");
+  quickStartHighlightTimer = setTimeout(() => {
+    visibleTarget.classList.remove("quick-start-target");
+    quickStartHighlight = null;
+    quickStartHighlightTimer = null;
+  }, 3500);
 }
 el("quick-start-model").addEventListener("click", () => {
   selectTab("settings");
-  focusQuickStartTarget(el("setting-decision_backend"));
+  const showTarget = () => {
+    if (activeTab === "settings") focusQuickStartTarget(el("setting-decision_backend"), {highlight: true});
+  };
+  if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(showTarget);
+  else setTimeout(showTarget, 0);
 });
 el("quick-start-group").addEventListener("click", () => {
   selectTab("groups");
@@ -2797,12 +2857,7 @@ el("quick-start-rule").addEventListener("click", () => {
   if (!el("rule-form").hidden) focusQuickStartTarget(el("rule"));
 });
 async function initializeSelection() {
-  try {
-    const saved = await bridge.apiGet("ui-state");
-    if (saved && typeof saved.platform_id === "string" && typeof saved.group_id === "string") {
-      selectedScope = {platform_id: saved.platform_id, group_id: saved.group_id};
-    }
-  } catch { el("selection-status").textContent = "无法读取上次选择."; }
+  await uiStateRead;
   const [platforms, groups] = await Promise.allSettled([bridge.apiGet("platforms"), bridge.apiGet("groups")]);
   if (platforms.status === "fulfilled" && Array.isArray(platforms.value)) knownPlatforms = platforms.value;
   if (groups.status === "fulfilled" && Array.isArray(groups.value)) {
@@ -2828,4 +2883,5 @@ async function initializeSelection() {
   }
   return selectCurrentGroup(false);
 }
-await Promise.all([initializeSelection(), loadSettings()]);
+tabDataReady = true;
+await Promise.all([initializeSelection(), loadSettings(), statusRead]);

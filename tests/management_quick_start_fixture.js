@@ -14,6 +14,12 @@ const settings = {
 };
 const groups = [];
 const rules = [];
+const uiStateKey = `fixture-ui-${scenario}`;
+const initialUiState = scenario === "scope" ? {platform_id: "p", group_id: "other"}
+  : scenario === "stale-group" ? {platform_id: "p", group_id: "deleted"}
+  : ["state-delay", "bridge-delay", "state-held", "status-held"].includes(scenario)
+    ? {platform_id: "", group_id: "", active_tab: "records"} : null;
+let uiState = JSON.parse(sessionStorage.getItem(uiStateKey) || "null") || initialUiState;
 if (["complete", "blocklist", "jev", "jev-ready", "scope", "groups-error", "settings-error", "state-error", "save-error"].includes(scenario)) {
   groups.push({...testGroup, rule_count: 1});
   rules.push({rule_id: "first-rule", version: 1, enabled: true, text: "test", priority: 0, actions: []});
@@ -21,23 +27,46 @@ if (["complete", "blocklist", "jev", "jev-ready", "scope", "groups-error", "sett
   settings.monitoring_groups = ["p/g"];
 }
 if (scenario === "blocklist") { settings.monitoring_mode = "blocklist"; settings.monitoring_groups = []; }
+if (scenario === "model-ready") settings.llm_provider_id = "model-a";
 if (scenario === "stale-group") { settings.monitoring_mode = "blocklist"; settings.llm_provider_id = "model-a"; }
 if (scenario === "scope") groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 0});
 if (scenario === "state-error") settings.quick_start_completed = null;
 if (["jev", "jev-ready"].includes(scenario)) {
   settings.decision_backend = "jev"; settings.jev_model = "jev-latest"; settings.jev_api_key_set = scenario === "jev-ready";
 }
-window.quickStartMock = {settings, groups, rules, requests: []};
+window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: []};
+let releaseReady = null;
+const ready = scenario === "bridge-delay" ? new Promise((resolve) => { releaseReady = resolve; }) : Promise.resolve();
+window.quickStartMock.releaseReady = () => releaseReady?.();
+let releaseState = null;
+const stateReady = scenario === "state-held" ? new Promise((resolve) => { releaseState = resolve; }) : Promise.resolve();
+window.quickStartMock.releaseState = () => releaseState?.();
+let releaseStatus = null;
+const statusReady = scenario === "status-held" ? new Promise((resolve) => { releaseStatus = resolve; }) : Promise.resolve();
+window.quickStartMock.releaseStatus = () => releaseStatus?.();
 window.AstrBotPluginView = {
-  async ready() {},
+  async ready() { await ready; },
   async apiGet(endpoint) {
     window.quickStartMock.requests.push(endpoint);
     if (endpoint === "settings" && scenario === "settings-error") throw new Error("unavailable");
     if (endpoint === "groups" && scenario === "groups-error") throw new Error("unavailable");
+    if (endpoint === "ui-state" && scenario === "ui-state-error") throw new Error("unavailable");
+    if (endpoint === "status") await statusReady;
+    if (endpoint === "ui-state" && scenario === "state-held") {
+      const saved = structuredClone(uiState);
+      await stateReady;
+      window.quickStartMock.uiStateReturned = true;
+      return saved;
+    }
+    if (endpoint === "ui-state" && scenario === "state-delay") {
+      const saved = structuredClone(uiState);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      window.quickStartMock.uiStateReturned = true;
+      return saved;
+    }
     const data = {
       status: {monitoring: settings.llm_provider_id || settings.jev_model ? "dry_run" : "disabled", backend: settings.decision_backend},
-      settings, providers: [{id: "model-a"}], "ui-state": scenario === "scope" ? {platform_id: "p", group_id: "other"}
-        : scenario === "stale-group" ? {platform_id: "p", group_id: "deleted"} : null,
+      settings, providers: [{id: "model-a"}], "ui-state": uiState,
       platforms: [{id: "p", type: "qq_official"}], groups, rules, messages: [],
       "available-groups": {groups: [{platform_id: "p", group_id: "g", name: "测试群"}], history_available: true},
       summary: {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0}},
@@ -46,6 +75,15 @@ window.AstrBotPluginView = {
   },
   async apiPost(endpoint, body) {
     window.quickStartMock.requests.push(endpoint);
+    if (endpoint === "ui-state") {
+      window.quickStartMock.uiStateWrites.push(structuredClone(body));
+      if (scenario === "slow-tab-save" && body.active_tab === "rules") {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      uiState = {platform_id: "", group_id: "", active_tab: "status", ...uiState, ...body};
+      sessionStorage.setItem(uiStateKey, JSON.stringify(uiState));
+      return structuredClone(body);
+    }
     if (endpoint === "settings") {
       Object.assign(settings, body);
       if (body.jev_api_key) settings.jev_api_key_set = true;

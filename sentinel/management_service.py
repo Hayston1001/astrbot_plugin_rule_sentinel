@@ -124,7 +124,14 @@ class ManagementService:
     def save_ui_state(self, actor, fields):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")
-        if not isinstance(fields, dict) or set(fields) != {"platform_id", "group_id"}:
+        if not isinstance(fields, dict):
+            raise ValueError("invalid UI state")
+        if set(fields) == {"active_tab"}:
+            tab = fields["active_tab"]
+            if not isinstance(tab, str) or tab not in {"status", "records", "rules", "groups", "settings"}:
+                raise ValueError("invalid UI state")
+            return self.queue.save_active_tab(actor, tab)
+        if set(fields) != {"platform_id", "group_id"}:
             raise ValueError("invalid UI state")
         if fields != {"platform_id": "", "group_id": ""}:
             for value in fields.values():

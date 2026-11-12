@@ -23,6 +23,28 @@ class QueueTests(unittest.TestCase):
         return self.queue.enqueue(platform_id="p", group_id=group, message_id=message,
                                   payload={"text": "private"}, capacity=capacity)
 
+    def test_ui_state_migrates_existing_groups_and_preserves_independent_choices(self):
+        path = self.path.parent / "legacy.sqlite"
+        with closing(sqlite3.connect(path)) as db:
+            db.execute("CREATE TABLE dashboard_ui_state (username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL)")
+            db.execute("INSERT INTO dashboard_ui_state VALUES ('admin', 'p', 'g')")
+            db.commit()
+        queue = DryRunQueue(path)
+        queue.initialize()
+        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "status"})
+        queue.save_active_tab("admin", "records")
+        queue.save_ui_state("admin", "other", "group")
+        queue.initialize()
+        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "other", "group_id": "group", "active_tab": "records"})
+
+    def test_ui_tab_and_group_writes_do_not_overwrite_each_other(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writes = [pool.submit(self.queue.save_active_tab, "admin", "settings"),
+                      pool.submit(self.queue.save_ui_state, "admin", "p", "g")]
+            for write in writes:
+                write.result(timeout=10)
+        self.assertEqual(self.queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
+
     def test_capacity_dedup_order_and_group_isolation(self):
         self.assertEqual(self.enqueue("1"), "queued")
         self.assertEqual(self.enqueue("1"), "duplicate")

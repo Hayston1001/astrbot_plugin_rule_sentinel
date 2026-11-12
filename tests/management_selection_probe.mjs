@@ -34,7 +34,7 @@ elements["panel-rules"].appendChild(elements["current-rules"]);
 elements["panel-rules"].appendChild(elements["rule-form"]);
 elements["group-detail-home"].appendChild(elements["group-detail-panel"]);
 const requests = [];
-const saved = {platform_id: "p1", group_id: "long-group-12345678"};
+const saved = {platform_id: "p1", group_id: "long-group-12345678", active_tab: "records"};
 let failSave = false;
 let failSummary = false;
 let heldSave = null;
@@ -136,7 +136,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
 const source = await readFile(process.argv[2], "utf8");
 const html = await readFile(process.argv[2].replace(/app\.js$/, "index.html"), "utf8");
 await import("data:text/javascript;base64," + Buffer.from(source + "\nglobalThis.__disclosureTest = {setPanelVisibility, setDetailsOpen, updateVisiblePanel};\n").toString("base64"));
-assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers"].includes(endpoint)), ["status", "ui-state", "platforms", "groups", "rules", "messages", "summary"]);
+assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers"].includes(endpoint)), ["ui-state", "status", "platforms", "groups", "rules", "messages", "summary"]);
 assert.equal(elements["group-select"].value, JSON.stringify(["p1", "long-group-12345678"]));
 assert.equal(elements["group-detail-panel"].parentNode, elements["group-detail-home"]);
 assert.deepEqual(elements["groups-list"].children.map((row) => row.children[3].attributes["aria-expanded"]), ["false", "false", "false"]);
@@ -297,7 +297,7 @@ assert.equal(requests.filter((request) => request.endpoint === "rules/preview").
 assert.match(latestFeedback().children[0].textContent, /返回原群/);
 assert.deepEqual(requests.filter((request) => request.endpoint === "rules" || request.endpoint === "messages").slice(-2).map((request) => [request.endpoint, request.params.group_id]),
   [["rules", "other-group-87654321"], ["messages", "other-group-87654321"]]);
-assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && request.body).at(-1).body,
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
   {platform_id: "p1", group_id: "other-group-87654321"});
 assert.equal(elements["group-select"].children.length, 4);
 assert.equal(elements["group-select"].children[3].value, JSON.stringify(["p2", "separate-group"]));
@@ -305,7 +305,7 @@ elements["group-select"].value = JSON.stringify(["p2", "separate-group"]);
 await elements["group-select"].trigger("change");
 assert.deepEqual(requests.filter((request) => request.endpoint === "rules" || request.endpoint === "messages").slice(-2).map((request) => [request.endpoint, request.params.platform_id, request.params.group_id]),
   [["rules", "p2", "separate-group"], ["messages", "p2", "separate-group"]]);
-assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && request.body).at(-1).body,
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
   {platform_id: "p2", group_id: "separate-group"});
 failSave = true;
 elements["group-select"].value = JSON.stringify(["p2", "separate-group"]);
@@ -747,7 +747,7 @@ await toggleCard.children[1].trigger("click");
 await elements["tab-records"].trigger("click");
 elements["group-select"].value = "";
 await elements["group-select"].trigger("change");
-assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && request.body).at(-1).body,
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
   {platform_id: "", group_id: ""});
 assert.equal(elements["group-select"].children[0].textContent, "所有群");
 assert.equal(elements["records-body"].children.length, 4);

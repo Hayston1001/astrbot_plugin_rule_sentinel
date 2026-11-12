@@ -16,7 +16,7 @@
       </div>
       <nav class="tabs" role="tablist" aria-label="管理页面">
         <button id="tab-status" role="tab" aria-selected="false" aria-controls="panel-status" type="button"><span>运行状态</span></button>
-        <button id="tab-records" role="tab" aria-selected="true" aria-controls="panel-records" type="button"><span>判定记录</span></button>
+        <button id="tab-records" role="tab" aria-selected="false" aria-controls="panel-records" type="button"><span>判定记录</span></button>
         <button id="tab-rules" role="tab" aria-selected="false" aria-controls="panel-rules" type="button"><span>群规则</span></button>
         <button id="tab-groups" role="tab" aria-selected="false" aria-controls="panel-groups" type="button"><span>群管理</span></button>
         <button id="tab-settings" role="tab" aria-selected="false" aria-controls="panel-settings" type="button"><span>监控设置</span></button>
@@ -26,10 +26,11 @@
     </header>
 
     <main class="workspace">
-      <div class="content">
-          <div class="section-heading"><div><h1 id="page-title">判定记录</h1><p id="page-description">查看所选群的判定和执行结果.</p></div><div class="heading-actions"><div id="records-actions" class="records-actions"><span id="live-status" class="badge live-status" data-tone="warning" aria-live="polite">实时 · 重连中</span><button id="refresh-group" class="secondary" type="button">刷新</button></div><button id="new-rule" class="primary" type="button" aria-controls="rule-form" aria-expanded="false" hidden>新建规则</button><label id="group-picker" class="group-picker">管理的群 <select id="group-select"><option value="">所有群</option></select></label></div></div>
+      <p id="tab-loading" class="content notice" role="status">正在读取页面...</p>
+      <div id="page-content" class="content" hidden>
+          <div class="section-heading"><div><h1 id="page-title">运行状态</h1><p id="page-description">查看所有群的监控状态和统计.</p></div><div class="heading-actions"><div id="records-actions" class="records-actions" hidden><span id="live-status" class="badge live-status" data-tone="warning" aria-live="polite">实时 · 重连中</span><button id="refresh-group" class="secondary" type="button">刷新</button></div><button id="new-rule" class="primary" type="button" aria-controls="rule-form" aria-expanded="false" hidden>新建规则</button><label id="group-picker" class="group-picker">管理的群 <select id="group-select"><option value="">所有群</option></select></label></div></div>
         <p id="selection-status" class="notice" aria-live="polite"></p>
-        <section id="panel-records" role="tabpanel" aria-labelledby="tab-records">
+        <section id="panel-records" role="tabpanel" aria-labelledby="tab-records" hidden>
           <p class="summary-caption">判定概况</p>
           <div class="stats-grid" aria-label="判定概况">
             <div class="stat-card"><span>消息数 (24 小时)</span><strong id="stat-messages">-</strong></div>
@@ -134,7 +135,7 @@
           </div>
         </section>
 
-        <section id="panel-status" role="tabpanel" aria-labelledby="tab-status" hidden>
+        <section id="panel-status" role="tabpanel" aria-labelledby="tab-status">
           <section id="quick-start" class="status-panel quick-start" aria-labelledby="quick-start-title" hidden>
             <div class="quick-start-heading"><div><h2 id="quick-start-title">快速引导</h2><p>完成以下设置, 配置群消息监控.</p></div><span id="quick-start-progress" aria-live="polite">正在读取进度...</span></div>
             <ol class="quick-start-steps">

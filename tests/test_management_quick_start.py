@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import sys
 import threading
 import unittest
@@ -75,6 +76,134 @@ class ManagementQuickStartTests(unittest.TestCase):
         self.page.goto(self.url + "?scenario=" + scenario)
         self.page.locator("#tab-status").click()
         self.page.wait_for_function("document.querySelector('#quick-start-progress').textContent !== '正在读取进度...'")
+
+    def test_first_open_uses_status_and_restores_the_last_tab(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=empty")
+        expect(page.locator("#tab-status")).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#panel-status")).to_be_visible()
+        for tab in ("records", "rules", "groups", "settings", "status"):
+            with self.subTest(tab=tab):
+                page.locator(f"#tab-{tab}").click()
+                page.wait_for_function("tab => JSON.parse(sessionStorage.getItem('fixture-ui-empty') || '{}').active_tab === tab", arg=tab)
+                page.reload()
+                expect(page.locator(f"#tab-{tab}")).to_have_attribute("aria-selected", "true")
+                expect(page.locator(f"#panel-{tab}")).to_be_visible()
+        page.evaluate("sessionStorage.setItem('fixture-ui-empty', JSON.stringify({active_tab: 'invalid'}))")
+        page.reload()
+        expect(page.locator("#tab-status")).to_have_attribute("aria-selected", "true")
+
+    def test_late_saved_tab_does_not_override_a_new_choice(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=state-delay", wait_until="domcontentloaded")
+        page.wait_for_function("window.quickStartMock?.requests.includes('ui-state')")
+        page.locator("#tab-settings").click()
+        page.wait_for_function("window.quickStartMock.uiStateReturned")
+        expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
+        page.wait_for_function("JSON.parse(sessionStorage.getItem('fixture-ui-state-delay') || '{}').active_tab === 'settings'")
+
+    def test_saved_tab_is_not_preceded_by_default_content_or_indicator(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=state-held", wait_until="domcontentloaded")
+        page.wait_for_function("window.quickStartMock.requests.includes('ui-state')")
+        expect(page.locator("#tab-loading")).to_be_visible()
+        expect(page.locator("#page-content")).to_be_hidden()
+        self.assertEqual(page.locator('[role="tab"][aria-selected="true"]').count(), 0)
+        page.evaluate("window.quickStartMock.releaseState()")
+        expect(page.locator("#tab-loading")).to_be_hidden()
+        expect(page.locator("#page-content")).to_be_visible()
+        expect(page.locator("#tab-records")).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#panel-records")).to_be_visible()
+        expect(page.locator("#panel-status")).to_be_hidden()
+
+    def test_failed_tab_restore_shows_default_page(self):
+        from playwright.sync_api import expect
+
+        self.page.goto(self.url + "?scenario=ui-state-error")
+        expect(self.page.locator("#page-content")).to_be_visible()
+        expect(self.page.locator("#tab-status")).to_have_attribute("aria-selected", "true")
+        expect(self.page.locator("#selection-status")).to_have_text("无法读取上次选择.")
+
+    def test_saved_tab_does_not_wait_for_unrelated_status_request(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=status-held", wait_until="domcontentloaded")
+        expect(page.locator("#page-content")).to_be_visible()
+        expect(page.locator("#tab-records")).to_have_attribute("aria-selected", "true")
+        page.locator("#tab-settings").click()
+        page.wait_for_function("window.quickStartMock.requests.includes('settings')", timeout=3000)
+        page.evaluate("window.quickStartMock.releaseStatus()")
+
+    def test_tab_choice_before_bridge_is_ready_is_preserved(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=bridge-delay", wait_until="domcontentloaded")
+        page.locator("#tab-settings").click()
+        expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#page-content")).to_be_visible()
+        self.assertEqual(page.evaluate("window.quickStartMock.requests"), [])
+        page.evaluate("window.quickStartMock.releaseReady()")
+        page.wait_for_function("JSON.parse(sessionStorage.getItem('fixture-ui-bridge-delay') || '{}').active_tab === 'settings'")
+        page.wait_for_function("window.quickStartMock.requests.includes('groups')")
+        expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
+
+    def test_rapid_tab_changes_save_the_last_choice(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.goto(self.url + "?scenario=slow-tab-save")
+        page.locator("#tab-rules").click()
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.active_tab === 'rules')")
+        page.locator("#tab-settings").click()
+        page.locator("#tab-records").click()
+        page.wait_for_function("JSON.parse(sessionStorage.getItem('fixture-ui-slow-tab-save') || '{}').active_tab === 'records'")
+        page.reload()
+        expect(page.locator("#tab-records")).to_have_attribute("aria-selected", "true")
+
+    def test_completed_number_is_green_in_both_themes(self):
+        from playwright.sync_api import expect
+
+        for theme in ("light", "dark"):
+            with self.subTest(theme=theme):
+                self.page.emulate_media(color_scheme=theme)
+                self.open_status("model-ready")
+                step = self.page.locator(".quick-start-steps li").first
+                expect(step).to_have_attribute("data-state", "done")
+                expect(self.page.locator(".quick-start-steps li").nth(1)).to_have_attribute("data-state", "pending")
+                colors = step.locator(".quick-start-number").evaluate("""element => {
+                  const style = getComputedStyle(element);
+                  return {ink: style.color.match(/\\d+/g).map(Number), background: style.backgroundColor.match(/\\d+/g).map(Number)};
+                }""")
+                self.assertGreater(colors["ink"][1], colors["ink"][0])
+                self.assertGreater(colors["background"][1], colors["background"][0])
+
+    def test_model_shortcut_scrolls_and_highlights_temporarily(self):
+        from playwright.sync_api import expect
+
+        self.page.set_viewport_size({"width": 390, "height": 500})
+        self.open_status()
+        target = self.page.locator("label").filter(has=self.page.locator("#setting-decision_backend"))
+        for motion in ("reduce", "no-preference"):
+            with self.subTest(motion=motion):
+                self.page.emulate_media(reduced_motion=motion)
+                self.page.locator("#tab-status").click()
+                self.page.locator("#quick-start-model").click()
+                expect(self.page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
+                expect(target).to_have_class(re.compile(r"\bquick-start-target\b"))
+                expect(self.page.locator("#setting-decision_backend + .custom-select-trigger")).to_be_focused()
+                self.page.wait_for_function("""() => {
+                  const rect = document.querySelector('#setting-decision_backend').closest('label').getBoundingClientRect();
+                  return scrollY > 0 && rect.top >= 0 && rect.bottom <= innerHeight;
+                }""")
+                expect(target).not_to_have_class(re.compile(r"\bquick-start-target\b"), timeout=6000)
 
     def test_guided_setup_tracks_saved_changes_and_opens_destinations(self):
         from playwright.sync_api import expect

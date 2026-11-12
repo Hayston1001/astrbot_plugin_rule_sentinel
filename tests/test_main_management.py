@@ -265,11 +265,33 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = json.dumps(second).encode()
         self.assertEqual((await self.plugin.save_ui_state())["data"], second)
         self.request.username = "admin"
-        self.assertEqual((await self.plugin.get_ui_state())["data"], first)
+        self.assertEqual((await self.plugin.get_ui_state())["data"], {**first, "active_tab": "status"})
         other_plugin = self.module.RuleSentinel(self.context, {})
         await other_plugin.initialize()
         try:
-            self.assertEqual((await other_plugin.get_ui_state())["data"], first)
+            self.assertEqual((await other_plugin.get_ui_state())["data"], {**first, "active_tab": "status"})
+        finally:
+            await other_plugin.terminate()
+
+    async def test_ui_tab_and_group_choices_are_independent_and_user_scoped(self):
+        self.raw_body = b'{"active_tab":"settings"}'
+        self.assertEqual((await self.plugin.save_ui_state())["data"], {"active_tab": "settings"})
+        self.assertEqual((await self.plugin.get_ui_state())["data"],
+                         {"platform_id": "", "group_id": "", "active_tab": "settings"})
+        self.raw_body = b'{"platform_id":"p","group_id":"g"}'
+        self.assertEqual((await self.plugin.save_ui_state())["data"], {"platform_id": "p", "group_id": "g"})
+        self.assertEqual((await self.plugin.get_ui_state())["data"],
+                         {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
+        self.request.username = "other"
+        self.assertIsNone((await self.plugin.get_ui_state())["data"])
+        self.raw_body = b'{"active_tab":"rules"}'
+        self.assertEqual((await self.plugin.save_ui_state())["data"], {"active_tab": "rules"})
+        self.request.username = "admin"
+        other_plugin = self.module.RuleSentinel(self.context, {})
+        await other_plugin.initialize()
+        try:
+            self.assertEqual((await other_plugin.get_ui_state())["data"],
+                             {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
         finally:
             await other_plugin.terminate()
 
@@ -458,7 +480,10 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         cases = ({}, {"platform_id": "p"}, {"platform_id": "p", "group_id": "g", "username": "other"},
                   {"platform_id": " ", "group_id": "g"}, {"platform_id": "p", "group_id": None},
                   {"platform_id": "", "group_id": "g"}, {"platform_id": "p", "group_id": ""},
-                  {"platform_id": "p" * 129, "group_id": "g"}, {"platform_id": "p", "group_id": "g" * 129})
+                  {"platform_id": "p" * 129, "group_id": "g"}, {"platform_id": "p", "group_id": "g" * 129},
+                  {"active_tab": ""}, {"active_tab": "unknown"}, {"active_tab": None},
+                  {"active_tab": []}, {"active_tab": "records", "username": "other"},
+                  {"platform_id": "p", "group_id": "g", "active_tab": "status"})
         for body in cases:
             with self.subTest(body=body):
                 self.raw_body = json.dumps(body).encode()
@@ -477,7 +502,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.plugin.save_ui_state())["data"]["group_id"], "g" * 128)
         self.raw_body = b'{"platform_id":"","group_id":""}'
         self.assertEqual((await self.plugin.save_ui_state())["data"], {"platform_id": "", "group_id": ""})
-        self.assertEqual((await self.plugin.get_ui_state())["data"], {"platform_id": "", "group_id": ""})
+        self.assertEqual((await self.plugin.get_ui_state())["data"],
+                         {"platform_id": "", "group_id": "", "active_tab": "status"})
 
     async def test_all_groups_records_keep_scope_pagination_and_exclude_system(self):
         queue = self.plugin.management.queue

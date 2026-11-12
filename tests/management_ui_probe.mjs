@@ -81,7 +81,7 @@ globalThis.window = {innerWidth: 800, innerHeight: 600, scrollY: 0,
     if (endpoint === "status") return {monitoring: "disabled_unverified_event_hook"};
     if (endpoint === "settings") return {quick_start_completed: false, monitoring_groups: [], monitoring_mode: "allowlist", default_action_mode: "auto", llm_no_action_reason_enabled: true};
     if (endpoint === "providers") return [];
-    if (endpoint === "ui-state") return null;
+    if (endpoint === "ui-state") return {platform_id: "", group_id: "", active_tab: "records"};
     if (endpoint === "summary") return {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0}, latency_p95_ms: null};
     if (endpoint === "platforms") return [];
     if (endpoint === "groups") return [{platform_id: "p", group_id: "g"},
