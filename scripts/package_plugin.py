@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
-ROOT_FILES = ("main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE")
+ROOT_FILES = ("main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "logo.png")
 TOOL_FILES = ("scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py")
 VIEW_SUFFIXES = {".html", ".js", ".css", ".json", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico", ".woff", ".woff2"}
 IGNORED_PARTS = {"__pycache__", "tests", "node_modules"}

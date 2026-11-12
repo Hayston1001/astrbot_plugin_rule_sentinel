@@ -44,12 +44,13 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = set(archive.namelist())
             self.assertIsNone(archive.testzip())
-            self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "sentinel/__init__.py",
+            self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "logo.png", "sentinel/__init__.py",
                              "views/management/index.html", "views/management/app.js", "views/management/style.css",
                              "views/management/motion.js", "views/management/select.js",
                              "scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py"} <= names)
             self.assertFalse(any(name.startswith(("tests/", "local-docs/", ".git/", "dist/")) for name in names))
             self.assertEqual(archive.read("README.md"), (package_plugin.ROOT / "README.md").read_bytes())
+            self.assertEqual(archive.read("logo.png"), (package_plugin.ROOT / "logo.png").read_bytes())
             metadata = archive.read("metadata.yaml").decode("utf-8")
             description = next(line for line in metadata.splitlines() if line.startswith("desc: "))
             self.assertIn("群管理", description)
@@ -90,6 +91,21 @@ class PackagingTests(unittest.TestCase):
         with patch.object(package_plugin, "MAX_ARCHIVE_BYTES", 1):
             with self.assertRaises(ValueError):
                 package_plugin.build_archive()
+
+    def test_missing_logo_fails_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for relative in (*package_plugin.ROOT_FILES, *package_plugin.TOOL_FILES,
+                             "sentinel/__init__.py", "views/management/index.html",
+                             "views/management/app.js", "views/management/style.css",
+                             "views/management/motion.js", "views/management/select.js"):
+                if relative == "logo.png":
+                    continue
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "required file is missing: logo.png"):
+                package_plugin.build_archive(root)
 
     def test_cli_creates_archive_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -138,6 +154,7 @@ class PackagingTests(unittest.TestCase):
                 "assert _PluginUpdater.validate_plugin_archive(str(p)) == 'metadata.yaml'; "
                 "_PluginUpdater.__new__(_PluginUpdater)._extract_plugin_archive(str(p), str(target)); "
                 "assert (target/'main.py').is_file(); "
+                "assert (target/'logo.png').is_file(); "
                 "assert (target/'sentinel'/'__init__.py').is_file(); "
                 "assert (target/'views'/'management'/'index.html').is_file()"
             )

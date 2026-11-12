@@ -1,1 +1,9 @@
 * text=auto eol=lf
+
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.github export-ignore
+/tests export-ignore
+/scripts/package_plugin.py export-ignore
+/scripts/probe_* export-ignore
+/scripts/run_tests.py export-ignore
