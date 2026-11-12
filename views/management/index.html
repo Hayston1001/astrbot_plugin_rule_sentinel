@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rule Sentinel - 群规则管理</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div id="feedback-region" class="feedback-region" aria-live="polite" aria-relevant="additions"></div>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 3.5 26 7v7.5c0 6.1-3.8 10.8-10 14-6.2-3.2-10-7.9-10-14V7l10-3.5Z" stroke="currentColor" stroke-width="1.8"/><path d="m11.5 16 3 3 6-6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div><strong>Rule Sentinel</strong><span>群规则管理</span></div>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="管理页面">
+        <button id="tab-status" role="tab" aria-selected="false" aria-controls="panel-status" type="button"><span>运行状态</span></button>
+        <button id="tab-records" role="tab" aria-selected="true" aria-controls="panel-records" type="button"><span>判定记录</span></button>
+        <button id="tab-rules" role="tab" aria-selected="false" aria-controls="panel-rules" type="button"><span>群规则</span></button>
+        <button id="tab-groups" role="tab" aria-selected="false" aria-controls="panel-groups" type="button"><span>群管理</span></button>
+        <button id="tab-settings" role="tab" aria-selected="false" aria-controls="panel-settings" type="button"><span>监控设置</span></button>
+        <span class="tab-glide" aria-hidden="true"></span>
+      </nav>
+      <div class="header-status"><span id="status" class="monitor-badge" data-tone="muted" aria-live="polite">正在读取状态</span></div>
+    </header>
+
+    <main class="workspace">
+      <div class="content">
+          <div class="section-heading"><div><h1 id="page-title">判定记录</h1><p id="page-description">查看所选群的判定和执行结果.</p></div><div class="heading-actions"><div id="records-actions" class="records-actions"><span id="live-status" class="badge live-status" data-tone="warning" aria-live="polite">实时 · 重连中</span><button id="refresh-group" class="secondary" type="button">刷新</button></div><button id="new-rule" class="primary" type="button" aria-controls="rule-form" aria-expanded="false" hidden>新建规则</button><label id="group-picker" class="group-picker">管理的群 <select id="group-select"><option value="">所有群</option></select></label></div></div>
+        <p id="selection-status" class="notice" aria-live="polite"></p>
+        <section id="panel-records" role="tabpanel" aria-labelledby="tab-records">
+          <p class="summary-caption">判定概况</p>
+          <div class="stats-grid" aria-label="判定概况">
+            <div class="stat-card"><span>消息数 (24 小时)</span><strong id="stat-messages">-</strong></div>
+            <div class="stat-card"><span>拟执行 (24 小时)</span><strong id="stat-proposed">-</strong></div>
+            <div class="stat-card"><span>未违反规则 (24 小时)</span><strong id="stat-no-action">-</strong></div>
+            <div class="stat-card" title="根据当前筛选后的最新 10 条记录计算, 不含没有延迟的记录."><span>最新 10 条平均延迟</span><strong id="stat-latency">-</strong></div>
+          </div>
+          <p id="summary-status" class="notice" aria-live="polite"></p>
+          <div class="records-section">
+            <div class="records-heading"><h2>消息记录</h2><span id="records-match-count" class="subtle" aria-live="polite">匹配 0 条</span></div>
+            <div class="records-toolbar">
+              <label class="search-field">搜索已加载记录 <input id="records-search" type="search" placeholder="消息标识, 规则标识或理由"></label>
+              <details id="filter-options" class="filter-options" open><summary id="filter-summary">筛选与排序</summary><div class="filter-grid">
+                <label>结果 <select id="records-decision-filter">
+                  <option id="decision-option-all" value="all">全部</option><option value="proposed">拟执行</option>
+                  <option value="succeeded">全部成功</option><option value="partial_failed">部分失败</option><option value="recalled">已撤回</option><option value="blocked">全部无法执行</option><option value="recall_blocked">无法撤回</option><option value="recall_expired">已超时不可撤回</option><option value="failed">全部失败</option><option value="recall_failed">撤回失败</option>
+                  <option value="unknown">结果不明</option><option value="pending_confirm">待确认</option>
+                  <option id="decision-option-no_action" value="no_action">未违反规则</option><option id="decision-option-skipped" value="skipped">跳过</option><option value="other">其他</option>
+                </select></label>
+                <label>执行状态 <select id="records-execution-filter">
+                  <option id="execution-option-all" value="all">全部</option><option value="succeeded">全部成功</option><option value="partial_failed">部分失败</option><option value="recalled">已撤回</option>
+                  <option value="blocked">无法执行</option><option value="recall_blocked">无法撤回</option><option value="recall_expired">已超时不可撤回</option><option value="failed">执行失败</option><option value="recall_failed">撤回失败</option><option value="unknown">结果不明</option>
+                  <option value="pending_confirm">待确认</option><option value="none">无执行</option>
+                </select></label>
+                <label>排序 <select id="records-sort"><option value="time_desc">时间新→旧</option><option value="time_asc">时间旧→新</option><option value="latency_desc">模型延迟高→低</option><option value="latency_asc">模型延迟低→高</option></select></label>
+              </div></details>
+            </div>
+            <p id="records-status" class="notice" aria-live="polite"></p>
+            <div class="table-wrap"><table id="records-table">
+              <thead><tr><th>时间</th><th>结果</th><th>理由摘要</th><th>规则 ID / 版本</th><th class="number">模型延迟</th></tr></thead>
+              <tbody id="records-body"></tbody>
+            </table></div>
+            <p id="records-empty" class="empty" hidden>该群还没有判定记录.</p>
+            <button id="records-next" class="secondary more" type="button" disabled>加载更早</button>
+          </div>
+        </section>
+
+        <section id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+          <p class="rule-version-help">每次保存都会生成新版本, 可在规则的历史版本中查看.</p>
+          <p id="rule-list-status" class="notice" aria-live="polite"></p>
+          <div id="current-rules" class="rule-list" aria-live="polite"></div>
+          <section id="rule-form" class="form-panel rule-editor item-editor" hidden>
+            <div class="editor-heading"><div><h2 id="rule-form-title">新增或修改规则</h2><p>设置规则内容和处理动作.</p></div></div>
+            <label id="rule-group-picker" hidden>所属群 <select id="rule-group"><option value="">请选择群</option></select></label>
+            <label id="new-rule-enabled" class="rule-enabled"><span><strong>启用这条规则</strong><small>开启后, 此规则参与消息判定.</small></span><input id="enabled" type="checkbox"></label>
+            <div class="form-grid"><label>规则标识 <input id="rule" autocomplete="off"></label>
+              <input id="version" type="hidden" value="0" hidden>
+              <label>优先级 <input id="priority" type="number" value="0" aria-describedby="rule-priority-help"></label></div>
+            <p id="rule-priority-help" class="field-help">多规则命中策略选择按规则优先级时, 数值越大越优先. 命中的最高优先级相同时转人工复核.</p>
+            <label>自然语言规则 <textarea id="text" rows="4"></textarea></label>
+            <div class="form-section-heading"><div><h3>处理动作</h3><p id="action-order-help">动作按序处理. 拖动排序, 按方向键, 或使用上移和下移按钮调整.</p></div><button id="add-action" class="secondary" type="button">添加动作</button></div>
+            <div id="action-list" role="list" aria-label="处理动作"></div><span id="action-order-status" class="visually-hidden" aria-live="polite"></span>
+            <div class="editor-footer"><button id="preview" class="primary" type="button">保存</button><p id="save-status" class="notice" aria-live="polite"></p></div>
+          </section>
+        </section>
+
+        <section id="panel-groups" role="tabpanel" aria-labelledby="tab-groups" hidden>
+          <div class="groups-layout">
+            <section class="group-list-panel"><div class="records-heading"><h2>已知群</h2><span id="groups-count" class="subtle"></span></div>
+              <div id="groups-list" class="groups-list" aria-live="polite"></div>
+              <details class="manual"><summary>添加群</summary><div class="form-grid">
+                <label>选择平台实例 <select id="platform-select"><option value="">手动输入</option></select></label>
+                <label>平台实例标识 <input id="platform" maxlength="128" autocomplete="off"></label>
+                <label>群标识 <input id="group" maxlength="128" autocomplete="off"></label>
+              </div><button id="add-group" class="secondary" type="button">添加并选择</button><p id="add-group-status" class="notice" aria-live="polite"></p></details>
+            </section>
+            <div id="group-detail-home" hidden><section id="group-detail-panel" class="group-detail-panel item-editor"><h2>群配置</h2><p id="group-detail-empty" class="empty">请选择群.</p>
+              <div id="group-detail" hidden>
+                <div class="group-detail-heading"><div><strong id="group-detail-name"></strong></div><label class="check"><input id="monitor-group" type="checkbox" disabled><span>监控此群</span></label></div>
+                <p id="group-monitor-help" class="field-help"></p>
+                <div class="group-name-controls"><label>群备注 <input id="group-alias" maxlength="100" autocomplete="off" placeholder="输入方便识别的名称"></label><button id="save-group-alias" class="secondary" type="button">保存备注</button><button id="get-group-name" class="secondary" type="button">获取 QQ 群名</button></div>
+                <p class="field-help">备注优先显示. 清空备注可显示 QQ 群名.</p><p id="group-name-status" class="notice" aria-live="polite"></p>
+                <div class="group-override-fields"><h3>本群判定和处理</h3><p class="field-help">各项默认使用全局设置, 也可以为本群单独选择. 更改后请保存群配置.</p>
+                  <p id="group-defaults" class="field-help"></p>
+                  <section class="config-subsection"><h4>消息判定</h4><div class="form-grid config-grid">
+                    <label>任务模型 <select id="group-model-backend" aria-describedby="group-model-help"><option id="group-model-inherit" value="">全局(读取中)</option><option value="llm">普通 LLM</option><option value="jev">Jev</option></select><span id="group-model-help" class="field-help">用于判断群消息是否违反规则.</span></label>
+                    <label id="group-model-label" hidden>本群模型名称 <input id="group-model" list="group-model-options" maxlength="128" autocomplete="off" aria-describedby="group-model-name-help"><datalist id="group-model-options"></datalist><span id="group-model-name-help" class="field-help"></span></label>
+                    <label>多规则命中策略 <select id="group-strategy" aria-describedby="group-strategy-help"><option id="group-strategy-inherit" value="">全局(读取中)</option><option value="model">模型选择</option><option value="priority">按规则优先级</option></select><span id="group-strategy-help" class="field-help">多条规则命中时, 模型选择由模型决定; 按规则优先级选择数值最大的规则, 最高优先级并列时转人工复核.</span></label>
+                    <label>普通 LLM 判定理由语言 <select id="group-reason-language-mode" aria-describedby="group-reason-language-help"><option id="group-reason-language-inherit" value="">全局(读取中)</option><option value="custom">本群单独设置</option></select><span id="group-reason-language-help" class="field-help">只影响普通 LLM 的判定理由. 语言是否受支持取决于模型.</span></label>
+                    <label id="group-reason-language-label" hidden>本群理由语言 <input id="group-reason-language" maxlength="80" autocomplete="off" placeholder="例如中文, English"><span class="field-help">留空时按规则和消息自动选择语言, 不使用全局指定的语言.</span></label>
+                  </div></section>
+                  <section class="config-subsection"><h4>规则动作</h4>
+                    <label>本群执行方式 <select id="group-execution" aria-describedby="group-execution-help group-execution-state"><option id="group-execution-inherit" value="">全局(读取中)</option><option value="record">只记录</option><option value="execute">允许执行</option></select><span id="group-execution-help" class="field-help">只记录: 不执行规则动作. 允许执行: 按规则中每项动作的自动或人工确认设置处理.</span></label>
+                    <p id="group-execution-state" class="config-state" aria-live="polite"></p>
+                  </section>
+                  <section class="config-subsection"><h4>管理员或机器人触发规则</h4><p class="field-help">平台因目标是管理员或机器人而拒绝禁言或撤回时, 可以只记录, 也可以在群内发送提示.</p>
+                    <label>动作被拒绝后的处理 <select id="group-protected-policy" aria-describedby="group-protected-state"><option id="group-policy-inherit" value="">全局(读取中)</option><option value="exempt">只记录</option><option value="group_message">发送群提示</option></select></label>
+                    <p id="group-protected-state" class="config-state" aria-live="polite"></p>
+                    <div id="group-notice-controls" class="notice-settings"><strong>群提示设置</strong>
+                      <label>群提示引用触发消息 <select id="group-protected-quote" aria-describedby="group-quote-help"><option id="group-quote-inherit" value="">全局(读取中)</option><option value="true">引用</option><option value="false">不引用</option></select><span id="group-quote-help" class="field-help">引用导致这次规则判定的群消息. 只影响群提示.</span></label>
+                      <label class="check"><input id="group-template-override" type="checkbox" aria-describedby="group-template-source"><span>为本群单独设置提示内容</span></label>
+                      <p id="group-template-source" class="field-help">不开启时使用全局默认的群提示内容.</p>
+                      <label id="group-template-label" hidden>本群提示内容 <textarea id="group-protected-template" maxlength="500" aria-describedby="group-template-help"></textarea></label>
+                      <p id="group-template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回).</p>
+                      <div class="template-example"><strong>提示内容示例</strong><p id="group-template-preview"></p><span>规则和成员标识为示例值.</span></div>
+                    </div>
+                  </section>
+                  <button id="group-settings-save" class="primary group-settings-save" type="button">保存群配置</button><p id="group-settings-status" class="notice" aria-live="polite"></p>
+                </div>
+              </div>
+            </section></div>
+          </div>
+        </section>
+
+        <section id="panel-status" role="tabpanel" aria-labelledby="tab-status" hidden>
+          <div class="status-overview"><section class="status-panel status-main" id="status-main" data-tone="muted"><h2>监控状态</h2><strong id="status-label">正在读取</strong><p id="status-detail">正在读取状态...</p><button id="status-settings" class="secondary" type="button">监控设置</button></section>
+            <section class="status-panel status-facts"><h2>运行信息</h2><div class="status-fact"><span>默认判定方式</span><strong id="status-backend">-</strong></div><div class="status-fact"><span>真实执行总开关</span><strong id="status-execution">-</strong></div><div class="status-fact"><span>已知群</span><strong id="status-groups-total">-</strong></div><div class="status-fact"><span>允许监控</span><strong id="status-groups-enabled">-</strong></div></section></div>
+          <section class="all-groups-status"><div class="records-heading"><h2>各群状态</h2><button id="refresh-all-groups" class="secondary" type="button">刷新统计</button></div><p class="field-help">最近 24 小时</p><p id="all-groups-status-message" class="notice" aria-live="polite"></p><div class="table-wrap"><table id="groups-status-table"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>群</th><th>监控状态</th><th class="number">消息数</th><th class="number">拟执行</th><th class="number">未违反规则</th><th class="number">P95 延迟</th><th>最近活动</th></tr></thead><tbody id="groups-status-body"></tbody></table></div></section>
+          <div class="status-panel platforms-panel"><h2>平台实例</h2><div id="platforms-list"></div></div>
+          <details class="diagnostics"><summary>排查</summary>
+            <div class="buttons"><button id="platforms" class="secondary" type="button">读取平台实例</button><button id="load" class="secondary" type="button">读取规则</button><button id="history" class="secondary" type="button">读取规则历史</button><button id="audit" class="secondary" type="button">读取审计</button><button id="audit-next" class="secondary" type="button" disabled>审计下一页</button><button id="overflow" class="secondary" type="button">读取缓冲溢出统计</button><button id="notifications" class="secondary" type="button">读取通知结果</button></div>
+            <pre id="output" aria-live="polite"></pre>
+          </details>
+        </section>
+
+        <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+          <div class="settings-stack">
+            <section class="settings-section"><div class="settings-intro"><h2>运行控制</h2><p>设置真实执行和群监控范围.</p></div><div class="settings-fields">
+              <label class="setting-switch"><span><strong>启用真实执行</strong><small>开启后, 符合条件的自动动作可直接执行. 关闭后所有群只记录结果, 不执行规则动作.</small></span><input id="setting-action_execution_enabled" type="checkbox"></label>
+              <label>群名单模式 <select id="setting-monitoring_mode" aria-describedby="monitoring-mode-help"><option value="allowlist">白名单</option><option value="blocklist">黑名单</option></select><span id="monitoring-mode-help" class="field-help">白名单只监控名单中的群; 黑名单监控名单以外的群. 切换模式会改变现有名单的含义, 请检查群管理中的开关.</span></label>
+            </div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>全局默认</h2><p>各群默认继承, 也可单独设置.</p></div><div class="settings-fields">
+              <div class="form-grid"><label>默认任务模型类型 <select id="setting-decision_backend"><option value="llm">普通 LLM</option><option value="jev">Jev</option></select><span class="field-help">配置默认模型后才能开始监控. 各群可以单独选择.</span></label>
+                <label>默认多规则命中策略 <select id="setting-rule_selection_strategy" aria-describedby="default-rule-strategy-help"><option value="model">模型选择</option><option value="priority">按规则优先级</option></select><span id="default-rule-strategy-help" class="field-help">多条规则命中时, 模型选择由模型决定; 按规则优先级选择数值最大的规则, 最高优先级并列时转人工复核.</span></label></div>
+              <label>默认执行方式 <select id="setting-default_execution_mode"><option value="record">只记录</option><option value="execute">允许执行</option></select><span class="field-help">各群可以单独选择只记录或允许执行. 允许执行仍需开启上方的真实执行总开关.</span></label>
+              <label>默认动作执行方式 <select id="setting-default_action_mode"><option value="auto">自动</option><option value="confirm">人工确认</option></select><span class="field-help">规则动作选择全局时使用此设置. 实际执行仍受真实执行总开关和本群执行方式控制.</span></label>
+              <label>普通 LLM 判定模型 <input id="setting-llm_provider_id" list="provider-options" autocomplete="off"><datalist id="provider-options"></datalist><span class="field-help">填写 AstrBot 中已配置的模型提供商标识.</span></label>
+              <label>普通 LLM 判定理由语言 <input id="setting-llm_reason_language" maxlength="80" autocomplete="off" placeholder="例如中文, English"><span class="field-help">填写希望普通 LLM 使用的理由语言, 不影响 Jev. 留空时按规则和消息自动选择. 语言是否受支持取决于模型.</span></label>
+              <label class="setting-switch"><span><strong>未违反规则时记录理由</strong><small>普通 LLM 判定消息没有违反任何规则时, 请求模型说明原因并记录其理由. 关闭后不请求或记录该理由.</small><small>所有群共用. 修改后对之后开始的判定生效. 不影响违规理由和历史记录.</small></span><input id="setting-llm_no_action_reason_enabled" type="checkbox"></label>
+              <details id="jev-settings" class="settings-details"><summary>Jev 模型配置</summary><div class="form-grid">
+                <label>Jev 提供方 <select id="setting-jev_provider"><option value="typesafe">TypeSafe</option><option value="openrouter">OpenRouter</option></select><span class="field-help">所有使用 Jev 的群共用此提供方.</span></label>
+                <label>Jev 默认模型名 <input id="setting-jev_model" list="jev-model-options" autocomplete="off"><datalist id="jev-model-options"></datalist><span class="field-help">群可单独选择 Jev 模型.</span></label>
+                <label>Jev API Key <input id="setting-jev_api_key" type="password" autocomplete="new-password" placeholder="填写 Jev API Key" aria-describedby="jev-api-key-help"><span id="jev-api-key-help" class="field-help">所有使用 Jev 的群共用此密钥.</span></label>
+              </div><button id="jev-models-fetch" class="secondary" type="button">获取模型列表</button><p id="jev-models-status" class="notice" aria-live="polite"></p></details>
+            </div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>管理员或机器人触发规则</h2><p>平台因目标是管理员或机器人而拒绝禁言或撤回时, 使用以下默认设置. 各群可以覆盖.</p></div><div class="settings-fields">
+              <label>默认处理方式 <select id="setting-protected_target_policy"><option value="exempt">只记录</option><option value="group_message">发送群提示</option></select><span class="field-help">选择发送群提示时, 会使用下方内容和引用设置. 真实执行关闭时不会发送.</span></label>
+              <div class="notice-settings"><label>默认群提示内容 <textarea id="setting-protected_target_template" maxlength="500" aria-describedby="template-help"></textarea></label>
+                <p id="template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回). 单群发送提示时可继承或自定义.</p>
+                <div class="template-example"><strong>提示内容示例</strong><p id="setting-template-preview"></p><span>规则和成员标识为示例值.</span></div>
+                <label class="check"><input id="setting-protected_target_quote" type="checkbox"><span>群提示引用触发消息</span></label><p class="field-help">引用导致这次规则判定的群消息. 只影响群提示.</p>
+              </div>
+            </div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>消息记录</h2><p>控制记录详情中的消息原文保留时间.</p></div><div class="settings-fields">
+              <label>消息原文保留天数 <input id="setting-message_retention_days" type="number" min="0" max="36500" step="1"><span class="field-help">默认 30 天, 到期自动清理. 设为 0 时不保留原文; 已清除的原文无法恢复. 数据库日志或备份可能仍有残留.</span></label>
+            </div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>运行限制和通知</h2><p>控制判定容量, 超时和通知频率.</p></div><div class="settings-fields">
+              <details class="settings-details"><summary>展开限制和通知设置</summary><div class="form-grid">
+                <label>禁言时长上限, 秒 <input id="setting-max_duration_seconds" type="number" min="1" max="2592000"><span class="field-help">所有群共用, 最长 2592000 秒 (30 天). 下调后, 超出新上限的规则禁言不会执行.</span></label>
+                <label>模型并发上限 <input id="setting-model_concurrency" type="number" min="1"><span class="field-help">所有群同时进行的判定总数, 新安装默认 20.</span></label>
+                <label>单次判定超时, 秒 <input id="setting-model_timeout_seconds" type="number" min="1"><span class="field-help">超时后记录失败, 不执行该次判定的动作.</span></label>
+                <label>全局每分钟上限 <input id="setting-global_rate_per_minute" type="number" min="1"><span class="field-help">所有群每分钟允许进入判定的消息总数.</span></label>
+                <label>每群每分钟上限 <input id="setting-group_rate_per_minute" type="number" min="1"><span class="field-help">单群上限和全局上限同时生效, 超限消息会被跳过.</span></label>
+                <label>连续失败熔断次数 <input id="setting-model_failure_threshold" type="number" min="1"><span class="field-help">达到次数后暂停模型判定, 所有群共用.</span></label>
+                <label>熔断冷却时间, 秒 <input id="setting-model_cooldown_seconds" type="number" min="1"><span class="field-help">暂停达到此时长后尝试恢复判定.</span></label>
+                <label>每群队列容量 <input id="setting-queue_capacity_per_group" type="number" min="1"><span class="field-help">单群等待或正在判定的消息上限, 满时新消息会被跳过.</span></label>
+                <label>接收缓冲容量 <input id="setting-ingress_capacity" type="number" min="1"><span class="field-help">所有群共用的消息接收缓冲上限.</span></label>
+                <label>管理员故障通知目标 <input id="setting-notification_target" autocomplete="off" aria-describedby="notification-target-help"><span id="notification-target-help" class="field-help">接收模型故障等通知的私聊会话, 格式为 平台实例:FriendMessage:用户标识. 与群提示无关.</span></label>
+                <label>同类故障通知间隔, 秒 <input id="setting-notification_interval_seconds" type="number" min="0" aria-describedby="notification-interval-help"><span id="notification-interval-help" class="field-help">填写通知目标时须大于 0; 不发送通知时留空目标并设为 0.</span></label>
+              </div></details>
+            </div></section>
+            <div class="settings-footer"><button id="settings-save" class="primary" type="button">保存设置</button><p id="settings-status" class="notice" aria-live="polite"></p></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="./app.js"></script>
+  <script type="module" src="./motion.js"></script>
+</body>
+</html>

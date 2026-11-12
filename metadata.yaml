@@ -1,0 +1,15 @@
+name: astrbot_plugin_rule_sentinel
+display_name: 群规守卫
+desc: 基于自然语言群规的 QQ 群管理插件, 支持模型判定, 规则配置, 判定记录和群管理动作
+version: 1.0.0
+author: hayston1001
+astrbot_version: ">=4.29.3"
+support_platforms:
+  - qq_official
+  - qq_official_webhook
+social_link: https://github.com/Hayston1001
+tags:
+  - 规则
+  - 群聊
+  - 管理
+  - LLM
