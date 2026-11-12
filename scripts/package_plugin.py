@@ -33,7 +33,7 @@ def archive_files(root: Path) -> list[Path]:
     required = [Path(name) for name in (*ROOT_FILES, *TOOL_FILES,
                 "sentinel/__init__.py", "views/management/index.html",
                 "views/management/app.js", "views/management/style.css",
-                "views/management/motion.js")]
+                "views/management/motion.js", "views/management/select.js")]
     for name in required:
         _safe_file(root, name)
     files = set(required)

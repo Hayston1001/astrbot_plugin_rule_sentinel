@@ -46,7 +46,7 @@ class PackagingTests(unittest.TestCase):
             self.assertIsNone(archive.testzip())
             self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "sentinel/__init__.py",
                              "views/management/index.html", "views/management/app.js", "views/management/style.css",
-                             "views/management/motion.js",
+                             "views/management/motion.js", "views/management/select.js",
                              "scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py"} <= names)
             self.assertFalse(any(name.startswith(("tests/", "local-docs/", ".git/", "dist/")) for name in names))
             self.assertEqual(archive.read("README.md"), (package_plugin.ROOT / "README.md").read_bytes())
@@ -74,7 +74,7 @@ class PackagingTests(unittest.TestCase):
             for relative in (*package_plugin.ROOT_FILES, *package_plugin.TOOL_FILES,
                              "sentinel/__init__.py", "views/management/index.html",
                              "views/management/app.js", "views/management/style.css",
-                             "views/management/motion.js",
+                             "views/management/motion.js", "views/management/select.js",
                              "views/management/nested/asset.js", "views/other/private.json"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ class PackagingTests(unittest.TestCase):
             for relative in (*package_plugin.ROOT_FILES, *package_plugin.TOOL_FILES,
                              "sentinel/__init__.py", "views/management/index.html",
                              "views/management/app.js", "views/management/style.css",
-                             "views/management/motion.js"):
+                             "views/management/motion.js", "views/management/select.js"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("synthetic", encoding="utf-8")
