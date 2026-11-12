@@ -581,7 +581,8 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
 .group-row > div { min-width: 0; }
 .group-row > div:first-child > p { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .group-list-panel .manual { margin-top: 20px; }
-.group-list-panel .manual .form-grid { margin: 14px 0 10px; }
+.add-group-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin: 14px 0 10px; }
+.add-group-controls label { flex: 1 1 240px; min-width: 0; }
 .group-name-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; padding: 10px 0 4px; }
 .group-name-controls label { flex: 1 1 200px; }
 .group-detail-panel > h2 { margin-bottom: 16px; }

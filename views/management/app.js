@@ -119,6 +119,10 @@ let recordsRevision = 0;
 let rulesRevision = 0;
 let knownGroups = [];
 let knownPlatforms = [];
+let availableGroups = [];
+let availableGroupsRevision = 0;
+let availableGroupsLoading = false;
+let availableGroupSaving = false;
 let selectedScope = {platform_id: "", group_id: ""};
 let groupsLoaded = false;
 let groupsLoadFailed = false;
@@ -1561,13 +1565,6 @@ function addOption(select, value, label) {
   select.appendChild(option);
   return option;
 }
-function updatePlatformOptions() {
-  const select = el("platform-select");
-  select.textContent = "";
-  addOption(select, "", "请选择平台");
-  for (const platform of knownPlatforms) addOption(select, platform.id, `${platform.id} (${platform.type})`);
-  select.value = knownPlatforms.some((platform) => platform.id === el("platform").value.trim()) ? el("platform").value.trim() : "";
-}
 function groupKey(item) { return JSON.stringify([item.platform_id, item.group_id]); }
 function baseGroupName(item) { return item.alias?.trim() || item.platform_name?.trim() || "未命名群"; }
 let readableGroupNames = new Map();
@@ -2196,19 +2193,95 @@ function selectCurrentGroup(remember = true) {
   startLive();
   return Promise.all([loadCurrentRules(), loadRecords(true), loadSummary()]);
 }
-el("platform-select").addEventListener("change", () => {
-  el("platform").value = el("platform-select").value;
-});
 el("group-select").addEventListener("change", () => {
   const item = knownGroups.find((entry) => groupKey(entry) === el("group-select").value);
   return item ? chooseGroup(item) : chooseGroup({platform_id: "", group_id: ""});
 });
-el("platform").addEventListener("change", updatePlatformOptions);
+function renderAvailableGroups() {
+  const select = el("available-group-select");
+  const selected = select.value;
+  const existing = new Set(knownGroups.map(groupKey));
+  const items = availableGroups.filter((item) => !existing.has(groupKey(item)));
+  const names = new Map();
+  for (const item of items) {
+    const name = item.name?.trim() || "未命名群";
+    if (!names.has(name)) names.set(name, []);
+    names.get(name).push(groupKey(item));
+  }
+  select.textContent = "";
+  addOption(select, "", availableGroupsLoading ? "正在读取群列表..." : items.length ? "请选择群" : "暂无可选群");
+  for (const item of items) {
+    const name = item.name?.trim() || "未命名群";
+    const duplicates = names.get(name).sort();
+    addOption(select, groupKey(item), duplicates.length > 1 ? `${name} (${duplicates.indexOf(groupKey(item)) + 1})` : name);
+  }
+  select.value = items.some((item) => groupKey(item) === selected) ? selected : "";
+  select.disabled = availableGroupsLoading || availableGroupSaving || !items.length;
+  el("refresh-available-groups").disabled = availableGroupsLoading || availableGroupSaving;
+  el("add-group").disabled = availableGroupsLoading || availableGroupSaving || !select.value;
+}
+async function loadAvailableGroups() {
+  if (availableGroupSaving) return;
+  const current = ++availableGroupsRevision;
+  availableGroupsLoading = true;
+  el("add-group-status").textContent = "正在读取群列表...";
+  renderAvailableGroups();
+  let result;
+  try {
+    result = await bridge.apiGet("available-groups");
+    if (!Array.isArray(result?.groups)) throw new Error("invalid group list");
+    if (current !== availableGroupsRevision) return;
+    availableGroups = result.groups.filter((item) => typeof item?.platform_id === "string" &&
+      typeof item?.group_id === "string" && typeof item?.name === "string");
+    availableGroupsLoading = false;
+    renderAvailableGroups();
+  } catch {
+    if (current !== availableGroupsRevision) return;
+    availableGroupsLoading = false;
+    availableGroups = [];
+    renderAvailableGroups();
+    el("add-group-status").textContent = "群列表读取失败, 请刷新重试.";
+    return;
+  }
+  const remaining = () => availableGroups.filter((item) => !knownGroups.some((known) => groupKey(known) === groupKey(item)));
+  const initial = remaining();
+  const partial = result.history_available === false || result.truncated === true;
+  el("add-group-status").textContent = result.platforms_available === false
+    ? "没有可用的 QQ 官方机器人, 请先连接机器人."
+    : !initial.length
+    ? partial ? "群列表不完整, 请刷新重试. 也可在目标群向机器人发送消息后刷新."
+      : "暂无可选群. 请在目标群向机器人发送消息, 然后刷新."
+    : partial ? "部分群列表暂不可用, 可刷新重试." : "请选择机器人收到过消息的群.";
+  let failedNames = false;
+  for (const item of initial.filter((entry) => !entry.name)) {
+    if (current !== availableGroupsRevision) return;
+    try {
+      const response = await bridge.apiPost("available-group-name", {platform_id: item.platform_id, group_id: item.group_id});
+      if (current !== availableGroupsRevision) return;
+      if (typeof response?.name !== "string" || !response.name.trim()) throw new Error("name unavailable");
+      item.name = response.name.trim();
+      renderAvailableGroups();
+    } catch {
+      if (current !== availableGroupsRevision) return;
+      failedNames = true;
+    }
+  }
+  if (current === availableGroupsRevision && failedNames && remaining().length) {
+    el("add-group-status").textContent = partial ? "部分群列表或群名暂不可用, 可刷新重试."
+      : "部分群名不可用, 添加后可设置群备注.";
+  }
+}
+el("add-group-panel").addEventListener("toggle", () => {
+  if (el("add-group-panel").open) return loadAvailableGroups();
+});
+el("refresh-available-groups").addEventListener("click", loadAvailableGroups);
+el("available-group-select").addEventListener("change", renderAvailableGroups);
 el("add-group").addEventListener("click", async () => {
-  const scope = {platform_id: el("platform").value.trim(), group_id: el("group").value.trim()};
-  const button = el("add-group");
-  if (!scope.platform_id || !scope.group_id) { showFeedback("请填写平台实例和群标识.", "warning"); return; }
-  button.disabled = true;
+  const item = availableGroups.find((entry) => groupKey(entry) === el("available-group-select").value);
+  if (!item || knownGroups.some((entry) => groupKey(entry) === groupKey(item))) return;
+  const scope = {platform_id: item.platform_id, group_id: item.group_id};
+  availableGroupSaving = true;
+  renderAvailableGroups();
   try {
     const saved = await bridge.apiPost("group-register", scope);
     const existing = knownGroups.find((item) => groupKey(item) === groupKey(scope));
@@ -2222,10 +2295,14 @@ el("add-group").addEventListener("click", async () => {
       } catch { groupsLoadFailed = true; }
     }
     updateGroupOptions();
+    renderAvailableGroups();
     await chooseGroup(scope);
+    if (!availableGroups.some((entry) => !knownGroups.some((known) => groupKey(known) === groupKey(entry)))) {
+      el("add-group-status").textContent = "暂无可选群. 请在目标群向机器人发送消息, 然后刷新.";
+    }
     showFeedback(groupsLoaded ? "群已添加." : "群已添加, 群列表不可用.", groupsLoaded ? "success" : "warning");
-  } catch { showFeedback("无法添加群, 请检查标识.", "error"); }
-  finally { button.disabled = false; }
+  } catch { showFeedback("无法添加群, 请重试.", "error"); }
+  finally { availableGroupSaving = false; renderAvailableGroups(); }
 });
 el("refresh-group").addEventListener("click", () => { scheduleRefresh(); return selectCurrentGroup(false); });
 el("new-rule").addEventListener("click", () => {
@@ -2635,7 +2712,6 @@ async function initializeSelection() {
       knownGroups.push({...selectedScope, rule_count: 0, last_activity: null});
     }
   } else groupsLoadFailed = true;
-  updatePlatformOptions();
   const platformCounts = new Map();
   for (const platform of knownPlatforms) {
     const name = ["qq_official", "qq_official_webhook"].includes(platform.type) ? "QQ 官方机器人" : "其他平台";
@@ -2648,7 +2724,7 @@ async function initializeSelection() {
   renderAllGroupStatus();
   if (activeTab === "status") loadAllGroupSummaries();
   if (platforms.status === "rejected" || groups.status === "rejected") {
-    el("selection-status").textContent = "平台或群列表读取失败, 可手动输入标识.";
+    el("selection-status").textContent = "平台或群列表读取失败, 请刷新页面重试.";
   }
   return selectCurrentGroup(false);
 }

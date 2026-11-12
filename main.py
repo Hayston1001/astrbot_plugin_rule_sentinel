@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -19,6 +20,7 @@ from .sentinel.dry_run_ingest import MAX_MESSAGE_CHARS
 from .sentinel.dry_run_queue import DryRunQueue
 from .sentinel.event_intake import Skip
 from .sentinel.event_stream import EventHub
+from .sentinel.group_discovery import discover_groups
 from .sentinel.management_service import ManagementService
 from .sentinel.plugin_settings import decision_model_unconfigured, read_settings
 from .sentinel.qq_official_snapshot import extract
@@ -102,6 +104,10 @@ class RuleSentinel(Star):
         self._event_hub = None
         self._retention_task = None
         self._lock_path = None
+        self._group_name_locks = {}
+        self._group_name_last_request = {}
+        self._group_name_cache = {}
+        self._discovered_group_names = {}
         for route, handler, methods in (
             ("rules", self.list_rules, ["GET"]),
             ("rules/history", self.rule_history, ["GET"]),
@@ -117,6 +123,8 @@ class RuleSentinel(Star):
             ("status", self.status, ["GET"]),
             ("platforms", self.list_platforms, ["GET"]),
             ("groups", self.list_groups, ["GET"]),
+            ("available-groups", self.list_available_groups, ["GET"]),
+            ("available-group-name", self.get_available_group_name, ["POST"]),
             ("group-register", self.register_group, ["POST"]),
             ("group-alias", self.save_group_alias, ["POST"]),
             ("group-name", self.get_group_name, ["POST"]),
@@ -494,6 +502,20 @@ class RuleSentinel(Star):
         configured = set(self.config.get("monitoring_groups", [])) | set(self.config.get("group_overrides", {}))
         return await self._run(self.management.list_groups, request.username, configured)
 
+    async def list_available_groups(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        try:
+            result = await discover_groups(self.context)
+            self._discovered_group_names = {(item["platform_id"], item["group_id"]): item["name"]
+                                            for item in result["groups"] if item["name"]}
+            return json_response(result)
+        except Exception:
+            logger.error("Rule Sentinel could not discover groups")
+            return error_response("Group discovery unavailable", status_code=503)
+
     async def save_group_alias(self):
         if self.management is None:
             return error_response("Service not initialized", status_code=503)
@@ -508,9 +530,16 @@ class RuleSentinel(Star):
         if not self.management.actor_allowed(request.username):
             return error_response("Not authorized", status_code=403)
         data = await self._payload()
-        return await self._run(self.management.ensure_group, request.username, data)
+        platform_name = ""
+        if isinstance(data, dict) and isinstance(data.get("platform_id"), str) and isinstance(data.get("group_id"), str):
+            key = (data["platform_id"], data["group_id"])
+            cached = self._group_name_cache.get(key)
+            if cached and time.monotonic() - cached[0] < 300 and isinstance(cached[1], str):
+                platform_name = cached[1]
+            platform_name = platform_name or self._discovered_group_names.get(key, "")
+        return await self._run(self.management.ensure_group, request.username, data, platform_name)
 
-    async def get_group_name(self):
+    async def _group_name_request(self, *, save):
         if self.management is None:
             return error_response("Service not initialized", status_code=503)
         if not self.management.actor_allowed(request.username):
@@ -526,17 +555,55 @@ class RuleSentinel(Star):
                              p.meta().name in ("qq_official", "qq_official_webhook")), None)
             if platform is None:
                 return error_response("Platform unavailable", status_code=404)
-            from botpy.http import Route
-            route = Route("GET", "/v2/groups/{group_openid}/info", group_openid=data["group_id"])
-            result = await asyncio.wait_for(platform.get_client().api._http.request(route), timeout=8)
-            name = result.get("group_name") if isinstance(result, dict) else None
+            key = (data["platform_id"], data["group_id"])
+            name = None
+            if not save:
+                cached = self._group_name_cache.get(key)
+                if cached and time.monotonic() - cached[0] < (300 if cached[1] else 2.1):
+                    if not cached[1]:
+                        return error_response("Group name unavailable", status_code=502)
+                    name = cached[1]
+            if name is None:
+                lock = self._group_name_locks.setdefault(data["platform_id"], asyncio.Lock())
+                async with lock:
+                    cached = self._group_name_cache.get(key) if not save else None
+                    if cached and time.monotonic() - cached[0] < (300 if cached[1] else 2.1):
+                        name = cached[1]
+                    else:
+                        if not save:
+                            delay = 2.1 - (time.monotonic() - self._group_name_last_request.get(data["platform_id"], 0))
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                        self._group_name_last_request[data["platform_id"]] = time.monotonic()
+                        from botpy.http import Route
+                        route = Route("GET", "/v2/groups/{group_openid}/info", group_openid=data["group_id"])
+                        try:
+                            result = await asyncio.wait_for(platform.get_client().api._http.request(route), timeout=8)
+                            name = result.get("group_name") if isinstance(result, dict) else None
+                        except Exception:
+                            name = None
+                        if (not isinstance(name, str) or not name.strip() or len(name) > 100
+                                or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                            name = None
+                        if not save:
+                            if len(self._group_name_cache) >= 5000:
+                                self._group_name_cache.clear()
+                            self._group_name_cache[key] = (time.monotonic(), name)
             if not isinstance(name, str) or not name.strip():
                 return error_response("Group name unavailable", status_code=502)
+            if not save:
+                return json_response({**data, "name": name})
             saved = await asyncio.to_thread(self.management.save_group_name, request.username,
                                             {**data, "name": name}, platform_name=True)
             return json_response(saved)
         except Exception:
             return error_response("Group name unavailable", status_code=502)
+
+    async def get_group_name(self):
+        return await self._group_name_request(save=True)
+
+    async def get_available_group_name(self):
+        return await self._group_name_request(save=False)
 
     async def summary(self):
         if self.management is None:

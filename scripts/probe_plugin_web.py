@@ -53,7 +53,7 @@ def main():
             plugin = plugin_class(context, {"dashboard_admins": ["admin"]})
             await plugin.initialize()
             try:
-                assert plugin.intake is None and len(context.registered_web_apis) == 26
+                assert plugin.intake is None and len(context.registered_web_apis) == 28
                 fields = {"platform_id": "p", "group_id": "g", "rule_id": "r", "expected_version": 0,
                           "text": "rule", "enabled": True, "allowed_actions": ["mute"],
                           "duration_mode": "strict", "severity_seconds": {"low": 30}}

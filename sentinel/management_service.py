@@ -75,7 +75,7 @@ class ManagementService:
             raise ValueError("invalid group name")
         return self.queue.save_group_name(platform_id, group_id, name.strip(), platform_name=platform_name)
 
-    def ensure_group(self, actor, fields):
+    def ensure_group(self, actor, fields, platform_name=""):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")
         if not isinstance(fields, dict) or set(fields) != {"platform_id", "group_id"}:
@@ -85,7 +85,10 @@ class ManagementService:
             raise ValueError("invalid group identity")
         from .group_settings import validate_group_key
         validate_group_key(f"{platform_id}/{group_id}")
-        return self.queue.ensure_group(platform_id, group_id)
+        if (not isinstance(platform_name, str) or len(platform_name) > 100
+                or any(ord(char) < 32 or ord(char) == 127 for char in platform_name)):
+            raise ValueError("invalid group name")
+        return self.queue.ensure_group(platform_id, group_id, platform_name.strip())
 
     def get_ui_state(self, actor):
         if not self.actor_allowed(actor):

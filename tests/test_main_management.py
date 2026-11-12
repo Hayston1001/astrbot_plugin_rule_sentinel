@@ -76,7 +76,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 26)
+        self.assertEqual(len(self.context.routes), 28)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -171,6 +171,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.list_notifications())["status_code"], 403)
             self.assertEqual((await self.plugin.list_platforms())["status_code"], 403)
             self.assertEqual((await self.plugin.list_groups())["status_code"], 403)
+            self.assertEqual((await self.plugin.list_available_groups())["status_code"], 403)
+            self.assertEqual((await self.plugin.get_available_group_name())["status_code"], 403)
             self.assertEqual((await self.plugin.register_group())["status_code"], 403)
             self.assertEqual((await self.plugin.save_group_alias())["status_code"], 403)
             self.assertEqual((await self.plugin.get_group_name())["status_code"], 403)
@@ -318,6 +320,106 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         for group_id in ("../other", "a/b", "a%2fb", "a?x=y", "..", "x" * 129):
             self.raw_body = json.dumps({"platform_id": "qq1", "group_id": group_id}).encode()
             self.assertEqual((await self.plugin.get_group_name())["status_code"], 400)
+
+    async def test_available_groups_and_name_lookup_do_not_register_or_enable_monitoring(self):
+        group_id = "a" * 32
+        request_name = AsyncMock(return_value={"group_name": "QQ 群名"})
+        official = types.SimpleNamespace(meta=lambda: types.SimpleNamespace(name="qq_official", id="qq1"),
+            _session_scene={group_id: "group", "ignored": "friend"},
+            get_client=lambda: types.SimpleNamespace(api=types.SimpleNamespace(
+                _http=types.SimpleNamespace(request=request_name))))
+        self.context.platform_manager.get_insts = lambda: [official]
+        self.assertIsNone(self.plugin.host)
+        available = (await self.plugin.list_available_groups())["data"]
+        self.assertEqual(available["groups"], [{"platform_id": "qq1", "group_id": group_id, "name": ""}])
+        self.assertFalse(available["history_available"])
+        self.assertEqual((await self.plugin.list_groups())["data"], [])
+        self.raw_body = json.dumps({"platform_id": "qq1", "group_id": group_id}).encode()
+        botpy = types.ModuleType("botpy")
+        http = types.ModuleType("botpy.http")
+        http.Route = lambda method, path, **kwargs: (method, path, kwargs)
+        with patch.dict(sys.modules, {"botpy": botpy, "botpy.http": http}):
+            first = (await self.plugin.get_available_group_name())["data"]
+            second = (await self.plugin.get_available_group_name())["data"]
+        self.assertEqual(first["name"], "QQ 群名")
+        self.assertEqual(second, first)
+        request_name.assert_awaited_once()
+        self.assertEqual((await self.plugin.list_groups())["data"], [])
+        self.assertEqual(self.plugin.config["monitoring_groups"], [])
+        self.assertIsNone(self.plugin.host)
+        registered = (await self.plugin.register_group())["data"]
+        self.assertEqual(registered["platform_name"], "QQ 群名")
+        self.assertEqual(self.plugin.config["monitoring_groups"], [])
+        request_name.assert_awaited_once()
+
+    async def test_available_name_rejects_invalid_input_and_hides_errors(self):
+        self.raw_body = b'{"platform_id":"qq1","group_id":"../bad"}'
+        self.assertEqual((await self.plugin.get_available_group_name())["status_code"], 400)
+        self.raw_body = b'{"platform_id":"qq1","group_id":"g","group_id":"g"}'
+        self.assertEqual((await self.plugin.get_available_group_name())["status_code"], 400)
+        request_name = AsyncMock(side_effect=RuntimeError("private platform error"))
+        official = types.SimpleNamespace(meta=lambda: types.SimpleNamespace(name="qq_official", id="qq1"),
+            get_client=lambda: types.SimpleNamespace(api=types.SimpleNamespace(
+                _http=types.SimpleNamespace(request=request_name))))
+        self.context.platform_manager.get_insts = lambda: [official]
+        self.raw_body = b'{"platform_id":"qq1","group_id":"g"}'
+        botpy = types.ModuleType("botpy")
+        http = types.ModuleType("botpy.http")
+        http.Route = lambda method, path, **kwargs: (method, path, kwargs)
+        with patch.dict(sys.modules, {"botpy": botpy, "botpy.http": http}):
+            result = await self.plugin.get_available_group_name()
+            self.assertEqual((await self.plugin.get_available_group_name())["status_code"], 502)
+        self.assertEqual(result["status_code"], 502)
+        self.assertNotIn("private", repr(result))
+        request_name.assert_awaited_once()
+        self.plugin._group_name_cache[("qq1", "g")] = (self.module.time.monotonic() - 3, None)
+        self.plugin._group_name_last_request["qq1"] = self.module.time.monotonic() - 3
+        request_name.side_effect = None
+        request_name.return_value = {"group_name": "重试成功"}
+        with patch.dict(sys.modules, {"botpy": botpy, "botpy.http": http}):
+            self.assertEqual((await self.plugin.get_available_group_name())["data"]["name"], "重试成功")
+        self.assertEqual(request_name.await_count, 2)
+
+    async def test_concurrent_available_name_requests_share_one_platform_call(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def lookup(_route):
+            started.set()
+            await release.wait()
+            return {"group_name": "QQ 群名"}
+        request_name = AsyncMock(side_effect=lookup)
+        official = types.SimpleNamespace(meta=lambda: types.SimpleNamespace(name="qq_official", id="qq1"),
+            get_client=lambda: types.SimpleNamespace(api=types.SimpleNamespace(
+                _http=types.SimpleNamespace(request=request_name))))
+        self.context.platform_manager.get_insts = lambda: [official]
+        self.raw_body = b'{"platform_id":"qq1","group_id":"g"}'
+        botpy = types.ModuleType("botpy")
+        http = types.ModuleType("botpy.http")
+        http.Route = lambda method, path, **kwargs: (method, path, kwargs)
+        with patch.dict(sys.modules, {"botpy": botpy, "botpy.http": http}):
+            first = asyncio.create_task(self.plugin.get_available_group_name())
+            await asyncio.wait_for(started.wait(), timeout=2)
+            second = asyncio.create_task(self.plugin.get_available_group_name())
+            await asyncio.sleep(0)
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+        self.assertEqual([result["data"]["name"] for result in results], ["QQ 群名", "QQ 群名"])
+        request_name.assert_awaited_once()
+
+    async def test_register_uses_discovered_name_without_overwriting_existing_name(self):
+        candidate = {"platform_id": "qq1", "group_id": "g", "name": "会话群名"}
+        result = {"groups": [candidate], "platforms_available": True, "history_available": True, "truncated": False}
+        with patch.object(self.module, "discover_groups", new=AsyncMock(return_value=result)):
+            await self.plugin.list_available_groups()
+        self.raw_body = b'{"platform_id":"qq1","group_id":"g"}'
+        self.assertEqual((await self.plugin.register_group())["data"]["platform_name"], "会话群名")
+        self.raw_body = json.dumps({"platform_id": "qq1", "group_id": "g", "name": "我的备注"}).encode()
+        await self.plugin.save_group_alias()
+        candidate["name"] = "新的会话群名"
+        with patch.object(self.module, "discover_groups", new=AsyncMock(return_value=result)):
+            await self.plugin.list_available_groups()
+        self.raw_body = b'{"platform_id":"qq1","group_id":"g"}'
+        registered = (await self.plugin.register_group())["data"]
+        self.assertEqual((registered["alias"], registered["platform_name"]), ("我的备注", "会话群名"))
 
     async def test_ui_state_rejects_invalid_payload_and_overlong_ids(self):
         cases = ({}, {"platform_id": "p"}, {"platform_id": "p", "group_id": "g", "username": "other"},

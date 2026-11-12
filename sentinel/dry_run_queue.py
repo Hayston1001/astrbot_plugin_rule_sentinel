@@ -717,11 +717,11 @@ class DryRunQueue:
         finally:
             db.close()
 
-    def ensure_group(self, platform_id: str, group_id: str) -> dict:
+    def ensure_group(self, platform_id: str, group_id: str, platform_name: str = "") -> dict:
         db = self._connect()
         try:
-            db.execute("INSERT OR IGNORE INTO dashboard_group_names (platform_id, group_id) VALUES (?, ?)",
-                       (platform_id, group_id))
+            db.execute("INSERT OR IGNORE INTO dashboard_group_names (platform_id, group_id, platform_name) VALUES (?, ?, ?)",
+                       (platform_id, group_id, platform_name))
             db.commit()
             return dict(db.execute("SELECT platform_id, group_id, alias, platform_name FROM dashboard_group_names "
                                    "WHERE platform_id=? AND group_id=?", (platform_id, group_id)).fetchone())

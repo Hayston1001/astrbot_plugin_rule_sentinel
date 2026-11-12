@@ -86,7 +86,10 @@ class ManagementUiTests(unittest.TestCase):
         for code in ("model_not_configured", "invalid_configuration", "lock_in_use", "start_failed"):
             self.assertIn(code, script)
         self.assertIn("<summary>排查</summary>", html)
-        self.assertIn('id="platform-select"', html)
+        self.assertIn('id="available-group-select"', html)
+        for identifier in ('platform-select', 'platform', 'group'):
+            self.assertNotIn(f'id="{identifier}"', html)
+        self.assertIn('id="refresh-available-groups"', html)
         self.assertIn('id="group-select"', html)
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         self.assertIn(':root[data-theme="dark"]', css)
@@ -138,7 +141,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertRegex(css, r"\.workspace\s*\{[^}]*\bwidth:\s*100%")
         self.assertNotIn("grid-template-columns: 208px", css)
         self.assertNotIn('class="scope-bar"', html)
-        self.assertLess(html.index('id="panel-groups"'), html.index('id="platform-select"'))
+        self.assertLess(html.index('id="panel-groups"'), html.index('id="available-group-select"'))
         self.assertLess(html.index('id="panel-groups"'), html.index('id="monitor-group"'))
         self.assertIn('id="version" type="hidden"', html)
         self.assertIn('id="groups-status-body"', html)

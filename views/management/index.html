@@ -90,11 +90,11 @@
           <div class="groups-layout">
             <section class="group-list-panel"><div class="records-heading"><h2>已知群</h2><span id="groups-count" class="subtle"></span></div>
               <div id="groups-list" class="groups-list" aria-live="polite"></div>
-              <details class="manual"><summary>添加群</summary><div class="form-grid">
-                <label>选择平台实例 <select id="platform-select"><option value="">手动输入</option></select></label>
-                <label>平台实例标识 <input id="platform" maxlength="128" autocomplete="off"></label>
-                <label>群标识 <input id="group" maxlength="128" autocomplete="off"></label>
-              </div><button id="add-group" class="secondary" type="button">添加并选择</button><p id="add-group-status" class="notice" aria-live="polite"></p></details>
+              <details id="add-group-panel" class="manual"><summary>添加群</summary><div class="add-group-controls">
+                <label>选择群 <select id="available-group-select" aria-describedby="add-group-status"><option value="">正在读取群列表...</option></select></label>
+                <button id="refresh-available-groups" class="secondary" type="button">刷新群列表</button>
+                <button id="add-group" class="secondary" type="button" disabled>添加并选择</button>
+              </div><p id="add-group-status" class="field-help" aria-live="polite"></p></details>
             </section>
             <div id="group-detail-home" hidden><section id="group-detail-panel" class="group-detail-panel item-editor"><h2>群配置</h2><p id="group-detail-empty" class="empty">请选择群.</p>
               <div id="group-detail" hidden>

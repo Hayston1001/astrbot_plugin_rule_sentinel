@@ -42,6 +42,8 @@ let historyMode = "all";
 let createdRule = null;
 let failRuleConfirm = false;
 let liveCallbacks;
+let discoveryFailed = false;
+let discovery = {groups: [], history_available: true, truncated: false};
 const savedRules = new Map();
 const settings = {action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
   monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {}, jev_provider: "typesafe",
@@ -66,6 +68,10 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
     if (endpoint === "ui-state") return saved;
     if (endpoint === "platforms") return [{id: "p1", type: "qq_official"}, {id: "p2", type: "qq_official"}];
     if (endpoint === "groups") return groups;
+    if (endpoint === "available-groups") {
+      if (discoveryFailed) throw new Error("unavailable");
+      return structuredClone(discovery);
+    }
     if (endpoint === "summary") {
       if (failSummary && params.group_id === "separate-group") throw new Error("unavailable");
       return {total_messages: 1, status_counts: {proposed: 1}, recent_24h: {messages: 1, proposed: 1, no_action: 0},
@@ -103,6 +109,10 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       return {version};
     }
     if (endpoint === "group-name") return {...body, alias: "", platform_name: "平台群名"};
+    if (endpoint === "available-group-name") {
+      if (body.group_id === "no-name") throw new Error("unavailable");
+      return {...body, name: "自动获取的群名"};
+    }
     if (endpoint === "group-alias") return {...body, alias: body.name, platform_name: "平台群名"};
     if (endpoint === "group-settings") {
       const key = `${body.platform_id}/${body.group_id}`;
@@ -768,6 +778,39 @@ await elements["tab-settings"].trigger("click");
 assert.equal(elements["group-picker"].hidden, true);
 await elements["tab-status"].trigger("click");
 assert.equal(elements["group-picker"].hidden, false);
+
+assert.ok(!html.includes('id="platform-select"'));
+assert.ok(!html.includes('id="platform"'));
+assert.ok(!html.includes('id="group"'));
+discovery = {history_available: true, truncated: false, groups: [
+  {platform_id: "p1", group_id: "long-group-12345678", name: "已有群"},
+  {platform_id: "p1", group_id: "new-group", name: ""},
+  {platform_id: "p2", group_id: "no-name", name: ""},
+]};
+elements["add-group-panel"].open = true;
+await elements["add-group-panel"].trigger("toggle");
+assert.deepEqual(elements["available-group-select"].children.map((option) => option.textContent),
+  ["请选择群", "自动获取的群名", "未命名群"]);
+assert.match(elements["add-group-status"].textContent, /部分群名不可用/);
+assert.equal(elements["add-group"].disabled, true);
+elements["available-group-select"].value = JSON.stringify(["p1", "new-group"]);
+await elements["available-group-select"].trigger("change");
+assert.equal(elements["add-group"].disabled, false);
+await elements["add-group"].trigger("click");
+assert.deepEqual(requests.filter((request) => request.endpoint === "group-register").at(-1).body,
+  {platform_id: "p1", group_id: "new-group"});
+assert.equal(elements["group-select"].value, JSON.stringify(["p1", "new-group"]));
+assert.deepEqual(elements["available-group-select"].children.map((option) => option.textContent), ["请选择群", "未命名群"]);
+assert.equal(elements["add-group"].disabled, true);
+discovery = {groups: [], history_available: true, truncated: false};
+await elements["refresh-available-groups"].trigger("click");
+assert.match(elements["add-group-status"].textContent, /在目标群向机器人发送消息/);
+discovery.platforms_available = false;
+await elements["refresh-available-groups"].trigger("click");
+assert.match(elements["add-group-status"].textContent, /请先连接机器人/);
+discoveryFailed = true;
+await elements["refresh-available-groups"].trigger("click");
+assert.match(elements["add-group-status"].textContent, /读取失败/);
 
 const {setPanelVisibility, setDetailsOpen, updateVisiblePanel} = globalThis.__disclosureTest;
 delete globalThis.__disclosureTest;
