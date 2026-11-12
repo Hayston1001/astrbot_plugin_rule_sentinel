@@ -256,6 +256,8 @@ class ManagementQuickStartTests(unittest.TestCase):
         expect(page.locator("#rule")).to_have_value("first-rule")
         expect(page.locator("#text")).to_have_value("不要发送广告")
         page.locator("#preview").click()
+        expect(page.locator("#rule")).to_be_hidden()
+        expect(page.locator("#rule-id-value")).to_have_text("first-rule")
         page.locator("#tab-status").click()
         expect(page.locator("#quick-start")).to_be_hidden()
         page.locator("#tab-groups").click()

@@ -1586,7 +1586,7 @@ el("preview").addEventListener("click", async () => {
     if (!changedDuringConfirm || (sameDraft() && Number(el("version").value) === version)) {
       if (Number.isSafeInteger(saved.version)) {
         el("version").value = String(saved.version);
-        el("rule").readOnly = true;
+        setRuleIdLocked(fields.rule_id);
         el("rule-group-picker").hidden = true;
         el("new-rule-enabled").hidden = true;
         el("rule-form-title").textContent = "编辑规则";
@@ -1964,6 +1964,24 @@ function describeRuleAction(action) {
 function detachedRuleDraft() {
   return editingScope !== null && !expandedRuleCard && !el("rule-form").hidden;
 }
+function setRuleIdLocked(ruleId) {
+  const input = el("rule");
+  input.value = ruleId;
+  input.readOnly = true;
+  input.hidden = true;
+  const display = el("rule-id-value");
+  display.textContent = ruleId;
+  display.hidden = false;
+}
+function setRuleIdEditable() {
+  const input = el("rule");
+  input.value = "";
+  input.readOnly = false;
+  input.hidden = false;
+  const display = el("rule-id-value");
+  display.textContent = "";
+  display.hidden = true;
+}
 function updateNewRuleButton() {
   const button = el("new-rule");
   const canCancel = detachedRuleDraft();
@@ -2187,8 +2205,7 @@ async function loadCurrentRules() {
         clearPreview();
         el("rule-form-title").textContent = "编辑规则";
         el("save-status").textContent = "";
-        el("rule").value = rule.rule_id;
-        el("rule").readOnly = true;
+        setRuleIdLocked(rule.rule_id);
         editingScope = JSON.stringify(current);
         el("rule-group-picker").hidden = true;
         el("new-rule-enabled").hidden = true;
@@ -2464,8 +2481,7 @@ el("new-rule").addEventListener("click", () => {
   clearPreview();
   el("rule-form-title").textContent = "新建规则";
   el("save-status").textContent = "";
-  el("rule").value = "";
-  el("rule").readOnly = false;
+  setRuleIdEditable();
   editingScope = JSON.stringify(group());
   el("rule-group-picker").hidden = !allGroups();
   el("rule-group").textContent = "";

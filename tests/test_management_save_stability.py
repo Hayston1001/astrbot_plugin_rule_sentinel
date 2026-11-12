@@ -57,6 +57,11 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         self.assertEqual(card.locator(":scope > button").all_text_contents(), ["历史版本", "编辑"])
         card.get_by_role("button", name="编辑", exact=True).click()
         expect(card.get_by_role("button", name="收起", exact=True)).to_be_visible()
+        expect(page.locator("#rule")).to_be_hidden()
+        expect(page.locator("#rule-id-value")).to_have_text("rule-a")
+        self.assertEqual(page.locator("#rule-priority-help").evaluate(
+            "node => node.closest('label')?.querySelector('input')?.id"), "priority")
+        self.assertIn("不可修改", page.locator("#rule").evaluate("node => node.parentElement.textContent"))
         page.wait_for_timeout(450)
         page.locator("#text").fill("updated rule")
         page.evaluate("""() => {

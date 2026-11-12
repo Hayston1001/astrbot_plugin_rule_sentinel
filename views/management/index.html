@@ -76,10 +76,11 @@
             <div class="editor-heading"><div><h2 id="rule-form-title">新增或修改规则</h2><p>设置规则内容和处理动作.</p></div></div>
             <label id="rule-group-picker" hidden>所属群 <select id="rule-group"><option value="">请选择群</option></select></label>
             <label id="new-rule-enabled" class="rule-enabled"><span><strong>启用这条规则</strong><small>开启后, 此规则参与消息判定.</small></span><input id="enabled" type="checkbox"></label>
-            <div class="form-grid"><label>规则标识 <input id="rule" autocomplete="off"></label>
+            <div class="form-grid">
+              <label>规则标识 <input id="rule" autocomplete="off"><span id="rule-id-value" class="rule-id-value" hidden></span><span class="field-help">首次保存后不可修改.</span></label>
               <input id="version" type="hidden" value="0" hidden>
-              <label>优先级 <input id="priority" type="number" value="0" aria-describedby="rule-priority-help"></label></div>
-            <p id="rule-priority-help" class="field-help">多规则命中策略选择按规则优先级时, 数值越大越优先. 命中的最高优先级相同时转人工复核.</p>
+              <label>优先级 <input id="priority" type="number" value="0" aria-describedby="rule-priority-help"><span id="rule-priority-help" class="field-help">多规则命中策略选择按规则优先级时, 数值越大越优先. 命中的最高优先级相同时转人工复核.</span></label>
+            </div>
             <label>自然语言规则 <textarea id="text" rows="4"></textarea></label>
             <div class="form-section-heading"><div><h3>处理动作</h3><p id="action-order-help">动作按序处理. 拖动排序, 按方向键, 或使用上移和下移按钮调整.</p></div><button id="add-action" class="secondary" type="button">添加动作</button></div>
             <div id="action-list" role="list" aria-label="处理动作"></div><span id="action-order-status" class="visually-hidden" aria-live="polite"></span>

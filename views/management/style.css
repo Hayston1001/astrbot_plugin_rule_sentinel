@@ -263,6 +263,11 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .55; }
 .check input[type="checkbox"]::after { width: 13px; height: 13px; }
 .check input[type="checkbox"]:checked::after { transform: translateX(13px); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 16px; }
+.rule-id-value {
+  display: block; min-height: 36px; margin-top: 5px; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); background: var(--raised);
+  font-size: 14px; font-weight: var(--weight-value); overflow-wrap: anywhere;
+}
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .notice { margin-top: 8px; }
 .notice:empty, pre:empty { display: none; }
