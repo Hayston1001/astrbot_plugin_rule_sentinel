@@ -582,7 +582,10 @@ assert.equal(elements["group-reason-language-inherit"].textContent, "全局(Germ
 assert.equal(elements["group-reason-language"].value, "Japanese");
 assert.equal(elements["group-reason-language-mode"].value, "custom");
 
+groups[0].rule_count = 5;
 await elements["tab-groups"].trigger("click");
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(elements["groups-list"].children[0].children[0].children[1].textContent, "5 条规则");
 const [firstGroup, secondGroup, thirdGroup] = elements["groups-list"].children;
 const firstButton = firstGroup.children[3];
 const secondButton = secondGroup.children[3];

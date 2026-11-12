@@ -123,6 +123,7 @@ let availableGroups = [];
 let availableGroupsRevision = 0;
 let availableGroupsLoading = false;
 let availableGroupSaving = false;
+let availableGroupNamePending = false;
 let selectedScope = {platform_id: "", group_id: ""};
 let groupsLoaded = false;
 let groupsLoadFailed = false;
@@ -322,6 +323,7 @@ function selectTab(name) {
   }
   if (name === "records") startLive(); else stopLive();
   if (name === "status") loadAllGroupSummaries();
+  if (name === "groups" && groupsLoaded) refreshGroupCounts();
 }
 el("records-execution-filter").addEventListener("change", () => {
   currentExecutionFilter = el("records-execution-filter").value;
@@ -1542,7 +1544,7 @@ el("preview").addEventListener("click", async () => {
       }
       clearPreview();
       const completedRevision = revision;
-      await loadCurrentRules();
+      await Promise.all([loadCurrentRules(), refreshGroupCounts()]);
       if (revision === completedRevision) showFeedback("规则已保存.");
     } else if (editingScope === JSON.stringify(scope) && el("rule").value.trim() === fields.rule_id) {
       showFeedback("规则已保存, 新修改尚未保存.", "warning");
@@ -1755,6 +1757,17 @@ function renderGroupList(preserveClosing = false) {
       entry.row.appendChild(editor);
     }
   }
+}
+async function refreshGroupCounts() {
+  try {
+    const groups = await bridge.apiGet("groups");
+    if (!Array.isArray(groups)) return;
+    const counts = new Map(groups.map((item) => [groupKey(item), item.rule_count]));
+    for (const item of knownGroups) {
+      if (counts.has(groupKey(item))) item.rule_count = counts.get(groupKey(item)) ?? 0;
+    }
+    renderGroupList();
+  } catch { /* Counts stay as last loaded. */ }
 }
 function renderAllGroupStatus() {
   const body = el("groups-status-body");
@@ -2202,17 +2215,19 @@ function renderAvailableGroups() {
   const selected = select.value;
   const existing = new Set(knownGroups.map(groupKey));
   const items = availableGroups.filter((item) => !existing.has(groupKey(item)));
+  const pendingName = "正在获取群名...";
+  const displayName = (item) => item.name?.trim() || (availableGroupNamePending ? pendingName : "未命名群");
   const names = new Map();
   for (const item of items) {
-    const name = item.name?.trim() || "未命名群";
+    const name = displayName(item);
     if (!names.has(name)) names.set(name, []);
     names.get(name).push(groupKey(item));
   }
   select.textContent = "";
   addOption(select, "", availableGroupsLoading ? "正在读取群列表..." : items.length ? "请选择群" : "暂无可选群");
   for (const item of items) {
-    const name = item.name?.trim() || "未命名群";
-    const duplicates = names.get(name).sort();
+    const name = displayName(item);
+    const duplicates = name === pendingName ? [groupKey(item)] : names.get(name).sort();
     addOption(select, groupKey(item), duplicates.length > 1 ? `${name} (${duplicates.indexOf(groupKey(item)) + 1})` : name);
   }
   select.value = items.some((item) => groupKey(item) === selected) ? selected : "";
@@ -2224,6 +2239,7 @@ async function loadAvailableGroups() {
   if (availableGroupSaving) return;
   const current = ++availableGroupsRevision;
   availableGroupsLoading = true;
+  availableGroupNamePending = false;
   el("add-group-status").textContent = "正在读取群列表...";
   renderAvailableGroups();
   let result;
@@ -2246,14 +2262,21 @@ async function loadAvailableGroups() {
   const remaining = () => availableGroups.filter((item) => !knownGroups.some((known) => groupKey(known) === groupKey(item)));
   const initial = remaining();
   const partial = result.history_available === false || result.truncated === true;
-  el("add-group-status").textContent = result.platforms_available === false
+  const baseStatus = result.platforms_available === false
     ? "没有可用的 QQ 官方机器人, 请先连接机器人."
     : !initial.length
     ? partial ? "群列表不完整, 请刷新重试. 也可在目标群向机器人发送消息后刷新."
       : "暂无可选群. 请在目标群向机器人发送消息, 然后刷新."
     : partial ? "部分群列表暂不可用, 可刷新重试." : "请选择机器人收到过消息的群.";
+  el("add-group-status").textContent = baseStatus;
+  const unnamed = initial.filter((entry) => !entry.name);
   let failedNames = false;
-  for (const item of initial.filter((entry) => !entry.name)) {
+  if (unnamed.length) {
+    availableGroupNamePending = true;
+    renderAvailableGroups();
+    el("add-group-status").textContent = "正在获取群名...";
+  }
+  for (const item of unnamed) {
     if (current !== availableGroupsRevision) return;
     try {
       const response = await bridge.apiPost("available-group-name", {platform_id: item.platform_id, group_id: item.group_id});
@@ -2266,10 +2289,12 @@ async function loadAvailableGroups() {
       failedNames = true;
     }
   }
-  if (current === availableGroupsRevision && failedNames && remaining().length) {
-    el("add-group-status").textContent = partial ? "部分群列表或群名暂不可用, 可刷新重试."
-      : "部分群名不可用, 添加后可设置群备注.";
-  }
+  if (current !== availableGroupsRevision) return;
+  availableGroupNamePending = false;
+  renderAvailableGroups();
+  el("add-group-status").textContent = failedNames && remaining().length
+    ? partial ? "部分群列表或群名暂不可用, 可刷新重试." : "部分群名不可用, 添加后可设置群备注."
+    : baseStatus;
 }
 el("add-group-panel").addEventListener("toggle", () => {
   if (el("add-group-panel").open) return loadAvailableGroups();
