@@ -36,7 +36,7 @@
   --text: #1a1a1a;
   --muted: #595959;
   --border: #e5e5e5;
-  --control: #bfbfbf;
+  --control: #9a9a9a;
   --accent: #3c3c3c;
   --primary: #242424;
   --primary-text: #fff;
@@ -78,7 +78,7 @@
   --text: #f2f2f2;
   --muted: #bcbcbc;
   --border: #3b3b3b;
-  --control: #707070;
+  --control: #929292;
   --accent: #d9d9d9;
   --primary: #f0f0f0;
   --primary-text: #1a1a1a;
@@ -110,7 +110,7 @@
     --signal-warning-line: #f3d18a;
     --action-surface-saturation: 14%; --action-surface-lightness: 16%; --action-outline-lightness: 30%; --action-badge-lightness: 80%; --action-badge-text: #1a1a1a;
     --ground: #1a1a1a; --surface: #1a1a1a; --raised: #242424; --active: #303030;
-    --text: #f2f2f2; --muted: #bcbcbc; --border: #3b3b3b; --control: #707070;
+    --text: #f2f2f2; --muted: #bcbcbc; --border: #3b3b3b; --control: #929292;
     --accent: #d9d9d9; --primary: #f0f0f0; --primary-text: #1a1a1a; --focus: #f0f0f0;
     --button-bg: #393939; --button-hover-bg: #4a4a4a; --button-border: #929292; --button-hover-border: #c0c0c0;
     --button-disabled-bg: #303030; --button-disabled-border: #585858;
@@ -238,11 +238,12 @@ label { display: block; min-width: 0; font-size: 13px; font-weight: var(--weight
 input:not([type="checkbox"]), textarea, select {
   display: block; width: 100%; min-width: 0; min-height: 36px; margin-top: 5px; padding: 7px 10px;
   border: 1px solid var(--control); border-radius: var(--radius); color: var(--text); background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--control);
   font-size: 14px; font-weight: var(--weight-value);
   transition: border-color var(--dur-base) ease, box-shadow var(--dur-base) ease, background-color var(--dur-base) ease;
 }
-input:not([type="checkbox"]):hover, textarea:hover, select:hover { border-color: var(--muted); }
-input:not([type="checkbox"]):focus, textarea:focus, select:focus { border-color: var(--text); box-shadow: 0 0 0 4px var(--focus-ring); }
+input:not([type="checkbox"]):hover, textarea:hover, select:hover { border-color: var(--muted); box-shadow: inset 0 0 0 1px var(--muted); }
+input:not([type="checkbox"]):focus, textarea:focus, select:focus { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text), 0 0 0 4px var(--focus-ring); }
 input::placeholder, textarea::placeholder { color: var(--muted); font-size: 13px; font-weight: var(--weight-support); opacity: 1; }
 textarea { min-height: 84px; resize: vertical; }
 input[type="checkbox"] {
@@ -284,11 +285,12 @@ label > .field-help { display: block; margin-top: 6px; font-weight: 400; }
   display: flex; align-items: center; justify-content: space-between; width: 100%; min-width: 0;
   min-height: 36px; padding: 7px 10px; border: 1px solid var(--control); border-radius: var(--radius);
   color: var(--text); background: var(--surface); font-size: 14px; font-weight: var(--weight-value); text-align: left;
+  box-shadow: inset 0 0 0 1px var(--control);
 }
-.custom-select-trigger:hover:not(:disabled) { border-color: var(--muted); background: var(--surface); }
+.custom-select-trigger:hover:not(:disabled) { border-color: var(--muted); background: var(--surface); box-shadow: inset 0 0 0 1px var(--muted); }
 .custom-select-trigger:active:not(:disabled) { transform: none; }
-.custom-select-trigger[aria-expanded="true"] { border-color: var(--text); box-shadow: 0 0 0 4px var(--focus-ring); }
-.custom-select-trigger:disabled { color: var(--muted); background: var(--button-disabled-bg); border-color: var(--button-disabled-border); opacity: .62; }
+.custom-select-trigger[aria-expanded="true"] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text), 0 0 0 4px var(--focus-ring); }
+.custom-select-trigger:disabled { color: var(--muted); background: var(--button-disabled-bg); border-color: var(--button-disabled-border); box-shadow: inset 0 0 0 1px var(--button-disabled-border); opacity: .62; }
 .custom-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .custom-select-arrow { flex: none; width: 8px; height: 8px; margin: -4px 4px 0 12px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform 220ms var(--ease-settle); }
 .custom-select-trigger[aria-expanded="true"] .custom-select-arrow { transform: translateY(4px) rotate(225deg); }
