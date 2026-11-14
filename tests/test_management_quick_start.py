@@ -23,7 +23,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/fixture.js":
             body = (ROOT / "tests" / "management_quick_start_fixture.js").read_bytes()
             content_type = "text/javascript; charset=utf-8"
-        elif path in ("/app.js", "/select.js", "/motion.js", "/style.css"):
+        elif path in ("/app.js", "/overview.js", "/select.js", "/motion.js", "/style.css"):
             body = (VIEW / path[1:]).read_bytes()
             content_type = "text/css; charset=utf-8" if path.endswith(".css") else "text/javascript; charset=utf-8"
         else:

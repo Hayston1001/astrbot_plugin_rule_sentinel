@@ -107,6 +107,7 @@ function showFeedback(message, tone = "success") {
 function feedbackError(error, prefix = "操作失败") {
   showFeedback(`${prefix}: ${error?.message || "未知错误"}`, "error");
 }
+window.SentinelOverview?.setFeedback(showFeedback);
 let pending = null;
 let revision = 0;
 let auditCursor = 0;
@@ -183,6 +184,10 @@ let groupListMessage = true;
 const DEFAULT_NOTICE_TEMPLATE = "有消息触发了规则 {rule_id}, 但目标是管理员/机器人, {action} 无法执行";
 let editingScope = null;
 let expandedRuleCard = null;
+let suspendedRuleDraft = false;
+let ruleDetail = null;
+let visibleRuleDetail = null;
+let ruleDetailRevision = 0;
 let historyRevision = 0;
 const nameLookups = new Set();
 
@@ -250,6 +255,14 @@ function updateVisiblePanel(panel, update) {
   const before = canAnimateDisclosure(panel) && !panel.hidden ? panelFrame(panel) : null;
   update();
   if (before) setPanelVisibility(panel, true, {force: true, fromFrame: before});
+}
+function fadeInContent(node) {
+  if (canAnimateDisclosure(node) && (!node.getClientRects || node.getClientRects().length)) node.animate([{opacity: 0}, {opacity: 1}],
+    {duration: 180, easing: "ease-out"});
+}
+function loadingFadeDelay(node) {
+  return canAnimateDisclosure(node) && (!node.getClientRects || node.getClientRects().length)
+    ? new Promise((resolve) => setTimeout(resolve, 180)) : Promise.resolve();
 }
 function setDetailsOpen(details, open, animate = false) {
   const active = detailsTransitions.get(details);
@@ -335,7 +348,7 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
     records: ["判定记录", "查看所选群的判定和执行结果."],
     rules: ["群规则", "管理所选群的规则和处理动作."],
     groups: ["群管理", "管理各群的监控, 名称和处理方式."],
-    status: ["运行状态", "查看所有群的监控状态和统计."],
+    status: ["总览", "查看待确认动作, 服务状态和群情况."],
     settings: ["监控设置", "设置全局默认和运行限制."],
   };
   el("page-title").textContent = titles[name][0];
@@ -344,6 +357,7 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   el("refresh-group").hidden = name !== "records";
   el("records-actions").hidden = name !== "records";
   el("new-rule").hidden = name !== "rules";
+  el("overview-customize").hidden = name !== "status";
   el("group-picker").hidden = name === "groups" || name === "settings";
   for (const tab of TAB_NAMES) {
     el(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
@@ -351,8 +365,9 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   }
   el("tab-loading").hidden = true;
   el("page-content").hidden = false;
+  window.SentinelOverview?.setActive(name === "status");
   if (updateData && tabDataReady) {
-    if (name === "records") startLive(); else stopLive();
+    if (name === "records" || name === "status") startLive(); else stopLive();
     if (name === "status") loadAllGroupSummaries();
     if (name === "groups" && groupsLoaded) refreshGroupCounts();
   }
@@ -476,16 +491,16 @@ async function refreshStatus() {
   const running = status.monitoring === "dry_run";
   const backendLabel = ({llm: "普通 LLM", none: "未选择"})[status.backend] || status.backend || "未选择";
    el("status").setAttribute("data-tone", running ? "success" : "warning");
-   el("status").textContent = running ? "运行中" : "未运行";
+    el("status").textContent = running ? "服务已启动" : "服务未启动";
    el("status-main").setAttribute("data-tone", running ? "success" : "warning");
-   el("status-label").textContent = running ? "监控运行中" : "监控未启动";
+    el("status-label").textContent = running ? "已启动" : "未启动";
    el("status-backend").textContent = backendLabel;
-   el("status-execution").textContent = status.action_execution_available ? "可执行" : status.action_execution_enabled ? "不可用" : "未开启";
+    el("status-execution").textContent = status.action_execution_available ? "总开关已开启" : status.action_execution_enabled ? "不可用" : "未开启";
    el("status-detail").textContent = running
-     ? status.action_execution_available ? "消息判定和真实执行已开启. 各群按设置处理规则动作." : status.action_execution_enabled ? "消息判定已开启, 真实执行不可用." : "消息判定已开启, 仅记录结果."
-    : status.start_error || status.monitoring === "invalid_configuration"
-      ? `${startErrors[status.start_error || "invalid_configuration"] || "监控未启动: 请查看 AstrBot 日志."} 判定后端: ${backendLabel}.`
-      : `监控未启动. 判定后端: ${backendLabel}. 请检查监控设置.`;
+     ? "消息处理服务已启动, 不代表模型或平台可用. 真实动作仍受各群和规则设置约束."
+     : status.start_error || status.monitoring === "invalid_configuration"
+       ? startErrors[status.start_error || "invalid_configuration"] || "消息处理服务未启动, 请查看 AstrBot 日志."
+       : "消息处理服务未启动, 请检查监控设置.";
   } catch (error) { runtimeStatus = null; showError(el("status-detail"), error); el("status").setAttribute("data-tone", "warning"); el("status").textContent = "状态不可用"; el("status-label").textContent = "状态不可用"; el("status-main").setAttribute("data-tone", "warning"); el("status-backend").textContent = "-"; el("status-execution").textContent = "-"; }
   renderGroupList();
   renderAllGroupStatus();
@@ -493,6 +508,7 @@ async function refreshStatus() {
 }
 const statusRead = refreshStatus();
 el("status-settings").addEventListener("click", () => selectTab("settings"));
+el("overview-records").addEventListener("click", () => selectTab("records"));
 async function showQuery(endpoint, params) {
   const requestRevision = ++outputRevision;
   el("audit-next").disabled = true;
@@ -789,6 +805,7 @@ function renderRecords(rows, append = false, update = false) {
         badge.className = failureReason ? "badge has-reason" : "badge";
         if (row.status === "proposed" && tone === "success") badge.className += " record-executed";
         if (label === "拟执行") badge.className += " record-planned";
+        if (["待确认", "待执行", "执行中", "处理中"].includes(label)) badge.className += " record-pending";
         badge.setAttribute("data-tone", tone);
         if (failureReason) { badge.title = failureReason; badge.setAttribute("aria-label", `${label}: ${failureReason}`); }
         badge.textContent = label;
@@ -856,6 +873,13 @@ function renderRecords(rows, append = false, update = false) {
         item.appendChild(recordElement("p", "record-action-note", `群提示: ${parts.join(" / ")}`));
       }
       if (action.mode === "confirm" && state === "pending_confirm") {
+        const progress = recordElement("ol", "action-progress");
+        for (const [label, stage] of [["判定完成", "done"], ["待确认", "current"], ["执行结果尚未产生", "future"]]) {
+          const step = recordElement("li", "", label);
+          step.setAttribute("data-state", stage);
+          progress.appendChild(step);
+        }
+        item.appendChild(progress);
         const button = recordElement("button", "secondary", `执行${Object.hasOwn(actionNames, action.kind) ? actionNames[action.kind] : action.kind}`);
         button.type = "button";
         button.addEventListener("click", async () => {
@@ -903,15 +927,21 @@ function renderRecords(rows, append = false, update = false) {
     const loadOriginal = async () => {
       if (contentLoading || contentLoaded || !expandedMessages.has(key)) return;
       contentLoading = true;
-      updateVisiblePanel(content, () => { original.textContent = "正在读取消息原文..."; });
+      updateVisiblePanel(content, () => { original.textContent = "正在读取消息原文..."; original.classList.add("is-loading"); });
+      fadeInContent(original);
+      const loadingFade = loadingFadeDelay(content);
       try {
         const result = await bridge.apiGet("message-content", {...contentScope, message_id: messageId});
+        await loadingFade;
         if (!expandedMessages.has(key) || selectedAtRender !== JSON.stringify(group()) || detailRow.isConnected === false) return;
-        updateVisiblePanel(content, () => { original.textContent = typeof result?.content === "string" ? result.content : "原文不可用或已过期."; });
+        updateVisiblePanel(content, () => { original.classList.remove("is-loading"); original.textContent = typeof result?.content === "string" ? result.content : "原文不可用或已过期."; });
+        fadeInContent(original);
         contentLoaded = true;
       } catch {
+        await loadingFade;
         if (expandedMessages.has(key) && detailRow.isConnected !== false) {
-          updateVisiblePanel(content, () => { original.textContent = "无法读取消息原文."; });
+          updateVisiblePanel(content, () => { original.classList.remove("is-loading"); original.textContent = "无法读取消息原文."; });
+          fadeInContent(original);
         }
       } finally { contentLoading = false; }
     };
@@ -927,6 +957,7 @@ function renderRecords(rows, append = false, update = false) {
         contentLoaded = false;
         setPanelVisibility(content, false, {onHidden: () => {
           detailRow.hidden = true;
+          original.classList.remove("is-loading");
           original.textContent = "展开后读取.";
         }});
       }
@@ -965,8 +996,11 @@ async function loadRecords(reset) {
   if (reset) { recordsCursor = null; loadedRecords = []; }
   el("records-next").disabled = true;
   el("records-status").textContent = "正在读取记录...";
+  fadeInContent(el("records-status"));
+  const loadingFade = loadingFadeDelay(el("records-status"));
   try {
     const rows = await bridge.apiGet("messages", {...current, limit: 50, ...(recordsCursor === null ? {} : {before_id: recordsCursor})});
+    await loadingFade;
     if (requestRevision !== recordsRevision) return;
     for (const row of rows) {
       const index = loadedRecords.findIndex((item) => recordKey(item) === recordKey(row));
@@ -975,10 +1009,11 @@ async function loadRecords(reset) {
     }
     loadedRecords.sort(compareRecords);
     renderRecords(loadedRecords);
+    if (reset) fadeInContent(el("records-body"));
     if (rows.length) recordsCursor = rows[rows.length - 1].id;
     el("records-next").disabled = rows.length < 50;
     el("records-status").textContent = rows.length ? `已加载 ${loadedRecords.length} 条消息.` : "没有更多消息.";
-  } catch (error) { if (requestRevision === recordsRevision) showError(el("records-status"), error); }
+  } catch (error) { await loadingFade; if (requestRevision === recordsRevision) { showError(el("records-status"), error); fadeInContent(el("records-status")); } }
 }
 el("records-next").addEventListener("click", () => loadRecords(false));
 async function loadSummary() {
@@ -989,18 +1024,33 @@ async function loadSummary() {
     if (requestRevision !== summaryRevision) return;
     el("stat-messages").textContent = String(summary.recent_24h.messages);
     el("stat-proposed").textContent = String(summary.recent_24h.proposed);
-    el("stat-no-action").textContent = String(summary.recent_24h.no_action);
-    updateFilterCounts(summary);
-    el("summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
-  } catch (error) { if (requestRevision === summaryRevision) showError(el("summary-status"), error); }
+     el("stat-no-action").textContent = String(summary.recent_24h.no_action);
+     el("overview-messages").textContent = String(summary.recent_24h.messages);
+     el("overview-proposed").textContent = String(summary.recent_24h.proposed);
+     el("overview-no-action").textContent = String(summary.recent_24h.no_action);
+     el("overview-failed").textContent = Number.isSafeInteger(summary.recent_24h.failed) ? String(summary.recent_24h.failed) : "—";
+     el("overview-review").textContent = Number.isSafeInteger(summary.recent_24h.review) ? String(summary.recent_24h.review) : "—";
+     updateFilterCounts(summary);
+     el("summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
+     el("overview-summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
+  } catch (error) {
+    if (requestRevision === summaryRevision) {
+      for (const id of ["stat-messages", "stat-proposed", "stat-no-action", "overview-messages", "overview-proposed", "overview-no-action", "overview-failed", "overview-review"]) el(id).textContent = "—";
+      showError(el("summary-status"), error);
+      el("overview-summary-status").textContent = "近期统计不可用.";
+    }
+  }
 }
 function scheduleRefresh() {
   if (refreshTimer !== null) clearTimeout(refreshTimer);
   refreshTimer = null;
-  if (liveMode !== "polling" || document.hidden || activeTab !== "records") return;
+  if (liveMode !== "polling" || document.hidden || !["records", "status"].includes(activeTab)) return;
   refreshTimer = setTimeout(async () => {
     refreshTimer = null;
-    try { await refreshVisibleRecords(); } finally { scheduleRefresh(); }
+    try {
+      if (activeTab === "status") await Promise.all([window.SentinelOverview?.refresh(), loadSummary(), loadAllGroupSummaries()]);
+      else await refreshVisibleRecords();
+    } finally { scheduleRefresh(); }
   }, 5000);
   if (typeof refreshTimer?.unref === "function") refreshTimer.unref();
 }
@@ -1062,6 +1112,7 @@ function liveState(mode) {
   liveMode = mode;
   el("live-status").textContent = mode === "connected" ? "实时 · 已连接" : mode === "polling" ? "已断开, 使用轮询" : "实时 · 重连中";
   el("live-status").setAttribute("data-tone", mode === "connected" ? "success" : "warning");
+  window.SentinelOverview?.setLiveState(mode);
 }
 function failLive(generation) {
   if (generation !== streamGeneration) return;
@@ -1084,7 +1135,7 @@ function checkLive(generation) {
 }
 function startLive(retry = false) {
   stopLive();
-  if (document.hidden || activeTab !== "records") return;
+  if (document.hidden || !["records", "status"].includes(activeTab)) return;
   const scope = scopeParams();
   liveState(retry ? "polling" : "connecting");
   if (retry) scheduleRefresh();
@@ -1095,20 +1146,26 @@ function startLive(retry = false) {
   if (typeof streamWatchdog?.unref === "function") streamWatchdog.unref();
   if (typeof bridge.subscribeSSE !== "function") { failLive(generation); return; }
   bridge.subscribeSSE("events", {
-    onOpen() { if (generation === streamGeneration && !retry) { liveState("connected"); refreshVisibleRecords(); } },
+    onOpen() { if (generation === streamGeneration && !retry) { liveState("connected"); if (activeTab === "status") window.SentinelOverview?.refresh(); else refreshVisibleRecords(); } },
     onError() { failLive(generation); },
     onMessage(event) {
       if (generation !== streamGeneration) return;
       streamLastSeen = Date.now();
-      if (retry && liveMode === "polling") { liveState("connected"); scheduleRefresh(); refreshVisibleRecords(); }
+      if (retry && liveMode === "polling") { liveState("connected"); scheduleRefresh(); if (activeTab === "status") window.SentinelOverview?.refresh(); else refreshVisibleRecords(); }
       if (Date.now() - connectedAt >= 45000) streamFailures = 0;
       if (event.eventType === "ping") return;
       if (event.eventType === "resync") {
+        if (activeTab === "status") { window.SentinelOverview?.refresh(); loadSummary(); loadAllGroupSummaries(); return; }
         if (autoRefreshing) resyncPending = true; else refreshVisibleRecords();
         return;
       }
       const row = event.parsed;
       if (!row || typeof row.message_id !== "string" || !Number.isSafeInteger(row.id)) return;
+      if (activeTab === "status") {
+        window.SentinelOverview?.onEvent();
+        if (summaryTimer === null) summaryTimer = setTimeout(() => { summaryTimer = null; loadSummary(); loadAllGroupSummaries(); }, 1000);
+        return;
+      }
       const key = recordKey(row);
       const index = loadedRecords.findIndex((item) => recordKey(item) === key);
       if (index >= 0 && (loadedRecords[index].id > row.id || (loadedRecords[index].id === row.id &&
@@ -1760,6 +1817,7 @@ function chooseGroup(item) {
 }
 function renderGroupList(preserveClosing = false) {
   renderQuickStart();
+  window.SentinelOverview?.setGroups(knownGroups.map((item) => ({...item, name: groupName(item)})));
   const container = el("groups-list");
   el("groups-count").textContent = groupsLoaded ? `${knownGroups.length} 个群` : "";
   const editor = el("group-detail-panel");
@@ -1882,12 +1940,12 @@ function renderAllGroupStatus() {
     const number = (value) => value == null ? "-" : `${value}${summary.truncated ? "+" : ""}`;
     const [monitorLabel, monitorTone] = groupMonitoringState(item);
     const values = [groupName(item), monitorLabel, number(recent?.messages), number(recent?.proposed),
-      number(recent?.no_action), summary?.latency_p95_ms == null ? "-" : `${summary.latency_p95_ms} ms`,
+      number(recent?.no_action), summary?.latency_p95_ms == null ? "-" : `${summary.latency_p95_ms} ms`, String(item.rule_count ?? "-"),
       item.last_activity ? localTimeFor(item.last_activity) : "-"];
     const row = document.createElement("tr");
     for (const [index, value] of values.entries()) {
       const cell = document.createElement("td");
-      cell.setAttribute("data-label", ["群", "监控状态", "消息数", "拟执行", "未违反规则", "P95 延迟", "最近活动"][index]);
+      cell.setAttribute("data-label", ["群", "监控状态", "消息数", "拟执行", "未违反规则", "P95 延迟", "已保存规则", "最近活动"][index]);
       if (index === 1) {
         const badge = document.createElement("span");
         badge.className = "badge";
@@ -1895,7 +1953,7 @@ function renderAllGroupStatus() {
         badge.textContent = value;
         cell.appendChild(badge);
       } else cell.textContent = value;
-      if (index >= 2 && index <= 5) cell.className = "number";
+      if (index >= 2 && index <= 6) cell.className = "number";
       row.appendChild(cell);
     }
     body.appendChild(row);
@@ -1994,7 +2052,7 @@ function updateNewRuleButton() {
 }
 function updateRuleSaveControls() {
   el("preview").disabled = saving;
-  const buttons = document.querySelectorAll?.(".rule-edit") || (expandedRuleCard ? [expandedRuleCard.querySelector?.(".rule-edit")].filter(Boolean) : []);
+  const buttons = document.querySelectorAll?.(".rule-edit, .rule-history-toggle") || (expandedRuleCard ? [expandedRuleCard.querySelector?.(".rule-edit")].filter(Boolean) : []);
   for (const button of buttons) button.disabled = saving;
   for (const toggle of document.querySelectorAll?.(".rule-state-toggle input") || []) {
     toggle.disabled = saving || ruleTogglesInFlight.has(toggle.ruleKey);
@@ -2034,6 +2092,7 @@ function closeRuleEditor() {
   clearPreview();
   const form = el("rule-form");
   editingScope = null;
+  suspendedRuleDraft = false;
   const parent = form.parentNode;
   if (expandedRuleCard === parent) expandedRuleCard = null;
   parent?.classList?.remove("is-editing");
@@ -2043,12 +2102,45 @@ function closeRuleEditor() {
   setPanelVisibility(form, false, {onHidden: parkRuleEditor});
   el("save-status").textContent = "";
 }
+function resetRuleDetail() {
+  ruleDetailRevision += 1;
+  if (ruleDetail?.kind === "history") ruleDetail.setActive(false);
+  if (visibleRuleDetail?.kind === "history") {
+    cancelPanelTransition(visibleRuleDetail.panel);
+    visibleRuleDetail.panel.hidden = true;
+  }
+  ruleDetail = null;
+  visibleRuleDetail = null;
+}
+function selectRuleDetail(next) {
+  const previous = ruleDetail;
+  const discard = previous === next && previous?.kind === "edit";
+  if (previous === next) next = null;
+  const current = ++ruleDetailRevision;
+  previous?.setActive(false, discard);
+  ruleDetail = next;
+  next?.setActive(true);
+  const open = () => {
+    if (current !== ruleDetailRevision) return;
+    if (visibleRuleDetail?.panel === el("rule-form") && editingScope === null) parkRuleEditor();
+    visibleRuleDetail = next;
+    return next?.open();
+  };
+  const visible = visibleRuleDetail;
+  if (visible && visible !== next && !visible.panel.hidden) {
+    setPanelVisibility(visible.panel, false, {force: true, onHidden: open});
+  } else if (visible === next && next) {
+    return next.open();
+  } else return open();
+}
 async function loadCurrentRules() {
   const grouped = allGroups();
   const scopes = grouped ? knownGroups.map((item) => ({platform_id: item.platform_id, group_id: item.group_id})) : [group()];
   const requestRevision = ++rulesRevision;
   const container = el("current-rules");
-  if (!container.children.length) container.textContent = "正在读取规则...";
+  const initialLoading = !container.children.length;
+  if (initialLoading) { container.textContent = "正在读取规则..."; fadeInContent(container); }
+  const loadingFade = initialLoading ? loadingFadeDelay(container) : Promise.resolve();
   try {
     const batches = scopes.map((scope) => ({scope, rules: null, error: null}));
     let next = 0;
@@ -2060,6 +2152,7 @@ async function loadCurrentRules() {
       }
     }
     await Promise.all(Array.from({length: Math.min(batches.length, 6)}, worker));
+    await loadingFade;
     if (requestRevision !== rulesRevision) return;
     const form = el("rule-form");
     const anchorBefore = !form.hidden && form.getClientRects?.().length ? form.getBoundingClientRect().top : null;
@@ -2073,6 +2166,7 @@ async function loadCurrentRules() {
     if (expandedRuleCard && form.parentNode === expandedRuleCard) {
       for (const {row} of actionRows) row.style.animation = "none";
     }
+    resetRuleDetail();
     parkRuleEditor();
     ruleDescriptions.length = 0;
     const nextContainer = document.createElement("div");
@@ -2201,86 +2295,124 @@ async function loadCurrentRules() {
       edit.disabled = saving;
       edit.setAttribute("aria-controls", "rule-form");
       edit.setAttribute("aria-expanded", "false");
-      edit.addEventListener("click", () => {
-        if (expandedRuleCard === item) { closeRuleEditor(); return; }
-        clearPreview();
-        el("rule-form-title").textContent = "编辑规则";
-        el("save-status").textContent = "";
-        setRuleIdLocked(rule.rule_id);
-        editingScope = JSON.stringify(current);
-        el("rule-group-picker").hidden = true;
-        el("new-rule-enabled").hidden = true;
-        el("version").value = String(rule.version);
-        el("priority").value = String(rule.priority ?? 0);
-        el("text").value = rule.text;
-        setActions(rule.actions || []);
-        el("enabled").checked = rule.enabled;
-        attachRuleEditor(item, edit);
-        setPanelVisibility(el("rule-form"), true, {force: true});
-        item.scrollIntoView({behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start"});
-      });
       content.appendChild(meta);
       content.appendChild(text);
       content.appendChild(currentConfig);
       item.appendChild(content);
       const historyButton = document.createElement("button");
       historyButton.type = "button";
+      historyButton.className = "rule-history-toggle";
       historyButton.textContent = "历史版本";
+      historyButton.disabled = saving;
       historyButton.setAttribute("aria-expanded", "false");
       const historyPanel = document.createElement("div");
       historyPanel.className = "rule-history";
       historyPanel.hidden = true;
       let panelRevision = 0;
-      let historyExpanded = false;
-      historyButton.addEventListener("click", async () => {
-        const requestRevision = ++panelRevision;
-        historyExpanded = !historyExpanded;
-        historyButton.setAttribute("aria-expanded", String(historyExpanded));
-        if (!historyExpanded) { setPanelVisibility(historyPanel, false); return; }
-        const scopeRevision = historyRevision;
-        historyPanel.textContent = "正在读取历史版本...";
-        setPanelVisibility(historyPanel, true);
-        try {
-          const history = await bridge.apiGet("rules/history", {...current, rule_id: rule.rule_id});
-          if (requestRevision !== panelRevision || scopeRevision !== historyRevision) return;
-          if (history.some((entry) => entry.version > rule.version)) {
-            updateVisiblePanel(historyPanel, () => { historyPanel.textContent = "规则已更新, 请刷新页面后查看历史版本."; });
-            return;
+      const editDetail = {
+        kind: "edit", panel: form,
+        setActive(active, discard = false) {
+          edit.setAttribute("aria-expanded", String(active));
+          edit.textContent = active ? "收起" : "编辑";
+          edit.title = active ? "收起并放弃未保存的修改" : "";
+          item.classList?.toggle?.("is-editing", active);
+          if (!active) {
+            stopActionFollow();
+            cancelActionDrag();
+            el("panel-rules").style.paddingBottom = "";
+            if (expandedRuleCard === item) expandedRuleCard = null;
+            const ownsDraft = form.parentNode === item && editingScope === JSON.stringify(current) && el("rule").value === rule.rule_id;
+            if (discard && ownsDraft) { clearPreview(); editingScope = null; suspendedRuleDraft = false; el("save-status").textContent = ""; }
+            else if (ownsDraft) suspendedRuleDraft = true;
+            updateNewRuleButton();
           }
-          const older = history.filter((entry) => entry.version < rule.version).reverse();
-          updateVisiblePanel(historyPanel, () => {
-            historyPanel.textContent = "";
-            if (!older.length) { historyPanel.textContent = "暂无历史版本."; return; }
-            const hint = document.createElement("p");
-            hint.className = "history-hint";
-            hint.textContent = "历史版本仅供查看, 不参与判定.";
-            historyPanel.appendChild(hint);
-            for (const entry of older) {
-              const section = document.createElement("section");
-              section.className = "history-entry";
-              const heading = document.createElement("strong");
-              heading.textContent = `第 ${entry.version} 版`;
-              const info = document.createElement("p");
-              info.textContent = `${localTimeFor(entry.created_at)} / ${entry.modified_by || "-"} / 保存时: ${entry.enabled ? "启用" : "停用"} / 优先级 ${entry.priority ?? 0}`;
-              const text = document.createElement("p");
-              text.textContent = entry.text;
-              const actions = document.createElement("p");
-              const update = () => { actions.textContent = (entry.actions || []).map((action, index) => `${index + 1}. ${describeRuleAction(action)}`).join("\n") || "未配置动作"; };
-              update(); ruleDescriptions.push(update);
-              for (const child of [heading, info, text, actions]) section.appendChild(child);
-              historyPanel.appendChild(section);
-            }
-          });
-        } catch (error) {
-          if (requestRevision === panelRevision && scopeRevision === historyRevision) updateVisiblePanel(historyPanel, () => showError(historyPanel, error));
-        }
-      });
+        },
+        open() {
+          const resume = suspendedRuleDraft && editingScope === JSON.stringify(current) && el("rule").value === rule.rule_id && el("rule").readOnly;
+          if (!resume) {
+            clearPreview();
+            el("rule-form-title").textContent = "编辑规则";
+            el("save-status").textContent = "";
+            setRuleIdLocked(rule.rule_id);
+            editingScope = JSON.stringify(current);
+            el("rule-group-picker").hidden = true;
+            el("new-rule-enabled").hidden = true;
+            el("version").value = String(rule.version);
+            el("priority").value = String(rule.priority ?? 0);
+            el("text").value = rule.text;
+            setActions(rule.actions || []);
+            el("enabled").checked = rule.enabled;
+          }
+          suspendedRuleDraft = false;
+          attachRuleEditor(item, edit);
+          setPanelVisibility(form, true, {force: true});
+          item.scrollIntoView({behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start"});
+        },
+      };
+      const historyDetail = {
+        kind: "history", panel: historyPanel,
+        setActive(active) {
+          historyButton.setAttribute("aria-expanded", String(active));
+          if (!active) panelRevision += 1;
+        },
+        async open() {
+          const requestRevision = ++panelRevision;
+          const scopeRevision = historyRevision;
+          historyPanel.textContent = "";
+          const loading = document.createElement("p");
+          loading.className = "history-loading is-loading";
+          loading.textContent = "正在读取历史版本...";
+          historyPanel.appendChild(loading);
+          historyPanel.setAttribute("aria-busy", "true");
+          setPanelVisibility(historyPanel, true, {force: true});
+          const loadingFade = loadingFadeDelay(historyPanel);
+          try {
+            const history = await bridge.apiGet("rules/history", {...current, rule_id: rule.rule_id});
+            await loadingFade;
+            if (requestRevision !== panelRevision || scopeRevision !== historyRevision) return;
+            updateVisiblePanel(historyPanel, () => {
+              historyPanel.textContent = "";
+              if (history.some((entry) => entry.version > rule.version)) { historyPanel.textContent = "规则已更新, 请刷新页面后查看历史版本."; return; }
+              const older = history.filter((entry) => entry.version < rule.version).reverse();
+              if (!older.length) { historyPanel.textContent = "暂无历史版本."; return; }
+              const hint = document.createElement("p");
+              hint.className = "history-hint";
+              hint.textContent = "历史版本仅供查看, 不参与判定.";
+              historyPanel.appendChild(hint);
+              for (const entry of older) {
+                const section = document.createElement("section");
+                section.className = "history-entry";
+                const heading = document.createElement("strong");
+                heading.textContent = `第 ${entry.version} 版`;
+                const info = document.createElement("p");
+                info.textContent = `${localTimeFor(entry.created_at)} / ${entry.modified_by || "-"} / 保存时: ${entry.enabled ? "启用" : "停用"} / 优先级 ${entry.priority ?? 0}`;
+                const text = document.createElement("p");
+                text.textContent = entry.text;
+                const actions = document.createElement("p");
+                const update = () => { actions.textContent = (entry.actions || []).map((action, index) => `${index + 1}. ${describeRuleAction(action)}`).join("\n") || "未配置动作"; };
+                update(); ruleDescriptions.push(update);
+                for (const child of [heading, info, text, actions]) section.appendChild(child);
+                historyPanel.appendChild(section);
+              }
+            });
+          } catch (error) {
+            await loadingFade;
+            if (requestRevision !== panelRevision || scopeRevision !== historyRevision) return;
+            updateVisiblePanel(historyPanel, () => showError(historyPanel, error));
+          }
+          historyPanel.setAttribute("aria-busy", "false");
+          const children = Array.from(historyPanel.children);
+          if (children.length) children.forEach(fadeInContent); else fadeInContent(historyPanel);
+        },
+      };
+      edit.addEventListener("click", () => selectRuleDetail(editDetail));
+      historyButton.addEventListener("click", () => selectRuleDetail(historyDetail));
       item.appendChild(historyButton);
       item.appendChild(edit);
       item.appendChild(historyPanel);
       destination.appendChild(item);
-      if (!form.hidden && editingScope === JSON.stringify(current) && el("rule").readOnly && el("rule").value === rule.rule_id) {
-        editorDestination = {item, edit};
+      if ((!form.hidden || suspendedRuleDraft) && editingScope === JSON.stringify(current) && el("rule").readOnly && el("rule").value === rule.rule_id) {
+        editorDestination = {item, edit, detail: editDetail};
       }
       }
     }
@@ -2288,7 +2420,13 @@ async function loadCurrentRules() {
     if (nextContainer.children.length) {
       while (nextContainer.children.length) container.appendChild(nextContainer.children[0]);
     } else container.textContent = nextContainer.textContent;
-    if (editorDestination) attachRuleEditor(editorDestination.item, editorDestination.edit);
+    if (editorDestination) {
+      if (suspendedRuleDraft) { form.hidden = true; editorDestination.item.appendChild(form); }
+      else {
+        attachRuleEditor(editorDestination.item, editorDestination.edit);
+        ruleDetail = visibleRuleDetail = editorDestination.detail;
+      }
+    }
     if (anchorBefore !== null && !form.hidden && form.getClientRects?.().length) {
       const delta = form.getBoundingClientRect().top - anchorBefore;
       if (Math.abs(delta) > 1) window.scrollBy?.({top: delta, behavior: "instant"});
@@ -2297,13 +2435,16 @@ async function loadCurrentRules() {
       focused.focus?.({preventScroll: true});
       if (selection) focused.setSelectionRange?.(...selection);
     }
+    if (initialLoading) fadeInContent(container);
   } catch (error) {
-    if (requestRevision === rulesRevision) { parkRuleEditor(); showError(container, error); }
+    await loadingFade;
+    if (requestRevision === rulesRevision) { parkRuleEditor(); showError(container, error); if (initialLoading) fadeInContent(container); }
   }
 }
 function selectCurrentGroup(remember = true) {
   stopActionFollow();
   cancelActionDrag();
+  resetRuleDetail();
   parkRuleEditor();
   stopLive();
   streamFailures = 0;
@@ -2344,6 +2485,7 @@ function selectCurrentGroup(remember = true) {
   updateGroupMonitoring();
   if (!allGroups()) lookupMissingGroupName();
   renderAllGroupStatus();
+  window.SentinelOverview?.setScope(scopeParams());
   startLive();
   return Promise.all([loadCurrentRules(), loadRecords(true), loadSummary()]);
 }
@@ -2478,7 +2620,9 @@ el("add-group").addEventListener("click", async () => {
 el("refresh-group").addEventListener("click", () => { scheduleRefresh(); return selectCurrentGroup(false); });
 el("new-rule").addEventListener("click", () => {
   if (detachedRuleDraft()) { closeRuleEditor(); return; }
+  resetRuleDetail();
   parkRuleEditor();
+  suspendedRuleDraft = false;
   clearPreview();
   el("rule-form-title").textContent = "新建规则";
   el("save-status").textContent = "";

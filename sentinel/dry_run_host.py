@@ -140,10 +140,13 @@ class DryRunHost:
             self._close_task = asyncio.create_task(self._close_resources())
         await asyncio.shield(self._close_task)
 
-    def _start_mute(self, intent_id, mode):
+    def _start_mute(self, intent_id, mode, *, required_action=None):
         if self.closed or self.mute_executor is None:
             raise RuntimeError("mute executor unavailable")
-        task = asyncio.create_task(self.mute_executor.execute(intent_id, mode=mode))
+        options = {"mode": mode}
+        if required_action is not None:
+            options["required_action"] = required_action
+        task = asyncio.create_task(self.mute_executor.execute(intent_id, **options))
         self._mute_tasks.add(task)
         def done(completed):
             self._mute_tasks.discard(completed)
@@ -180,6 +183,10 @@ class DryRunHost:
         plan = await self._schedule_plan(intent_id)
         await asyncio.shield(plan)
         return await asyncio.shield(self._start_mute(intent_id, "confirm"))
+
+    async def confirm_single_mute(self, intent_id):
+        """Confirm only this mute; do not dispatch other actions in its plan."""
+        return await asyncio.shield(self._start_mute(intent_id, "confirm", required_action="mute"))
 
     async def _close_resources(self):
         # Do not release the lock until the intake and runtime have drained.

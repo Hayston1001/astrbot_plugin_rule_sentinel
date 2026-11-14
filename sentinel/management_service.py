@@ -1,5 +1,6 @@
 """Authenticated dashboard-only access to the local rule and audit stores."""
 
+import re
 from dataclasses import asdict
 
 from .rule_management import RuleManagement
@@ -138,6 +139,49 @@ class ManagementService:
                 if not isinstance(value, str) or not value.strip() or len(value) > 128:
                     raise ValueError("invalid UI state")
         return self.queue.save_ui_state(actor, fields["platform_id"], fields["group_id"])
+
+    @staticmethod
+    def _validate_overview_layout(layout):
+        if not isinstance(layout, dict) or set(layout) != {"cards"} or not isinstance(layout["cards"], list):
+            raise ValueError("invalid overview layout")
+        if len(layout["cards"]) > 64:
+            raise ValueError("invalid overview layout")
+        seen = set()
+        for card in layout["cards"]:
+            if not isinstance(card, dict) or set(card) != {"id", "width", "visible"}:
+                raise ValueError("invalid overview card")
+            name = card["id"]
+            if (not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name)
+                    or name in seen or card["width"] not in ("half", "full") or type(card["visible"]) is not bool):
+                raise ValueError("invalid overview card")
+            seen.add(name)
+        return layout
+
+    def get_overview_layout(self, actor):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        layout = self.queue.get_overview_layout(actor)
+        # AstrBot's web response converts a top-level None into an empty object.
+        # Return an explicit empty card list for an account with no saved layout.
+        return {"cards": []} if layout is None else self._validate_overview_layout(layout)
+
+    def save_overview_layout(self, actor, fields):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        return self.queue.save_overview_layout(actor, self._validate_overview_layout(fields))
+
+    def pending_confirmations(self, actor, platform_id, group_id, before_id=None, limit=20, all_groups=False):
+        if all_groups:
+            if not self.actor_allowed(actor):
+                raise PermissionError("not authorized")
+        else:
+            self._check(actor, platform_id, group_id)
+        return self.queue.pending_confirmations(platform_id, group_id, before_id, limit, all_groups)
+
+    def confirmation_state(self, actor, intent_id):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        return self.queue.confirmation_state(intent_id)
 
     def _check(self, actor, platform_id, group_id):
         if self._authorized(actor, platform_id, group_id) is not True:

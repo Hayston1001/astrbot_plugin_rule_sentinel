@@ -98,6 +98,9 @@ class DryRunQueue:
                     username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
                     active_tab TEXT NOT NULL DEFAULT 'status'
                 );
+                CREATE TABLE IF NOT EXISTS dashboard_overview_layout (
+                    username TEXT PRIMARY KEY, payload TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS dashboard_quick_start (
                     id INTEGER PRIMARY KEY CHECK(id = 1)
                 );
@@ -154,6 +157,8 @@ class DryRunQueue:
                     'event:' || source_event_id, 0 FROM execution_intents""")
                 db.execute("DROP TABLE execution_intents")
                 db.execute("ALTER TABLE execution_intents_plan RENAME TO execution_intents")
+            db.execute("CREATE INDEX IF NOT EXISTS execution_intents_pending_group "
+                       "ON execution_intents(status, action, platform_id, group_id, id)")
             db.commit()
         finally:
             db.close()
@@ -437,6 +442,13 @@ class DryRunQueue:
             expires = None
             message_time = None
             missing_time = False
+            try:
+                parsed_time = datetime.fromisoformat(snapshot["message_time"])
+                if parsed_time.tzinfo is None or parsed_time > now:
+                    raise ValueError("invalid message timestamp")
+                message_time = parsed_time.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
             intent = {"platform_id": item.platform_id, "group_id": item.group_id, "message_id": item.message_id, "rule_id": rule_id,
                       "rule_version": version, "action": action, "target_sender_id": sender,
                       "duration_seconds": duration, "mode": actual_mode}
@@ -449,12 +461,10 @@ class DryRunQueue:
                     raise ValueError("invalid recall")
                 duration = None
                 try:
-                    message_time = datetime.fromisoformat(snapshot["message_time"])
-                    if message_time.tzinfo is None or message_time > now:
+                    if message_time is None:
                         raise ValueError("invalid message timestamp")
-                    message_time = message_time.astimezone(timezone.utc).isoformat(timespec="milliseconds")
                     expires = (datetime.fromisoformat(message_time) + timedelta(seconds=110)).isoformat(timespec="milliseconds")
-                except (KeyError, TypeError, ValueError, OverflowError):
+                except (TypeError, ValueError, OverflowError):
                     missing_time = True
                     message_time = None
             else:
@@ -625,6 +635,72 @@ class DryRunQueue:
         finally:
             db.close()
 
+    def pending_confirmations(self, platform_id, group_id, before_id=None, limit=20, all_groups=False):
+        """Read pending supported actions and counts from one consistent snapshot."""
+        if type(all_groups) is not bool or (all_groups and (platform_id is not None or group_id is not None)):
+            raise ValueError("invalid group identity")
+        if not all_groups and any(not isinstance(value, str) or not value.strip() or len(value) > 128
+                                  for value in (platform_id, group_id)):
+            raise ValueError("invalid group identity")
+        if (before_id is not None and (type(before_id) is not int or not 1 <= before_id <= 9223372036854775807)
+                or type(limit) is not int or not 1 <= limit <= 100):
+            raise ValueError("invalid pagination")
+        from .message_retention import stored_retention_days
+        db = self._connect()
+        try:
+            db.execute("BEGIN")
+            predicate = "platform_id != ?" if all_groups else "platform_id=? AND group_id=?"
+            scope = (SYSTEM_PLATFORM,) if all_groups else (platform_id, group_id)
+            # Only actions supported by this plugin's real execution boundary
+            # belong in the executable confirmation queue.
+            where = f"status='pending_confirm' AND mode='confirm' AND action='mute' AND {predicate}"
+            totals = db.execute(f"""SELECT COUNT(*) AS messages, COALESCE(SUM(actions), 0) AS actions FROM (
+                SELECT COUNT(*) AS actions FROM execution_intents WHERE {where}
+                GROUP BY platform_id, group_id, message_id)""", scope).fetchone()
+            rows = db.execute(f"""SELECT platform_id, group_id, message_id, MAX(id) AS cursor
+                FROM execution_intents WHERE {where} GROUP BY platform_id, group_id, message_id
+                HAVING (? IS NULL OR MAX(id) < ?) ORDER BY cursor DESC LIMIT ?""",
+                (*scope, before_id, before_id, limit + 1)).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            days = stored_retention_days(db)
+            messages = []
+            for row in rows:
+                key = (row["platform_id"], row["group_id"], row["message_id"])
+                actions = [dict(item) for item in db.execute("""SELECT i.id, i.action, i.mode, i.status,
+                    i.rule_id, i.rule_version, i.duration_seconds, i.expires_at, i.message_time,
+                    i.action_index, e.detail, e.created_at FROM execution_intents i
+                    JOIN dry_run_events e ON e.id=i.source_event_id
+                    WHERE i.platform_id=? AND i.group_id=? AND i.message_id=?
+                      AND i.status='pending_confirm' AND i.mode='confirm' AND i.action='mute'
+                    ORDER BY i.source_event_id DESC, i.action_index""", key).fetchall()]
+                content = None
+                if days:
+                    content_row = db.execute("""SELECT content FROM message_contents
+                        WHERE platform_id=? AND group_id=? AND message_id=?
+                        AND stored_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
+                        (*key, f"-{days} days")).fetchone()
+                    content = content_row["content"] if content_row else None
+                messages.append({"platform_id": key[0], "group_id": key[1], "message_id": key[2],
+                                 "content": content[:400] if content is not None else None,
+                                 "content_truncated": content is not None and len(content) > 400,
+                                 "cursor": row["cursor"], "actions": actions})
+            return {"messages": messages, "total_messages": totals["messages"], "total_actions": totals["actions"],
+                    "next_before_id": rows[-1]["cursor"] if has_more and rows else None}
+        finally:
+            db.close()
+
+    def confirmation_state(self, intent_id):
+        if type(intent_id) is not int or intent_id <= 0:
+            raise ValueError("invalid intent")
+        db = self._connect()
+        try:
+            row = db.execute("SELECT status, reason_code FROM execution_intents WHERE id=? AND action='mute'",
+                             (intent_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            db.close()
+
     def purge_message_contents(self):
         from .message_retention import purge_expired_contents, stored_retention_days
         db = self._connect()
@@ -756,7 +832,7 @@ class DryRunQueue:
                 SELECT e.status, e.detail, julianday(e.created_at) >= julianday('now', '-1 day') AS recent
                 FROM latest JOIN dry_run_events e ON e.id=latest.id ORDER BY e.id DESC
             """, (*scope, SUMMARY_LIMIT + 1))
-            counts, recent, latencies = {}, {"messages": 0, "proposed": 0, "no_action": 0}, []
+            counts, recent, latencies = {}, {"messages": 0, "proposed": 0, "no_action": 0, "failed": 0, "review": 0}, []
             total = 0
             truncated = False
             for row in cursor:
@@ -771,6 +847,10 @@ class DryRunQueue:
                 recent["messages"] += 1
                 if status in ("proposed", "no_action"):
                     recent[status] += 1
+                elif status in ("failed", "timed_out"):
+                    recent["failed"] += 1
+                elif status == "review":
+                    recent["review"] += 1
                 try:
                     detail = json.loads(row["detail"])
                     if isinstance(detail, dict) and isinstance(detail.get("decision"), dict):
@@ -793,6 +873,27 @@ class DryRunQueue:
             row = db.execute("SELECT platform_id, group_id, active_tab FROM dashboard_ui_state WHERE username=?",
                              (username,)).fetchone()
             return dict(row) if row else None
+        finally:
+            db.close()
+
+    def get_overview_layout(self, username):
+        db = self._connect()
+        try:
+            row = db.execute("SELECT payload FROM dashboard_overview_layout WHERE username=?", (username,)).fetchone()
+            if row is None:
+                return None
+            return json.loads(row["payload"])
+        finally:
+            db.close()
+
+    def save_overview_layout(self, username, layout):
+        payload = json.dumps(layout, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        db = self._connect()
+        try:
+            db.execute("""INSERT INTO dashboard_overview_layout (username, payload) VALUES (?, ?)
+                ON CONFLICT(username) DO UPDATE SET payload=excluded.payload""", (username, payload))
+            db.commit()
+            return layout
         finally:
             db.close()
 

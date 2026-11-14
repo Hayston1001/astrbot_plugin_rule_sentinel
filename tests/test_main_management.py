@@ -76,7 +76,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 28)
+        self.assertEqual(len(self.context.routes), 32)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -128,6 +128,27 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.plugin.host = None
 
+    async def test_overview_confirmation_only_dispatches_one_mute(self):
+        host = types.SimpleNamespace(mute_executor=object(), confirm_single_mute=AsyncMock(return_value="succeeded"))
+        self.plugin.host = host
+        self.plugin.config["action_execution_enabled"] = True
+        try:
+            for body in ({"intent_id": 2, "action": "reply"}, {"intent_id": True}, {}, {"intent_id": -1}):
+                self.raw_body = json.dumps(body).encode()
+                self.assertEqual((await self.plugin.confirm_pending_mute())["status_code"], 400)
+            self.raw_body = b'{"intent_id":2}'
+            result = (await self.plugin.confirm_pending_mute())["data"]
+            self.assertEqual(result["status"], "succeeded")
+            host.confirm_single_mute.assert_awaited_once_with(2)
+            host.confirm_single_mute.return_value = "not_claimed"
+            with patch.object(self.plugin.management, "confirmation_state", return_value={
+                    "status": "review", "reason_code": "intent_expired"}) as state:
+                result = (await self.plugin.confirm_pending_mute())["data"]
+            self.assertEqual(result, {"status": "not_claimed", "current_status": "review", "reason_code": "intent_expired"})
+            state.assert_called_once_with("admin", 2)
+        finally:
+            self.plugin.host = None
+
     async def test_public_settings_do_not_expose_unknown_fields(self):
         self.plugin.config["unknown_secret"] = "saved-secret"
         result = await self.plugin.get_settings()
@@ -155,9 +176,13 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.save_group_alias())["status_code"], 403)
             self.assertEqual((await self.plugin.get_group_name())["status_code"], 403)
             self.assertEqual((await self.plugin.list_messages())["status_code"], 403)
+            self.assertEqual((await self.plugin.pending_confirmations())["status_code"], 403)
+            self.assertEqual((await self.plugin.confirm_pending_mute())["status_code"], 403)
             self.assertEqual((await self.plugin.stream_events())["status_code"], 403)
             self.assertEqual((await self.plugin.get_ui_state())["status_code"], 403)
             self.assertEqual((await self.plugin.save_ui_state())["status_code"], 403)
+            self.assertEqual((await self.plugin.get_overview_layout())["status_code"], 403)
+            self.assertEqual((await self.plugin.save_overview_layout())["status_code"], 403)
             self.assertEqual((await self.plugin.complete_quick_start())["status_code"], 403)
             self.assertEqual((await self.plugin.summary())["status_code"], 403)
             self.assertEqual((await self.plugin.get_settings())["status_code"], 403)
@@ -250,6 +275,22 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await other_plugin.get_ui_state())["data"], {**first, "active_tab": "status"})
         finally:
             await other_plugin.terminate()
+
+    async def test_overview_endpoints_require_valid_json_and_keep_user_layouts_separate(self):
+        self.assertEqual((await self.plugin.get_overview_layout())["data"], {"cards": []})
+        self.raw_body = b'{"cards":[{"id":"pending","width":"full","visible":true}]}'
+        saved = (await self.plugin.save_overview_layout())["data"]
+        self.assertEqual((await self.plugin.get_overview_layout())["data"], saved)
+        self.request.username = "other"
+        self.assertEqual((await self.plugin.get_overview_layout())["data"], {"cards": []})
+        self.request.username = "admin"
+        self.raw_body = b'{"cards":[],"cards":[]}'
+        self.assertEqual((await self.plugin.save_overview_layout())["status_code"], 400)
+        self.assertEqual((await self.plugin.get_overview_layout())["data"], saved)
+        self.request.query = {"all_groups": "true"}
+        self.assertEqual((await self.plugin.pending_confirmations())["data"]["total_actions"], 0)
+        self.request.query = {"all_groups": "true", "group_id": "g"}
+        self.assertEqual((await self.plugin.pending_confirmations())["status_code"], 400)
 
     async def test_ui_tab_and_group_choices_are_independent_and_user_scoped(self):
         self.raw_body = b'{"active_tab":"settings"}'
@@ -570,7 +611,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         result = (await self.plugin.summary())["data"]
         self.assertEqual(result["total_messages"], 3)
         self.assertEqual(result["status_counts"], {"proposed": 1, "no_action": 1, "skipped": 1})
-        self.assertEqual(result["recent_24h"], {"messages": 2, "proposed": 1, "no_action": 1})
+        self.assertEqual(result["recent_24h"], {"messages": 2, "proposed": 1, "no_action": 1, "failed": 0, "review": 0})
         self.assertEqual(result["latency_p95_ms"], 20)
         self.assertFalse(result["truncated"])
         with closing(sqlite3.connect(path)) as db:

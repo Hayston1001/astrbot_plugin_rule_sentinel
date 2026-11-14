@@ -20,7 +20,9 @@ async function tick(duration) {
 }
 function node() {
   let text = "";
+  const classes = new Set();
   return {value: "", checked: false, children: [], handlers: {}, attributes: {}, hidden: false,
+    classList: {add(value) { classes.add(value); }, remove(value) { classes.delete(value); }, contains(value) { return classes.has(value); }},
     set textContent(value) { text = value; this.children = []; }, get textContent() { return text; },
     appendChild(child) { child.parent = this; this.children.push(child); },
     insertBefore(child, anchor) { child.parent = this; const i = anchor ? this.children.indexOf(anchor) : this.children.length; this.children.splice(i, 0, child); },

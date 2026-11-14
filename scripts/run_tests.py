@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ASTRBOT_SPECS = ("astrbot==4.29.3", "astrbot")
-NODE_FILES = (Path("views/management/app.js"), Path("views/management/motion.js"), Path("views/management/select.js"))
+NODE_FILES = (Path("views/management/app.js"), Path("views/management/overview.js"), Path("views/management/motion.js"), Path("views/management/select.js"))
 
 
 def _run(command, env):

@@ -60,14 +60,15 @@ class MuteExecutionStore:
             raise ValueError("invalid recall timestamp")
         return (datetime.now(timezone.utc) - created).total_seconds() > 110
 
-    def begin_attempt(self, intent_id, *, requested_mode, allow_retry=False):
+    def begin_attempt(self, intent_id, *, requested_mode, allow_retry=False, required_action=None):
         """Atomically claim an intent and persist an attempt before any HTTP call.
 
         The caller must independently verify platform permissions before
         sending. A process crash after this commit is an unknown result; it must
         never lead to an automatic repeat.
         """
-        if type(intent_id) is not int or intent_id <= 0 or requested_mode not in ("auto", "confirm") or type(allow_retry) is not bool:
+        if (type(intent_id) is not int or intent_id <= 0 or requested_mode not in ("auto", "confirm")
+                or type(allow_retry) is not bool or required_action not in (None, "mute")):
             raise ValueError("invalid execution request")
         db = self._connect()
         try:
@@ -77,7 +78,7 @@ class MuteExecutionStore:
                 raise ValueError("unknown intent")
             intent = dict(row)
             eligible = intent["status"] == ("pending_retry" if allow_retry else f"pending_{requested_mode}")
-            if intent["mode"] != requested_mode or not eligible:
+            if intent["mode"] != requested_mode or not eligible or (required_action and intent["action"] != required_action):
                 db.commit()
                 return None
             settings_row = db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone()

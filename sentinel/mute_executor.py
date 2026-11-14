@@ -28,10 +28,13 @@ class MuteExecutor:
                     await run_sync_safely(guard.close)
             raise
 
-    async def execute(self, intent_id, *, mode):
+    async def execute(self, intent_id, *, mode, required_action=None):
         """Use durable claims and fixed expiry; unknown results never retry."""
         for attempt in range(1, 4):
-            intent = await run_sync_safely(self.store.begin_attempt, intent_id, requested_mode=mode, allow_retry=attempt > 1)
+            kwargs = {"requested_mode": mode, "allow_retry": attempt > 1}
+            if required_action is not None:
+                kwargs["required_action"] = required_action
+            intent = await run_sync_safely(self.store.begin_attempt, intent_id, **kwargs)
             if intent is None:
                 return "not_claimed"
             try:

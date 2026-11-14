@@ -41,11 +41,30 @@ if (scenario === "save-stability") {
   settings.monitoring_groups = ["p/g"];
   settings.quick_start_completed = true;
 }
+if (scenario === "overview") {
+  groups.push({...testGroup, rule_count: 2});
+  groups.push({platform_id: "p2", group_id: "g", alias: "另一个群", rule_count: 1});
+  settings.llm_provider_id = "model-a";
+  settings.monitoring_groups = ["p/g", "p2/g"];
+  settings.quick_start_completed = true;
+}
 if (scenario === "stale-group") { settings.monitoring_mode = "blocklist"; settings.llm_provider_id = "model-a"; }
 if (scenario === "scope") groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 0});
 if (scenario === "state-error") settings.quick_start_completed = null;
 if (scenario === "model-missing") settings.llm_provider_id = "";
-window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: []};
+window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: [],
+  failLayoutRead: scenario === "layout-read-error", failLayoutSave: false, failPending: false, confirmationPosts: []};
+const layoutKey = `fixture-layout-${scenario}`;
+const mockAction = (id) => ({id, action: "mute", mode: "confirm", status: "pending_confirm", rule_id: "no-ads",
+  rule_version: 2, duration_seconds: 600, expires_at: "2099-01-01T00:00:00Z", message_time: null,
+  created_at: "2025-01-01T00:00:00Z", detail: JSON.stringify({proposal: {reason: "重复推广"}})});
+window.quickStartMock.pending = scenario === "overview" ? Array.from({length: 23}, (_, index) => ({
+  platform_id: "p", group_id: "g", message_id: index === 0 ? "same" : `m${index}`,
+  cursor: 200 - index, content: index === 0 ? "<script>示例消息</script>" : null,
+  content_truncated: false, actions: index === 0 ? [mockAction(1), mockAction(2)] : [mockAction(index + 2)],
+})) : [];
+if (scenario === "overview") window.quickStartMock.pending.push({platform_id: "p2", group_id: "g", message_id: "same",
+  cursor: 100, content: "另一个群的消息", content_truncated: false, actions: [mockAction(99)]});
 window.quickStartMock.holdNextRuleRead = () => {
   let release;
   const promise = new Promise((resolve) => { release = resolve; });
@@ -76,6 +95,20 @@ window.AstrBotPluginView = {
     if (endpoint === "settings" && scenario === "settings-error") throw new Error("unavailable");
     if (endpoint === "groups" && scenario === "groups-error") throw new Error("unavailable");
     if (endpoint === "ui-state" && scenario === "ui-state-error") throw new Error("unavailable");
+    if (endpoint === "overview-layout") {
+      if (window.quickStartMock.failLayoutRead) throw new Error("unavailable");
+      return JSON.parse(sessionStorage.getItem(layoutKey) || '{"cards":[]}');
+    }
+    if (endpoint === "pending-confirmations") {
+      if (window.quickStartMock.failPending) throw new Error("unavailable");
+      const matching = window.quickStartMock.pending.filter((item) => params.all_groups ||
+        (item.platform_id === params.platform_id && item.group_id === params.group_id));
+      const rows = matching.filter((item) => params.before_id === undefined || item.cursor < params.before_id);
+      const limit = params.limit || 20;
+      return structuredClone({messages: rows.slice(0, limit), total_messages: matching.length,
+        total_actions: matching.reduce((sum, item) => sum + item.actions.length, 0),
+        next_before_id: rows.length > limit ? rows[limit - 1].cursor : null});
+    }
     if (endpoint === "rules" && window.quickStartMock.heldRuleRead) {
       const held = window.quickStartMock.heldRuleRead;
       held.started = true;
@@ -113,7 +146,7 @@ window.AstrBotPluginView = {
       settings, providers: [{id: "model-a"}], "ui-state": uiState,
       platforms: [{id: "p", type: "qq_official"}], groups, rules, messages: [],
       "available-groups": {groups: [{platform_id: "p", group_id: "g", name: "测试群"}], history_available: true},
-      summary: {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0}},
+      summary: {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0, failed: 0, review: 0}},
     };
     return structuredClone(data[endpoint] ?? []);
   },
@@ -127,6 +160,18 @@ window.AstrBotPluginView = {
       uiState = {platform_id: "", group_id: "", active_tab: "status", ...uiState, ...body};
       sessionStorage.setItem(uiStateKey, JSON.stringify(uiState));
       return structuredClone(body);
+    }
+    if (endpoint === "overview-layout") {
+      if (window.quickStartMock.failLayoutSave) throw new Error("unavailable");
+      sessionStorage.setItem(layoutKey, JSON.stringify(body));
+      return structuredClone(body);
+    }
+    if (endpoint === "confirm-pending-mute") {
+      window.quickStartMock.confirmationPosts.push(structuredClone(body));
+      if (window.quickStartMock.failConfirmation) throw new Error("unavailable");
+      for (const item of window.quickStartMock.pending) item.actions = item.actions.filter((action) => action.id !== body.intent_id);
+      window.quickStartMock.pending = window.quickStartMock.pending.filter((item) => item.actions.length);
+      return structuredClone(window.quickStartMock.confirmationResult || {status: "succeeded"});
     }
     if (endpoint === "settings") {
       Object.assign(settings, body);
@@ -180,6 +225,6 @@ window.AstrBotPluginView = {
     }
     return body;
   },
-  async subscribeSSE() { return "test"; },
+  async subscribeSSE(_endpoint, callbacks) { window.quickStartMock.stream = callbacks; return "test"; },
   async unsubscribeSSE() {},
 };

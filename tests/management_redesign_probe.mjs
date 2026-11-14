@@ -147,36 +147,32 @@ await import("data:text/javascript;base64," + Buffer.from(source + "\nglobalThis
 const refreshStatusForTest = globalThis.__refreshStatusForTest;
 delete globalThis.__refreshStatusForTest;
 assert.equal(elements.status.attributes["data-tone"], "success");
-assert.equal(elements.status.textContent, "运行中");
+assert.equal(elements.status.textContent, "服务已启动");
 for (const [value, label, tone] of [
-  [{monitoring: "dry_run", backend: "llm", action_execution_available: true}, "运行中", "success"],
-  [{monitoring: "dry_run", backend: "llm", action_execution_available: false}, "运行中", "success"],
-  [{monitoring: "disabled", backend: "llm"}, "未运行", "warning"],
-  [{monitoring: "invalid_configuration", backend: "llm", start_error: "invalid_configuration"}, "未运行", "warning"],
-  [{monitoring: "disabled", backend: "llm", start_error: "start_failed"}, "未运行", "warning"],
+  [{monitoring: "dry_run", backend: "llm", action_execution_available: true}, "服务已启动", "success"],
+  [{monitoring: "dry_run", backend: "llm", action_execution_available: false}, "服务已启动", "success"],
+  [{monitoring: "disabled", backend: "llm"}, "服务未启动", "warning"],
+  [{monitoring: "invalid_configuration", backend: "llm", start_error: "invalid_configuration"}, "服务未启动", "warning"],
+  [{monitoring: "disabled", backend: "llm", start_error: "start_failed"}, "服务未启动", "warning"],
 ]) {
   statusResult = value;
   await refreshStatusForTest();
   assert.equal(elements.status.textContent, label);
   assert.equal(elements.status.attributes["data-tone"], tone);
 }
-assert.equal(elements["status-label"].textContent, "监控未启动");
+assert.equal(elements["status-label"].textContent, "未启动");
 assert.match(elements["status-detail"].textContent, /启动失败/);
 statusResult = {monitoring: "disabled", backend: "llm", start_error: "model_not_configured",
   action_execution_enabled: true, action_execution_available: false};
 await refreshStatusForTest();
-assert.equal(elements["status-label"].textContent, "监控未启动");
+assert.equal(elements["status-label"].textContent, "未启动");
 assert.match(elements["status-detail"].textContent, /请先选择默认判定模型/);
 assert.equal(elements["status-backend"].textContent, "普通 LLM");
 assert.equal(elements["status-execution"].textContent, "不可用");
-for (const [enabled, available, detail] of [
-  [true, true, "消息判定和真实执行已开启. 各群按设置处理规则动作."],
-  [true, false, "消息判定已开启, 真实执行不可用."],
-  [false, false, "消息判定已开启, 仅记录结果."],
-]) {
+for (const [enabled, available] of [[true, true], [true, false], [false, false]]) {
   statusResult = {monitoring: "dry_run", backend: "llm", action_execution_enabled: enabled, action_execution_available: available};
   await refreshStatusForTest();
-  assert.equal(elements["status-detail"].textContent, detail);
+  assert.match(elements["status-detail"].textContent, /不代表模型或平台可用/);
 }
 statusResult = {monitoring: "disabled", backend: "llm"};
 await refreshStatusForTest();

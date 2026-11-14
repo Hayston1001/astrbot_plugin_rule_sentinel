@@ -114,9 +114,11 @@ class RuleSentinel(Star):
             ("rules/confirm", self.confirm_rule, ["POST"]),
             ("audit", self.list_audit, ["GET"]),
             ("messages", self.list_messages, ["GET"]),
+            ("pending-confirmations", self.pending_confirmations, ["GET"]),
             ("message-content", self.message_content, ["GET"]),
             ("execute-mute", self.execute_mute, ["POST"]),
             ("execute-action", self.execute_mute, ["POST"]),
+            ("confirm-pending-mute", self.confirm_pending_mute, ["POST"]),
             ("events", self.stream_events, ["GET"]),
             ("notifications", self.list_notifications, ["GET"]),
             ("status", self.status, ["GET"]),
@@ -130,6 +132,8 @@ class RuleSentinel(Star):
             ("summary", self.summary, ["GET"]),
             ("ui-state", self.get_ui_state, ["GET"]),
             ("ui-state", self.save_ui_state, ["POST"]),
+            ("overview-layout", self.get_overview_layout, ["GET"]),
+            ("overview-layout", self.save_overview_layout, ["POST"]),
             ("quick-start/complete", self.complete_quick_start, ["POST"]),
             ("settings", self.get_settings, ["GET"]),
             ("settings", self.save_settings, ["POST"]),
@@ -394,6 +398,21 @@ class RuleSentinel(Star):
         return await self._run(self.management.message_content, request.username,
                                request.query.get("platform_id"), request.query.get("group_id"), request.query.get("message_id"))
 
+    async def pending_confirmations(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        try:
+            all_groups = _all_groups_query(request.query)
+            raw_before = request.query.get("before_id")
+            before_id = None if raw_before is None else int(raw_before)
+            limit = int(request.query.get("limit", "20"))
+        except (TypeError, ValueError):
+            return error_response("Invalid pagination", status_code=400)
+        return await self._run(self.management.pending_confirmations, request.username,
+            request.query.get("platform_id"), request.query.get("group_id"), before_id, limit, all_groups)
+
     async def stream_events(self):
         if self.management is None or self._event_hub is None or self._closing:
             return error_response("Service not initialized", status_code=503)
@@ -466,6 +485,28 @@ class RuleSentinel(Star):
             return error_response("Invalid execution request", status_code=400)
         except Exception:
             logger.error("Rule Sentinel action confirmation failed")
+            return error_response("Execution unavailable", status_code=500)
+
+    async def confirm_pending_mute(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        data = await self._payload()
+        if not isinstance(data, dict) or set(data) != {"intent_id"} or type(data["intent_id"]) is not int or data["intent_id"] <= 0:
+            return error_response("Invalid execution request", status_code=400)
+        host = self.host
+        if self.config.get("action_execution_enabled") is not True or host is None or host.mute_executor is None:
+            return error_response("Execution disabled or unavailable", status_code=503)
+        try:
+            result = await host.confirm_single_mute(data["intent_id"])
+            state = await asyncio.to_thread(self.management.confirmation_state, request.username, data["intent_id"]) if result == "not_claimed" else None
+            return json_response({"status": result, "current_status": state["status"] if state else None,
+                                  "reason_code": state["reason_code"] if state else None})
+        except (ValueError, TypeError):
+            return error_response("Invalid execution request", status_code=400)
+        except Exception:
+            logger.error("Rule Sentinel mute confirmation failed")
             return error_response("Execution unavailable", status_code=500)
 
     async def list_notifications(self):
@@ -627,6 +668,20 @@ class RuleSentinel(Star):
         if data is None:
             return error_response("Invalid request", status_code=400)
         return await self._run(self.management.save_ui_state, request.username, data)
+
+    async def get_overview_layout(self):
+        return await self._run(self.management.get_overview_layout, request.username) if self.management else error_response(
+            "Service not initialized", status_code=503)
+
+    async def save_overview_layout(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        data = await self._payload()
+        if data is None:
+            return error_response("Invalid request", status_code=400)
+        return await self._run(self.management.save_overview_layout, request.username, data)
 
     def _public_settings(self):
         return {key: self.config[key] for key in DEFAULTS if key in self.config}

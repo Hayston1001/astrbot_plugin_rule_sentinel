@@ -127,7 +127,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('按方向键', html)
         self.assertIn('#action-list .form-panel, #action-list .action-drop-placeholder', css)
         self.assertIn('--action-card-highlight: hsl(var(--action-hue, 180) 55% var(--action-badge-lightness))', css)
-        self.assertRegex(css, r'\.form-panel\.is-dragging\s*\{\s*border-color:\s*var\(--action-card-highlight\);\s*\}')
+        self.assertNotRegex(css, r'\.form-panel\.is-dragging\s*\{[^}]*border-color:\s*var\(--action-card-highlight\)')
         self.assertRegex(css, r'\.form-panel\.is-dragging\s*>\s*\*\s*\{[^}]*opacity:\s*\.5')
         self.assertRegex(css, r'\.action-drop-placeholder\s*\{[^}]*border:\s*2px dashed var\(--action-card-highlight\)')
         self.assertRegex(css, r'\.action-drop-placeholder\s*\{[^}]*color:\s*var\(--action-card-highlight\)')
@@ -193,10 +193,11 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('id="live-status" class="badge live-status" data-tone="warning"', html)
         self.assertIn('<th>监控状态</th>', html)
         self.assertIn('<table id="groups-status-table"><colgroup>', html)
-        self.assertIn('#groups-status-table col:nth-child(7) { width: 21%; }', css)
+        self.assertIn('#groups-status-table col:nth-child(8) { width: 17%; }', css)
         status = css.split('.status-main {', 1)[1].split('}', 1)[0]
         self.assertNotIn('border-left:', status)
-        self.assertIn('.status-main > strong::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor; }', css)
+        self.assertNotIn('.status-main > strong::before', css)
+        self.assertNotIn('.action-progress li::before', css)
         for tone in ('success', 'warning'):
             self.assertIn(f'.status-main[data-tone="{tone}"] > strong {{ color: var(--signal-{tone}-line); }}', css)
 
@@ -213,7 +214,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('--radius: 15px;', css)
         self.assertIn('--radius-sm: var(--radius);', css)
         self.assertIn('--radius-lg: var(--radius);', css)
-        self.assertRegex(css, r'\.monitor-badge, \.badge\s*\{[^}]*border-radius:\s*999px;\s*font-size:\s*12px;')
+        self.assertRegex(css, r'\.monitor-badge, \.badge\s*\{[^}]*border-radius:\s*0;\s*font-size:\s*12px;')
         self.assertNotIn('setting-monitoring_enabled', html + script)
         self.assertNotIn('启用群消息监控', html)
         self.assertIn('setting-action_execution_enabled', html)
@@ -298,12 +299,10 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('--signal-success-ink: #14532d', css)
         self.assertIn('--signal-warning-bg: #f3d18a', css)
         self.assertIn('--signal-warning-ink: #663f00', css)
-        for selector, tone in (('.monitor-badge[data-tone="success"]', 'success'),
-                               ('.monitor-badge[data-tone="warning"]', 'warning'),
-                               ('.badge.record-executed', 'success'), ('.badge.record-planned', 'warning')):
-            rule = css.split(f'{selector} {{', 1)[1].split('}', 1)[0]
-            self.assertIn(f'background: var(--signal-{tone}-bg)', rule)
-            self.assertIn(f'color: var(--signal-{tone}-ink)', rule)
+        for tone in ('success', 'warning'):
+            self.assertRegex(css, rf'\.monitor-badge\[data-tone="{tone}"\][^{{]*\{{ color: var\(--signal-{tone}-line\);')
+        self.assertIn('.badge.record-executed { font-weight: 500; }', css)
+        self.assertNotIn('background:', css.split('.monitor-badge, .badge {', 1)[1].split('}', 1)[0])
         self.assertIn('--amber: var(--signal-warning-ink)', css)
         self.assertIn('--amber-bg: var(--signal-warning-bg)', css)
         reason_rule = css.split('.record-reason-fallback {', 1)[1].split('}', 1)[0]

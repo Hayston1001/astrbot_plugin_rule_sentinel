@@ -6,7 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sentinel.dry_run_queue import DryRunQueue
 from sentinel.mute_execution_store import MuteExecutionStore
@@ -42,6 +42,17 @@ class ExecutionIntentTests(unittest.TestCase):
             self.assertEqual(row[3], "inactive")
             self.assertIsNone(db.execute("SELECT payload FROM dry_run_queue").fetchone()[0])
             self.assertEqual(db.execute("SELECT count(*) FROM dry_run_events WHERE status='proposed'").fetchone()[0], 1)
+
+    def test_mute_intent_preserves_valid_message_time_for_overview(self):
+        message_time = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE dry_run_queue SET payload=? WHERE state='processing'", (json.dumps({
+                "text": "private", "sender_id": "sender", "message_time": message_time}),))
+            db.commit()
+        self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
+        with closing(sqlite3.connect(self.path)) as db:
+            saved = db.execute("SELECT message_time FROM execution_intents").fetchone()[0]
+        self.assertEqual(datetime.fromisoformat(saved), datetime.fromisoformat(message_time))
 
     def test_failed_intent_write_rolls_back_terminal_audit_and_payload(self):
         with closing(sqlite3.connect(self.path)) as db:
@@ -268,6 +279,78 @@ class ExecutionIntentTests(unittest.TestCase):
         results = asyncio.run(both())
         self.assertCountEqual(results, ["succeeded", "not_claimed"])
         self.assertEqual(len(calls), 1)
+
+    def test_overview_confirms_only_the_selected_mute_without_dispatching_other_actions(self):
+        from sentinel.dry_run_host import DryRunHost
+        self.enable_execution()
+        self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
+                        text="rule", enabled=True, actions=[
+                            {"type": "reply", "mode": "confirm", "template": "notice"},
+                            {"type": "recall", "mode": "auto"},
+                            {"type": "mute", "mode": "confirm", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                        ], modified_by="admin")
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE dry_run_queue SET payload=? WHERE state='processing'", (json.dumps({
+                "text": "private", "sender_id": "sender", "message_time": datetime.now(timezone.utc).isoformat()}),))
+            db.commit()
+        detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2,
+                             "target_sender_id": "sender", "duration_seconds": 60}})
+        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),))
+        calls = []
+        class Platform:
+            async def verify_permission(self, *args): return True
+            async def send_group_message(self, *args, **kwargs):
+                calls.append("reply")
+                return {"outcome": "succeeded"}
+            async def recall(self, *args):
+                calls.append("recall")
+                return {"outcome": "succeeded"}
+            async def mute(self, *args):
+                calls.append("mute")
+                return {"outcome": "succeeded"}
+        async def run():
+            host = DryRunHost(context=None, config={}, rules=None, queue=self.queue, lock_path="unused")
+            host.mute_executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
+            self.assertEqual(await host.confirm_single_mute(1), "not_claimed")
+            results = await asyncio.gather(host.confirm_single_mute(3), host.confirm_single_mute(3))
+            self.assertCountEqual(results, ["succeeded", "not_claimed"])
+        asyncio.run(run())
+        self.assertEqual(calls, ["mute"])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT action, status FROM execution_intents ORDER BY id").fetchall(),
+                             [("reply", "pending_confirm"), ("recall", "pending_auto"), ("mute", "succeeded")])
+
+    def test_overview_rechecks_expired_mute_before_contacting_platform(self):
+        from sentinel.dry_run_host import DryRunHost
+        self.enable_execution()
+        self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
+                        text="rule", enabled=True, actions=[{"type": "mute", "mode": "confirm",
+                        "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
+        detail = json.loads(self.detail)
+        detail["proposal"].update(rule_version=2, mode="confirm")
+        self.queue.finish(self.item, status="proposed", detail=json.dumps(detail), rule_versions=(("r", 2),))
+        created = datetime.now(timezone.utc) - timedelta(minutes=2)
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE execution_intents SET created_at=?, expires_at=? WHERE id=1",
+                       (created.isoformat(), (created + timedelta(seconds=60)).isoformat()))
+            db.commit()
+        calls = []
+        class Platform:
+            async def verify_permission(self, *args):
+                calls.append("verify")
+                return True
+            async def mute(self, *args):
+                calls.append("mute")
+                return {"outcome": "succeeded"}
+        async def run():
+            host = DryRunHost(context=None, config={}, rules=None, queue=self.queue, lock_path="unused")
+            host.mute_executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
+            return await host.confirm_single_mute(1)
+        self.assertEqual(asyncio.run(run()), "not_claimed")
+        self.assertEqual(self.queue.confirmation_state(1), {"status": "review", "reason_code": "intent_expired"})
+        self.assertEqual(calls, [])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM execution_attempts").fetchone()[0], 0)
 
     def test_changed_rule_requires_review(self):
         self.enable_execution()

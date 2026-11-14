@@ -53,7 +53,7 @@ def main():
             plugin = plugin_class(context, {"dashboard_admins": ["admin"]})
             await plugin.initialize()
             try:
-                assert plugin.intake is None and len(context.registered_web_apis) == 28
+                assert plugin.intake is None and len(context.registered_web_apis) == 32
                 assert any(route[0].endswith("/quick-start/complete") and route[2] == ["POST"]
                            for route in context.registered_web_apis)
                 status, settings = await call(plugin.get_settings, "admin")
