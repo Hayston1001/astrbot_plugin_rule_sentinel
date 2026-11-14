@@ -1,6 +1,11 @@
 # Rule Sentinel
 
-Rule Sentinel 是面向 QQ 官方群的 AstrBot 群规则管理插件. 管理员用自然语言编写群规并配置处理动作, 由模型判断群消息是否违规. 命中规则后, 插件按顺序发言, 禁言或撤回, 也可以在 Dashboard 中人工确认. 判定/执行意图和平台结果都可追溯.
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.3-24292f?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
+[![QQ 官方机器人](https://img.shields.io/badge/QQ-official%20bot-12B7F5?style=flat-square&logo=qq&logoColor=white)](https://q.qq.com/)
+[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
+
+Rule Sentinel 是面向 QQ 官方群的 AstrBot 群规则管理插件. 管理员用自然语言编写群规并配置处理动作, 由模型判断群消息是否违规. 命中规则后, 插件自动执行预设的 actions, 也可以设为需人工确认. 判定/执行意图和平台结果都可追溯.
 
 ## 功能一览
 
@@ -19,13 +24,6 @@ Rule Sentinel 是面向 QQ 官方群的 AstrBot 群规则管理插件. 管理员
 | 判定模型 | AstrBot 中已配置的 LLM 提供方 |
 | 网络 | 可访问 QQ 开放平台接口 |
 
-## 初次开始
-
-1. 选择判定模型
-2. 选择监控群
-3. 新建规则
-4. 查看判定结果
-
 ## 管理页面
 
 | 页面 | 用途 |
@@ -35,13 +33,6 @@ Rule Sentinel 是面向 QQ 官方群的 AstrBot 群规则管理插件. 管理员
 | 群规则 | 按群查看规则卡片, 新建, 编辑, 启用或停用规则, 调整动作顺序, 查看历史版本 |
 | 群管理 | 添加群, 设置群备注, 读取 QQ 群名, 开关群监控, 覆盖本群模型, 策略, 执行方式和受保护目标提示 |
 | 监控设置 | 配置真实执行总开关, 群名单模式, 全局默认, 判定模型, 理由语言, 消息记录, 运行限制和通知 |
-
-## 判定模型
-
-在 `监控设置` 中填写 AstrBot 已配置的模型提供商标识. 提供方的超时, 重试和错误处理由 AstrBot 和提供方决定, 插件负责判定超时, 并发限制, 限流和熔断.
-
-- `判定理由语言` 只影响模型给出的理由, 不影响判定结果. 留空时按规则和消息自动选择语言, 是否支持由模型决定
-- `未违反规则时记录理由` 默认开启. 关闭后, 不请求也不保存未违反规则的理由; 已有记录和违规理由不受影响. 该开关由所有群共用
 
 ### 判定流程
 
@@ -61,42 +52,19 @@ Rule Sentinel 是面向 QQ 官方群的 AstrBot 群规则管理插件. 管理员
 > - 超长消息
 > - 被限流或队列已满的消息
 
-### 记录状态
+## Star History
 
-| 状态 | 含义 |
-| :---: | --- |
-| 未违反规则 | 模型判断消息没有违反任何已启用规则. 开启理由记录时可能附带模型理由. |
-| 拟执行 | 已生成动作意图, 但还没有执行, 或本群处于只记录状态. |
-| 待确认 | 动作方式为人工确认, 等待管理员在记录详情中确认. |
-| 全部成功 | 所有已配置的动作都执行成功. |
-| 部分失败 | 部分动作成功, 部分失败或被平台拒绝. 请展开逐项查看. |
-| 全部无法执行 | 平台或权限检查拒绝了所有动作, 例如目标是管理员或机器人, 或机器人权限不足. |
-| 结果不明 | 平台返回无法确定的状态. 不会自动重试, 需要人工核查. |
-| 跳过 | 消息进入了插件但没有进入判定, 例如被限流, 队列已满, 消息过长或消息类型不支持. |
+> [!TIP]
+> 如果你喜欢这个插件, 请为我点个 Star
 
-## 数据与安全
-
-- **管理授权**: 管理接口只接受已登录 Dashboard 的用户. 匿名, API Key 身份和前端自行提供的管理员标记都不算授权. 页面隐藏或按钮禁用不代替服务端校验
-- **数据位置**: 规则, 设置, 判定记录, 群名和审计保存在 AstrBot 插件数据目录下的 `astrbot_plugin_rule_sentinel/sentinel.sqlite3`. 不同 AstrBot 实例各自使用自己的插件数据目录
-- **消息原文**: 成功进入队列的消息原文按平台实例和群单独保存, 默认保留 30 天. 保留期设为 0 时不保存这份原文, 但待处理队列仍需暂存判定所需的文本. 插件启动时, 保存设置时和之后每小时清理过期原文. SQLite 文件, 日志和备份可能仍有残留
-- **模型数据**: 进入判定的群消息文本, 发送者标识和相关已启用规则会发送给所选模型服务商. 使用第三方模型前, 请确认其数据处理和留存政策
-- **密钥**: QQ 机器人凭据直接从 AstrBot 的 QQ 官方平台实例读取, 不写入插件数据库
-- **执行边界**: 模型只能提出动作, 不能直接执行. 群, 规则版本, 时长和目标发送者由服务端复核; 真实动作前必须先持久化审计意图. 持久化或权限核验失败就不执行
-- **不确定结果**: 平台结果不明时要求人工核查, 不自动重试. 撤回超过时限或消息时间不可用时, 不调用撤回接口
-- **备份**: 停止插件后复制整个插件数据目录即可备份. 恢复时保持目录结构不变
-
-## 开发
-
-- 运行环境: Python 3.12, uv, Node.js 22
-- 全部测试: `python scripts/run_tests.py`
-- 只测指定 AstrBot: `python scripts/run_tests.py --astrbot "astrbot==4.29.3"`
-- 没有 Node.js 时加 `--skip-node`
-- 单个测试文件: `python -B -m unittest discover -s tests -p "test_rule_store.py" -v`
-- 打包: `python -B scripts/package_plugin.py [--force]`
-
-> [!NOTE]
-> `scripts/run_tests.py` 会创建隔离的 uv 环境, 从 PyPI 安装 AstrBot 4.29.3 和最新版, 检查页面脚本并运行测试, 与 CI 测试内容一致. 测试使用模拟消息/模型响应和临时数据库.
+<a href="https://www.star-history.com/?repos=hayston1001%2Fastrbot_plugin_rule_sentinel&type=date&releases=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=hayston1001/astrbot_plugin_rule_sentinel&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=hayston1001/astrbot_plugin_rule_sentinel&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=hayston1001/astrbot_plugin_rule_sentinel&type=date&legend=bottom-right" />
+ </picture>
+</a>
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/Hayston1001/astrbot_plugin_rule_sentinel/blob/main/LICENSE)
