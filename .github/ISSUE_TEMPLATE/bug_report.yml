@@ -1,0 +1,83 @@
+name: 问题反馈
+description: 报告插件在真实环境中出现的异常, 报错或行为不符
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索已有 issue, 并在最新版本上复现一次.
+        日志和截图里可能包含隐私信息, 请先脱敏再粘贴.
+
+  - type: input
+    id: astrbot_version
+    attributes:
+      label: AstrBot 版本
+    validations:
+      required: true
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: 插件版本
+    validations:
+      required: true
+
+  - type: dropdown
+    id: real_execution
+    attributes:
+      label: 真实执行
+      description: 监控设置中的"真实执行"开关状态
+      options:
+        - 已开启
+        - 已关闭
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序写清操作, 例如选择了哪条规则, 发了什么类型的消息
+      placeholder: |
+        1. 在群规则里启用...
+        2. 在群里发送...
+        3. 打开判定记录...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      placeholder: 你认为应该发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 如果涉及判定记录, 可以附上记录状态和失败原因
+      placeholder: 实际发生了什么, 是否有报错
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 相关日志片段或界面截图
+      placeholder: 粘贴日志, 或把截图拖进来
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我在最新版本上复现过, 并搜索过已有 issue
+          required: true
+        - label: 我已为日志和截图脱敏
+          required: true

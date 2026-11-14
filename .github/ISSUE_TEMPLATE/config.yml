@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/Hayston1001/astrbot_plugin_rule_sentinel/security/advisories/new
+    about: 请勿公开提 issue. 通过 GitHub 的私密漏洞报告联系维护者, 修复发布后再公开细节.
+  - name: 使用问题
+    url: https://github.com/Hayston1001/astrbot_plugin_rule_sentinel/blob/main/README.md
+    about: 安装, 配置和页面功能的说明见 README.

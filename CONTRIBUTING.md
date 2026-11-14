@@ -2,6 +2,16 @@
 
 欢迎提交 issue 和 pull request. 本文说明本仓库的开发环境, 模块边界和提交要求, 目标是让改动在合入后仍然符合插件的安全假设: 消息, 模型输出和前端输入一律不可信, 真实管理动作必须先复核再执行.
 
+## 提交 issue
+
+- 新建 issue 时选择"问题反馈"模板, 它会要求填写 AstrBot 版本, 插件版本, 群类型, 复现步骤, 以及相关日志或截图
+- issue 和其中的附件都是公开的, 提交前移除日志和截图里的隐私信息
+- 安全漏洞不要公开提 issue, 请通过 GitHub [Report a vulnerability](https://github.com/Hayston1001/astrbot_plugin_rule_sentinel/security/advisories/new), 修复发布后由维护者公开细节
+
+## 提交 PR
+
+PR 使用模板 `.github/pull_request_template.md`. 测试由 CI 运行.
+
 ## 开发环境
 
 - Python 3.12. AstrBot 自身要求 Python >=3.12, 插件跟随这个下限
@@ -123,19 +133,6 @@ python -B scripts/package_plugin.py [--force]
 1. 在 `CHANGELOG.md` 增加 `## v<version>` 小节
 2. 修改 `metadata.yaml` 的 `version`
 3. 推送 `v<version>` tag
-
-## 提交 issue
-
-- 说明 AstrBot 版本/插件版本/群类型/复现步骤, 附上相关日志或截图(脱敏日志和截图里的群号/QQ 号/消息原文)
-- 安全漏洞不要公开提 issue, 请通过 GitHub `Report a vulnerability`, 修复发布后由维护者公开细节
-
-## 提交 PR
-
-- [ ] `python scripts/run_tests.py` 通过
-- [ ] 新行为有对应测试, 涉及插件入口的守卫测试仍然通过
-- [ ] 页面改动执行过 `node --check`, 并在真实 Dashboard 中确认
-- [ ] 没有提交本地数据库, 日志, 截图中的群消息原文, 群号或凭据
-- [ ] 写清动机/行为变化/验证方式/潜在影响
 
 ## 数据与安全
 
