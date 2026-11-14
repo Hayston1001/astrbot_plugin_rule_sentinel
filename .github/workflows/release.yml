@@ -6,12 +6,19 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    name: Test before release
+    uses: ./.github/workflows/tests.yml
+
   release:
     name: Build and publish release
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out
         uses: actions/checkout@v7
