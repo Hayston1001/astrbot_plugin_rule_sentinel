@@ -4,9 +4,11 @@ import asyncio
 import threading
 import importlib.util
 import sqlite3
+import sys
+import types
 from contextlib import closing
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from sentinel.dry_run_host import DryRunHost
@@ -29,6 +31,17 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
         async def session_gate(message):
             return True
         self.session_gate = session_gate
+
+    def test_failure_is_logged_and_reported_to_callback(self):
+        api = types.ModuleType("astrbot.api")
+        api.logger = Mock()
+        callback = Mock()
+        host = DryRunHost(context=object(), config=self.config, rules=self.rules, queue=self.queue,
+                          lock_path=self.directory / "lock", on_failure=callback)
+        with patch.dict(sys.modules, {"astrbot": types.ModuleType("astrbot"), "astrbot.api": api}):
+            host._report_failure("worker_failed")
+        api.logger.error.assert_called_once_with("Rule Sentinel background failure: worker_failed")
+        callback.assert_called_once_with("worker_failed")
 
     async def test_host_has_exclusive_lock_and_shutdown_releases_it(self):
         path = self.directory / "lock"

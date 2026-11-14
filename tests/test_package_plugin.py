@@ -1,3 +1,4 @@
+import ast
 import io
 import importlib.util
 import os
@@ -60,6 +61,22 @@ class PackagingTests(unittest.TestCase):
             self.assertIn("模型判定", description)
             self.assertFalse(any("__pycache__" in name or name.endswith((".pyc", ".sqlite", ".sqlite3")) for name in names))
             self.assertTrue(all(not name.startswith("/") and ".." not in Path(name).parts for name in names))
+
+    def test_archive_uses_astrbot_logger_only(self):
+        with zipfile.ZipFile(io.BytesIO(package_plugin.build_archive())) as archive:
+            for name in archive.namelist():
+                if not name.endswith(".py"):
+                    continue
+                with self.subTest(name=name):
+                    tree = ast.parse(archive.read(name), filename=name)
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                self.assertNotIn(alias.name.split(".")[0], {"logging", "loguru"})
+                        elif isinstance(node, ast.ImportFrom):
+                            self.assertNotIn((node.module or "").split(".")[0], {"logging", "loguru"})
+                            if any(alias.name == "logger" for alias in node.names):
+                                self.assertEqual(node.module, "astrbot.api")
 
     def test_existing_output_is_not_overwritten_without_force(self):
         with tempfile.TemporaryDirectory() as temp:

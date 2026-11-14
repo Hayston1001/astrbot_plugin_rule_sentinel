@@ -8,7 +8,6 @@ No HTTP or chat endpoint is exposed by this module.
 import hashlib
 import hmac
 import json
-import logging
 import secrets
 import time
 
@@ -94,4 +93,6 @@ class RuleManagement:
                     self.after_save(fields, success)
                 except Exception:
                     # A failed cache refresh must not re-enable the group.
-                    logging.getLogger(__name__).warning("Rule index refresh failed; capture remains disabled")
+                    from astrbot.api import logger
+
+                    logger.warning("Rule index refresh failed; capture remains disabled")

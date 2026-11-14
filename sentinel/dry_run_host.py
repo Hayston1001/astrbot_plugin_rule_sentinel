@@ -1,7 +1,6 @@
 """Opt-in dry-run lifecycle host, not attached to AstrBot events by default."""
 
 import asyncio
-import logging
 
 from .async_io import run_sync_safely
 from .event_intake import EventIntake
@@ -44,7 +43,9 @@ class DryRunHost:
         self._startup_done.set()
 
     def _report_failure(self, code):
-        logging.getLogger(__name__).error("Rule Sentinel background failure: %s", code)
+        from astrbot.api import logger
+
+        logger.error(f"Rule Sentinel background failure: {code}")
         if self.on_failure is not None:
             try:
                 self.on_failure(code)
