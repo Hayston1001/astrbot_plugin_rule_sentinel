@@ -49,7 +49,8 @@ class GroupDecider:
     async def __call__(self, item):
         key = (item.platform_id, item.group_id)
         effective = resolve_group_settings(self.config, *key)
-        route = (effective["backend"], effective["model"], effective["strategy"], effective["llm_reason_language"])
+        route = (effective["backend"], effective["model"], effective["strategy"], effective["llm_reason_language"],
+                 effective["image_enabled"], effective["image_model"], effective["image_understanding_mode"])
         if route not in self.deciders:
             self.deciders[route] = self.make_decider(*route)
         result = await self.deciders[route](item)
@@ -57,25 +58,31 @@ class GroupDecider:
 
 
 def build_runtime(*, context, config, rules, queue, notify=None, session_gate=None,
-                  on_failure=None):
+                  on_failure=None, image_fetcher=None, image_prefetcher=None):
     settings = read_settings(config)
     group_overrides = deepcopy(config.get("group_overrides", {}))
     if settings.backend != "llm":
         raise ValueError("decision backend required")
-    def make_decider(backend, model, strategy, reason_language=None):
+    def make_decider(backend, model, strategy, reason_language=None, image_enabled=False,
+                     image_model="", image_mode="direct"):
         if backend == "llm":
             language = config.get("llm_reason_language", "") if reason_language is None else reason_language
             def make_llm_decider(enabled):
                 return LlmDecider(rules, AstrBotLlmInvoker(context, reason_language=language,
                                   no_action_reason_enabled=enabled), model=model,
                                   max_duration_seconds=settings.max_duration_seconds, queue=queue, strategy=strategy,
-                                  no_action_reason_enabled=enabled)
+                                  no_action_reason_enabled=enabled, image_enabled=image_enabled,
+                                  image_model=image_model or None, image_mode=image_mode,
+                                  caption_prompt=settings.image_caption_prompt,
+                                  fetcher=image_fetcher, prefetcher=image_prefetcher)
             decider = ReasonConfiguredDecider(config, make_llm_decider)
             decider.current()
             return decider
         raise ValueError("decision backend required")
     decider = (GroupDecider(config, make_decider) if "group_overrides" in config
-               else make_decider(settings.backend, settings.model, settings.rule_selection_strategy))
+               else make_decider(settings.backend, settings.model, settings.rule_selection_strategy, None,
+                                 settings.image_judging_enabled, settings.image_provider_id,
+                                 settings.image_understanding_mode))
     execution_default = config.get("default_execution_mode", "execute")
     action_default = config.get("default_action_mode", "auto")
     reason_language = config.get("llm_reason_language", "")
@@ -100,7 +107,15 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
                              cooldown_seconds=settings.cooldown_seconds)
     admission = DryRunAdmission(queue, rules, policy=settings.policy, capacity=settings.capacity,
                                 model=settings.model, rate_limiter=limiter, settings_match=settings_match,
-                                notify=notify, session_gate=session_gate)
+                                notify=notify, session_gate=session_gate,
+                                image_policy=_image_policy(config, settings.image_max_count))
     worker = DryRunWorker(queue, guarded, concurrency=settings.concurrency,
                           timeout_seconds=settings.timeout_seconds, breaker=breaker, notify=notify)
-    return DryRunRuntime(admission, worker, on_failure=on_failure)
+    return DryRunRuntime(admission, worker, on_failure=on_failure, prefetcher=image_prefetcher)
+
+
+def _image_policy(config, max_count):
+    def resolve(platform_id, group_id):
+        effective = resolve_group_settings(config, platform_id, group_id)
+        return effective["image_enabled"], max_count
+    return resolve

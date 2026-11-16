@@ -68,22 +68,47 @@ class AstrBotLlmInvoker:
         self.reason_language = reason_language.strip()
         self.no_action_reason_enabled = no_action_reason_enabled
 
-    async def __call__(self, *, model: str, message: str, rules: list, strategy: str = "model", language: str = "en"):
+    async def __call__(self, *, model: str, message: str, rules: list, strategy: str = "model",
+                       language: str = "en", image_urls=None, image_caption=None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
-        if not isinstance(message, str) or not message.strip() or not isinstance(rules, list) or not rules:
+        if (not isinstance(message, str) or not isinstance(rules, list) or not rules
+                or (not message.strip() and not image_urls and not image_caption)):
             raise ValueError("message and rules are required")
         if strategy not in ("model", "priority"):
             raise ValueError("invalid rule selection strategy")
         if language not in PROMPTS:
             raise ValueError("unsupported prompt language")
-        prompt = json.dumps({"rules": rules, "message_untrusted": message}, ensure_ascii=False)
+        if image_urls:
+            prompt = json.dumps({"rules": rules, "message_untrusted": {
+                "text": message, "image_count": len(image_urls)}}, ensure_ascii=False)
+        elif image_caption:
+            prompt = json.dumps({"rules": rules, "message_untrusted": {
+                "text": message, "image_caption": image_caption}}, ensure_ascii=False)
+        else:
+            prompt = json.dumps({"rules": rules, "message_untrusted": message}, ensure_ascii=False)
         prompt_key = "system_" + strategy + ("" if self.no_action_reason_enabled else "_no_reason")
         system_prompt = PROMPTS[language][prompt_key]
         if self.reason_language:
             system_prompt += ("\nWrite every decision reason in the administrator-specified language: "
                               + json.dumps(self.reason_language, ensure_ascii=False) + ". Keep all required protocol markers unchanged.")
+        if image_urls:
+            system_prompt += "\n" + PROMPTS[language]["image_direct"]
+        elif image_caption:
+            system_prompt += "\n" + PROMPTS[language]["image_caption_note"]
         return await self.context.llm_generate(chat_provider_id=model, prompt=prompt,
+                                               image_urls=list(image_urls) if image_urls else None,
                                                tools=self.tool_set_factory(strategy, language),
                                                system_prompt=system_prompt,
                                                contexts=[])
+
+    async def caption(self, *, model: str, prompt: str, image_urls):
+        """Ask the configured vision model for a bounded image description."""
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be explicitly selected")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("caption prompt is required")
+        if not isinstance(image_urls, (list, tuple)) or not image_urls:
+            raise ValueError("image references are required")
+        return await self.context.llm_generate(chat_provider_id=model, prompt=prompt,
+                                               image_urls=list(image_urls))

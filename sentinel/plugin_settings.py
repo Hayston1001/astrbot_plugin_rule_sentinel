@@ -22,6 +22,14 @@ class Settings:
     ingress_capacity: int
     rule_selection_strategy: str
     llm_no_action_reason_enabled: bool
+    image_judging_enabled: bool
+    image_understanding_mode: str
+    image_provider_id: str
+    image_caption_prompt: str
+    image_max_count: int
+    image_max_bytes_per_image: int
+    image_max_total_bytes: int
+    image_fetch_timeout_seconds: int
 
 
 def decision_model_unconfigured(config):
@@ -46,6 +54,14 @@ def read_settings(config, *, require_model=True) -> Settings:
     ingress_capacity = config.get("ingress_capacity", 256)
     strategy = config.get("rule_selection_strategy", "model")
     no_action_reason = config.get("llm_no_action_reason_enabled", True)
+    image_enabled = config.get("image_judging_enabled", False)
+    image_mode = config.get("image_understanding_mode", "direct")
+    image_provider = config.get("image_provider_id", "")
+    image_caption_prompt = config.get("image_caption_prompt", "")
+    image_max_count = config.get("image_max_count", 9)
+    image_max_bytes = config.get("image_max_bytes_per_image", 10485760)
+    image_max_total = config.get("image_max_total_bytes", 20971520)
+    image_timeout = config.get("image_fetch_timeout_seconds", 15)
     if mode not in ("allowlist", "blocklist") or not isinstance(entries, list):
         raise ValueError("invalid monitoring settings")
     groups = set()
@@ -69,9 +85,30 @@ def read_settings(config, *, require_model=True) -> Settings:
         raise ValueError("invalid rule selection strategy")
     if type(no_action_reason) is not bool:
         raise ValueError("invalid no-action reason setting")
+    if type(image_enabled) is not bool or image_mode not in ("caption", "direct"):
+        raise ValueError("invalid image judging setting")
+    if not isinstance(image_provider, str) or len(image_provider) > 128:
+        raise ValueError("invalid image provider")
+    if (not isinstance(image_caption_prompt, str) or len(image_caption_prompt) > 1000
+            or any(ord(char) < 32 and char not in "\n\t" or ord(char) == 127
+                   for char in image_caption_prompt)):
+        raise ValueError("invalid image caption prompt")
+    if type(image_max_count) is not int or not 1 <= image_max_count <= 9:
+        raise ValueError("invalid image count limit")
+    if (type(image_max_bytes) is not int or not 65536 <= image_max_bytes <= 33554432
+            or type(image_max_total) is not int or not image_max_bytes <= image_max_total <= 67108864):
+        raise ValueError("invalid image size limit")
+    if type(image_timeout) is not int or not 1 <= image_timeout <= 60:
+        raise ValueError("invalid image timeout")
+    if image_enabled:
+        if not image_provider.strip():
+            raise ValueError("image provider is required")
+        if image_mode == "caption" and not image_caption_prompt.strip():
+            raise ValueError("image caption prompt is required")
     model = config.get("llm_provider_id", "") if backend == "llm" else ""
     if not isinstance(model, str) or (require_model and (not backend or not model.strip())):
         raise ValueError("explicit decision model is required")
     return Settings(MonitoringPolicy(mode, frozenset(groups)), capacity, backend,
                     model, duration, concurrency, timeout, global_rate, group_rate, failure_threshold, cooldown, ingress_capacity, strategy,
-                    no_action_reason)
+                    no_action_reason, image_enabled, image_mode, image_provider.strip(), image_caption_prompt,
+                    image_max_count, image_max_bytes, image_max_total, image_timeout)

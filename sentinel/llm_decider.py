@@ -15,6 +15,7 @@ from .sentinel_core import RuleSnapshot, validate_plan_proposal
 from .rule_snapshot_guard import snapshot_is_current
 from .audit_safety import safe_resolved_model
 from .prompts import select_prompt_language
+from .image_fetch import ImageFetchError
 
 
 class LlmDecider:
@@ -26,7 +27,9 @@ class LlmDecider:
     """
 
     def __init__(self, rules, invoke, *, model: str, max_duration_seconds: int, queue, strategy: str = "model",
-                 no_action_reason_enabled: bool = True):
+                 no_action_reason_enabled: bool = True, image_enabled: bool = False,
+                 image_model: str | None = None, image_mode: str = "direct",
+                 caption_prompt: str = "", fetcher=None, prefetcher=None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if type(max_duration_seconds) is not int or max_duration_seconds <= 0:
@@ -35,6 +38,12 @@ class LlmDecider:
             raise ValueError("invalid rule selection strategy")
         if type(no_action_reason_enabled) is not bool:
             raise ValueError("invalid no-action reason setting")
+        if type(image_enabled) is not bool or image_mode not in ("caption", "direct"):
+            raise ValueError("invalid image judging setting")
+        if image_model is not None and (not isinstance(image_model, str) or not image_model.strip()):
+            raise ValueError("invalid image model")
+        if image_mode == "caption" and image_enabled and not isinstance(caption_prompt, str):
+            raise ValueError("invalid image caption prompt")
         self.rules = rules
         self.invoke = invoke
         self.model = model
@@ -42,6 +51,12 @@ class LlmDecider:
         self.queue = queue
         self.strategy = strategy
         self.no_action_reason_enabled = no_action_reason_enabled
+        self.image_enabled = image_enabled
+        self.image_model = image_model
+        self.image_mode = image_mode
+        self.caption_prompt = caption_prompt
+        self.fetcher = fetcher
+        self.prefetcher = prefetcher
 
     async def __call__(self, item):
         rules = await asyncio.to_thread(self.rules.current_for_group, item.platform_id, item.group_id)
@@ -49,9 +64,65 @@ class LlmDecider:
         if not enabled:
             return Decision("skipped", "no_enabled_rule", model_attempted=False)
         message = item.payload.get("text")
+        message = message if isinstance(message, str) else ""
+        raw_images = item.payload.get("image_urls")
+        images = (tuple(value for value in raw_images if isinstance(value, str) and value)
+                  if isinstance(raw_images, list) else ())
         sender = item.payload.get("sender_id")
-        if not isinstance(message, str) or not message.strip() or not isinstance(sender, str) or not sender.strip():
+        if ((not message.strip() and not images) or not isinstance(sender, str) or not sender.strip()):
             return Decision("failed", "invalid_message_snapshot", model_attempted=False)
+        image_data_urls = None
+        image_count = 0
+        image_bytes = 0
+        image_source = None
+        caption = None
+        judge_model = self.model
+        if images:
+            if not self.image_enabled:
+                return Decision("skipped", "image_judging_disabled", model_attempted=False)
+            if not self.image_model or self.fetcher is None:
+                return Decision("skipped", "image_model_unconfigured", model_attempted=False)
+            cache_key = (item.platform_id, item.group_id, item.message_id)
+            cached = await self.prefetcher.consume(cache_key) if self.prefetcher is not None else None
+            if cached is not None:
+                image_source = "prefetch"
+                if cached.code:
+                    return Decision("skipped", cached.code, model_attempted=False)
+                fetched = cached.images
+            else:
+                image_source = "inline"
+                try:
+                    fetched = await self.fetcher.fetch(list(images))
+                except ImageFetchError as error:
+                    return Decision("skipped", error.code, model_attempted=False)
+                except Exception:
+                    return Decision("skipped", "image_fetch_failed", model_attempted=False)
+            if not fetched:
+                return Decision("skipped", "image_fetch_failed", model_attempted=False)
+            previews = [image.preview for image in fetched if getattr(image, "preview", None)]
+            if previews:
+                try:
+                    await run_sync_safely(self.queue.record_previews, platform_id=item.platform_id,
+                                          group_id=item.group_id, message_id=item.message_id,
+                                          previews=previews)
+                except Exception:
+                    # Previews are a convenience only; never block judging.
+                    pass
+            image_data_urls = [image.data_url for image in fetched]
+            image_count = len(image_data_urls)
+            image_bytes = sum(image.byte_count for image in fetched)
+            if self.image_mode == "caption":
+                try:
+                    caption_response = await self.invoke.caption(model=self.image_model,
+                        prompt=self.caption_prompt, image_urls=image_data_urls)
+                except Exception:
+                    return Decision("skipped", "image_caption_failed", model_attempted=False)
+                caption = getattr(caption_response, "completion_text", None)
+                if not isinstance(caption, str) or not caption.strip():
+                    return Decision("skipped", "image_caption_empty", model_attempted=False)
+                caption = caption.strip()[:4000]
+            else:
+                judge_model = self.image_model
         # Copy data before the asynchronous model call so later edits do not
         # change which version was actually judged.
         snapshots = {rule.rule_id: RuleSnapshot(rule.rule_id, rule.version, rule.enabled,
@@ -67,9 +138,14 @@ class LlmDecider:
                 if mute["duration_mode"] == "strict":
                     data["severity_levels"] = list(mute["severity_seconds"])
             model_rules.append(data)
-        language = select_prompt_language([rule.text for rule in enabled], message)
-        start_detail = json.dumps({"backend": "llm", "model": self.model, "strategy": self.strategy, "rules": rule_data,
-                                   "sender_id": sender, "prompt_language": language}, ensure_ascii=False, allow_nan=False)
+        language = select_prompt_language([rule.text for rule in enabled], message or caption or "")
+        start_detail = {"backend": "llm", "model": judge_model, "strategy": self.strategy, "rules": rule_data,
+                        "sender_id": sender, "prompt_language": language}
+        if images:
+            start_detail["image"] = {"mode": self.image_mode, "model": self.image_model, "count": image_count,
+                                     "bytes": image_bytes, "source": image_source,
+                                     "caption_chars": len(caption) if caption else 0}
+        start_detail = json.dumps(start_detail, ensure_ascii=False, allow_nan=False)
         if len(start_detail) > MAX_AUDIT_DETAIL_CHARS:
             raise AuditSnapshotTooLarge("rule snapshot exceeds audit limit")
         try:
@@ -77,16 +153,25 @@ class LlmDecider:
         except Exception:
             raise AuditUnavailable("evaluation audit unavailable") from None
         started = time.monotonic()
-        response = await self.invoke(model=self.model, message=message,
-                                     rules=model_rules, strategy=self.strategy, language=language)
+        invoke_kwargs = {"model": judge_model, "message": message, "rules": model_rules,
+                         "strategy": self.strategy, "language": language}
+        if images and self.image_mode == "direct":
+            invoke_kwargs["image_urls"] = image_data_urls
+        elif images and caption:
+            invoke_kwargs["image_caption"] = caption
+        response = await self.invoke(**invoke_kwargs)
         elapsed_ms = round((time.monotonic() - started) * 1000, 3)
         normalized = normalize_priority_response(response) if self.strategy == "priority" else normalize_response(response)
-        detail = {"backend": "llm", "model": self.model, "rules": rule_data,
+        detail = {"backend": "llm", "model": judge_model, "rules": rule_data,
                   "strategy": self.strategy, "prompt_language": language, "response_status": normalized.reason,
                   "model_latency_ms": elapsed_ms, "message_chars": len(message)}
+        if images:
+            detail["image"] = {"mode": self.image_mode, "model": self.image_model, "count": image_count,
+                               "bytes": image_bytes, "source": image_source,
+                               "caption_chars": len(caption) if caption else 0}
         raw = getattr(response, "raw_completion", None)
         model_name = raw.get("model") if isinstance(raw, dict) else getattr(raw, "model", None)
-        detail["provider_id"] = self.model
+        detail["provider_id"] = judge_model
         detail["resolved_model"] = safe_resolved_model(model_name, message)
         usage = getattr(response, "usage", None)
         if usage is not None:

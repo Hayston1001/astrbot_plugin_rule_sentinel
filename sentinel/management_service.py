@@ -219,7 +219,8 @@ class ManagementService:
 
     def message_content(self, actor, platform_id, group_id, message_id):
         self._check(actor, platform_id, group_id)
-        return {"content": self.queue.message_content(platform_id=platform_id, group_id=group_id, message_id=message_id)}
+        return {"content": self.queue.message_content(platform_id=platform_id, group_id=group_id, message_id=message_id),
+                "images": self.queue.message_images(platform_id=platform_id, group_id=group_id, message_id=message_id)}
 
     def summarize_group(self, actor, platform_id, group_id, all_groups=False):
         if not self.actor_allowed(actor):

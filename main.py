@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain, Reply
+from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
@@ -23,6 +23,7 @@ from .sentinel.event_stream import EventHub
 from .sentinel.group_discovery import discover_groups
 from .sentinel.management_service import ManagementService
 from .sentinel.plugin_settings import decision_model_unconfigured, read_settings
+from .sentinel.provider_capabilities import declared_modalities, image_capability, tool_capability
 from .sentinel.qq_official_snapshot import extract
 from .sentinel.message_entry import is_activated_command, strip_wake_prefix
 from .sentinel.rule_store import RuleStore, VersionConflict
@@ -38,6 +39,20 @@ MAX_JSON_DEPTH = 64
 _plugin_data_root = Path(get_astrbot_plugin_data_path())
 capture_legacy_config(_plugin_data_root / PLUGIN_NAME,
                       _plugin_data_root.parent / "config" / f"{PLUGIN_NAME}_config.json")
+
+
+def _image_capture_hint(event):
+    """Return True for an image-bearing message without retaining its content."""
+    try:
+        chain = getattr(event.message_obj, "message", None)
+        if isinstance(chain, list) and any(isinstance(segment, Image) for segment in chain):
+            return True
+        raw = getattr(event.message_obj, "raw_message", None)
+        raw_data = getattr(raw, "raw_data", None)
+        attachments = raw_data.get("attachments") if isinstance(raw_data, dict) else None
+        return isinstance(attachments, list) and bool(attachments)
+    except Exception:
+        return False
 
 
 def _unique_json_object(pairs):
@@ -140,6 +155,7 @@ class RuleSentinel(Star):
             ("group-monitoring", self.set_group_monitoring, ["POST"]),
             ("group-settings", self.save_group_settings, ["POST"]),
             ("providers", self.list_providers, ["GET"]),
+            ("image-model-options", self.list_image_model_options, ["GET"]),
         ):
             context.register_web_api(f"/{PLUGIN_NAME}/{route}", handler, methods, route)
 
@@ -243,41 +259,67 @@ class RuleSentinel(Star):
         seen here. The handler only copies; it never sends a reply, sets a
         result or stops the event, so the rest of the pipeline is unaffected.
         """
+        image_hint = _image_capture_hint(event)
+
+        def diagnose(reason):
+            # Short static codes only: no message text, links or member ids.
+            if image_hint:
+                logger.info(f"Rule Sentinel image capture result: {reason}")
+
         intake = self.intake
         if intake is None:
+            diagnose("monitoring_not_ready")
             return
         if is_activated_command(event, self.capture_group_message):
+            diagnose("command_handler")
             return
         try:
             admission = intake.runtime.admission
             if admission.settings_match is not None and not admission.settings_match():
+                diagnose("settings_changed")
                 return
             obj = event.message_obj
             key = (event.get_platform_id(), getattr(obj, "group_id", None))
             policy = admission.policy
             if (policy.mode == "allowlist" and key not in policy.groups) or (policy.mode == "blocklist" and key in policy.groups):
+                diagnose("group_not_monitored")
                 return
             if self.group_index is None or not self.group_index.is_enabled(*key):
+                diagnose("group_disabled")
                 return
             # This version exposes management only through the dashboard;
             # no plugin chat-management commands are registered.
             result = extract(event, is_management_command=lambda text: False,
-                             text_segment_types=(Plain, At), quote_segment_types=(Reply,))
+                             text_segment_types=(Plain, At), quote_segment_types=(Reply,),
+                             image_segment_types=(Image,))
             if result.message is not None:
                 from dataclasses import replace
                 result_message = replace(result.message, text=strip_wake_prefix(event, self.context, result.message.text, At))
                 if len(result_message.text) > MAX_MESSAGE_CHARS or len(result.message.text) > MAX_MESSAGE_CHARS:
-                    intake.offer(Skip(result_message.platform_id, result_message.group_id,
+                    status = intake.offer(Skip(result_message.platform_id, result_message.group_id,
                                       result_message.message_id, "message_too_long", result_message.session_origin))
                 else:
-                    intake.offer(result_message)
+                    status = intake.offer(result_message)
+                diagnose(f"offer_{status}")
             elif result.status != "unsupported_platform":
+                if result.status == "invalid_image_reference":
+                    for segment in getattr(obj, "message", ()) or ():
+                        if isinstance(segment, Image):
+                            reference = getattr(segment, "file", None) or getattr(segment, "url", None)
+                            if isinstance(reference, str):
+                                scheme = reference.split(":", 1)[0][:24] if ":" in reference else "none"
+                                logger.info(f"Rule Sentinel image reference: len={len(reference)} scheme={scheme}")
+                            else:
+                                logger.info(f"Rule Sentinel image reference: type={type(reference).__name__}")
+                            break
                 platform_id, group_id = event.get_platform_id(), getattr(obj, "group_id", None)
                 message_id = getattr(obj, "message_id", None)
                 if all(isinstance(value, str) and value.strip() for value in (platform_id, group_id, message_id)):
-                    intake.offer(Skip(platform_id, group_id, message_id, result.status,
+                    status = intake.offer(Skip(platform_id, group_id, message_id, result.status,
                                       getattr(event, "unified_msg_origin", None)))
+                    diagnose(f"extract_{result.status}_{status}")
         except Exception:
+            diagnose("exception")
             logger.error("Rule Sentinel could not capture a group message.")
 
     async def _run(self, operation, *args):
@@ -808,5 +850,40 @@ class RuleSentinel(Star):
             providers = self.context.get_all_providers()
             return json_response([{"id": item.provider_config["id"]} for item in providers
                                   if isinstance(item.provider_config.get("id"), str)])
+        except Exception:
+            return error_response("Provider list unavailable", status_code=500)
+
+    async def list_image_model_options(self):
+        """Return providers with their declared image capability for the picker."""
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        try:
+            providers = []
+            for item in self.context.get_all_providers():
+                config = getattr(item, "provider_config", None)
+                provider_id = config.get("id") if isinstance(config, dict) else None
+                if not isinstance(provider_id, str) or not provider_id:
+                    continue
+                try:
+                    model = item.get_model()
+                except Exception:
+                    model = ""
+                providers.append({"id": provider_id, "model": model if isinstance(model, str) else "",
+                                  "modalities": list(declared_modalities(config) or ()),
+                                  "image_capability": image_capability(config),
+                                  "tool_capability": tool_capability(config)})
+            order = {"image": 0, "undeclared": 1, "no_image": 2}
+            providers.sort(key=lambda entry: (order.get(entry["image_capability"], 3), entry["id"]))
+            framework_default = ""
+            try:
+                settings = self.context.get_config().get("provider_settings")
+                value = settings.get("default_image_caption_provider_id") if isinstance(settings, dict) else ""
+                if isinstance(value, str):
+                    framework_default = value
+            except Exception:
+                framework_default = ""
+            return json_response({"providers": providers, "framework_caption_provider_id": framework_default})
         except Exception:
             return error_response("Provider list unavailable", status_code=500)

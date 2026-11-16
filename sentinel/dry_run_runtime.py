@@ -14,10 +14,11 @@ class DryRunRuntime:
     No platform event or management handler is registered here.
     """
 
-    def __init__(self, admission, worker, *, on_failure=None):
+    def __init__(self, admission, worker, *, on_failure=None, prefetcher=None):
         self.admission = admission
         self.worker = worker
         self.queue = worker.queue
+        self.prefetcher = prefetcher
         self._tasks = {}
         self._generation = {}
         self._closed = False
@@ -53,6 +54,13 @@ class DryRunRuntime:
             return "runtime_not_started"
         async def admit():
             result = await self.admission.submit(message)
+            if result == "queued" and not self._closed and self.prefetcher is not None:
+                urls = getattr(message, "image_urls", ())
+                if urls:
+                    # Start the download before waking the worker so the judge
+                    # can reuse it instead of fetching a second copy.
+                    self.prefetcher.schedule(
+                        (message.platform_id, message.group_id, message.message_id), urls)
             if result in ("queued", "duplicate") and not self._closed:
                 self._wake(message.platform_id, message.group_id)
             return result
@@ -124,6 +132,8 @@ class DryRunRuntime:
             for outcome in outcomes:
                 if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                     raise outcome
+        if self.prefetcher is not None:
+            await self.prefetcher.close()
 
     def stop_new_decisions(self):
         request_stop = getattr(self.worker, "request_stop", None)

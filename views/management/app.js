@@ -134,6 +134,8 @@ let groupSummaryFailures = new Set();
 let allGroupsRevision = 0;
 let allGroupsLoading = false;
 let availableProviders = [];
+let availableImageProviders = [];
+let frameworkCaptionProvider = "";
 let stateSave = Promise.resolve();
 let stateRevision = 0;
 let summaryRevision = 0;
@@ -728,6 +730,41 @@ function executionBucket(row) {
   if (["blocked", "permission_denied", "denied", "unsupported"].includes(execution.status)) return "blocked";
   return execution.status;
 }
+const skipReasonText = {
+  image_judging_disabled: "本群未开启图片判定, 图片消息未处理.",
+  image_too_many: "图片数量超过上限, 未处理.",
+  image_url_rejected: "图片地址不合法, 未处理.",
+  image_fetch_failed: "图片下载失败或超时, 未处理.",
+  image_too_large: "图片超过大小限制, 未处理.",
+  image_unsupported_format: "图片格式无法识别, 未处理.",
+  image_caption_failed: "图片描述失败, 未处理.",
+  image_caption_empty: "图片描述为空, 未处理.",
+  image_model_unconfigured: "未配置图片模型, 未处理.",
+  invalid_image_reference: "图片地址不合法或本地图片已失效, 未处理.",
+  invalid_text: "消息文本无效, 未处理.",
+  invalid_message_chain: "消息结构无法识别, 未处理.",
+  invalid_message_identity: "消息标识不完整, 未处理.",
+  invalid_text_component_types: "消息组件类型无法识别, 未处理.",
+  not_verified_qq_group: "群标识未通过校验, 未处理.",
+  session_identity_unverified: "会话标识未通过校验, 未处理.",
+  sender_identity_unverified: "无法确认发送者身份, 未处理.",
+  bot_message: "机器人发送的消息, 未处理.",
+  bot_identity_unverified: "无法确认发送者不是机器人, 未处理.",
+  command_classification_unknown: "无法确认是否为管理命令, 未处理.",
+  management_command_or_unknown: "管理命令或类型未知, 未处理.",
+  unsupported_platform: "不支持的平台, 未处理.",
+  queue_full: "等待队列已满, 未处理.",
+  empty_text: "消息没有文本内容, 未处理.",
+  message_too_long: "消息超过长度上限, 未处理.",
+  rate_limited: "触发频率限制, 未处理.",
+  no_enabled_rule: "本群没有启用的规则, 未处理.",
+  framework_session_denied: "框架会话未启用, 未处理.",
+  group_not_allowed: "群不在监控名单中, 未处理.",
+  group_blocked: "群在监控黑名单中, 未处理.",
+  invalid_list_mode: "群名单模式无效, 未处理.",
+  settings_changed_reload_required: "监控设置已变化, 需要重新加载, 未处理.",
+  self_message: "机器人自己发送的消息, 未处理.",
+};
 function recordReason(row, detail, decision, proposal) {
   const supplied = proposal.reason || decision.reason;
   if (typeof supplied === "string" && supplied.trim()) return {text: supplied, fallback: false};
@@ -737,8 +774,9 @@ function recordReason(row, detail, decision, proposal) {
     (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : ""));
   const nonText = row.status === "skipped" && value === "non_text_or_unknown";
   const removedModel = row.status === "review" && value === "decision_model_removed";
-  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : value,
-    fallback: nonText || removedModel};
+  const skipped = row.status === "skipped" && Object.hasOwn(skipReasonText, value) ? skipReasonText[value] : "";
+  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : skipped || value,
+    fallback: nonText || removedModel || Boolean(skipped)};
 }
 function matchesRecord(row) {
   if (currentFilter !== "all" && decisionBucket(row) !== currentFilter) return false;
@@ -835,6 +873,9 @@ function renderRecords(rows, append = false, update = false) {
     originalSection.appendChild(recordElement("h3", "", "消息原文"));
     const original = recordElement("p", "record-detail-value", "展开后读取.");
     originalSection.appendChild(original);
+    const originalImages = recordElement("div", "record-images");
+    originalImages.hidden = true;
+    originalSection.appendChild(originalImages);
     info.appendChild(originalSection);
     const explainedByActions = actions.some((action) => action.execution &&
       (failureStates.has(action.execution.status) || (recordStatus(row)[0] === "部分失败" && action.execution.status === "inactive")));
@@ -934,7 +975,27 @@ function renderRecords(rows, append = false, update = false) {
         const result = await bridge.apiGet("message-content", {...contentScope, message_id: messageId});
         await loadingFade;
         if (!expandedMessages.has(key) || selectedAtRender !== JSON.stringify(group()) || detailRow.isConnected === false) return;
-        updateVisiblePanel(content, () => { original.classList.remove("is-loading"); original.textContent = typeof result?.content === "string" ? result.content : "原文不可用或已过期."; });
+        updateVisiblePanel(content, () => {
+          original.classList.remove("is-loading");
+          original.textContent = typeof result?.content === "string" ? result.content : "原文不可用或已过期.";
+          originalImages.textContent = "";
+          const images = Array.isArray(result?.images) ? result.images : [];
+          for (const [index, source] of images.entries()) {
+            if (typeof source !== "string" || !source.startsWith("data:image/")) continue;
+            const image = document.createElement("img");
+            image.src = source;
+            image.alt = `消息图片 ${index + 1}`;
+            image.loading = "lazy";
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "record-image-button";
+            button.setAttribute("aria-label", `查看${image.alt}`);
+            button.appendChild(image);
+            button.addEventListener("click", () => openImageViewer(source, image.alt, button));
+            originalImages.appendChild(button);
+          }
+          originalImages.hidden = originalImages.childElementCount === 0;
+        });
         fadeInContent(original);
         contentLoaded = true;
       } catch {
@@ -2652,14 +2713,21 @@ const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_select
   "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
-  "queue_capacity_per_group", "ingress_capacity", "notification_target", "notification_interval_seconds"];
+  "queue_capacity_per_group", "ingress_capacity", "notification_target", "notification_interval_seconds",
+  "image_judging_enabled", "image_understanding_mode", "image_provider_id", "image_caption_prompt",
+  "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"];
 const numericSettings = new Set(["message_retention_days", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
-  "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds"]);
-const booleanSettings = new Set(["action_execution_enabled", "protected_target_quote", "llm_no_action_reason_enabled"]);
+  "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
+  "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"]);
+const booleanSettings = new Set(["action_execution_enabled", "protected_target_quote", "llm_no_action_reason_enabled",
+  "image_judging_enabled"]);
+const byteSettings = new Set(["image_max_bytes_per_image", "image_max_total_bytes"]);
+const MIB = 1048576;
 let modelChoiceEdited = false;
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
-  "group-protected-policy", "group-protected-quote", "group-protected-template"];
+  "group-protected-policy", "group-protected-quote", "group-protected-template",
+  "group-image-enabled", "group-image-model"];
 function rememberGroupDraft() {
   const scope = group();
   if (!currentSettings || !scope.platform_id || !scope.group_id) return;
@@ -2688,6 +2756,62 @@ function updateGroupModelFields(animate = false) {
   el("group-model-name-help").textContent = backend === "llm" ? "填写 AstrBot 中已配置的模型提供商标识." : "";
   el("group-model-options").textContent = "";
   if (backend === "llm") for (const provider of availableProviders) addOption(el("group-model-options"), provider, provider);
+}
+function imageProviderLabel(item) {
+  if (item.image_capability === "image") return `${item.id} (声明支持图片)`;
+  if (item.image_capability === "no_image") return `${item.id} (声明不支持图片)`;
+  if (item.image_capability === "unavailable") return `${item.id} (能力未知)`;
+  return `${item.id} (未声明能力)`;
+}
+function imageCapabilityHint(model) {
+  if (!model) return "开启图片判定前需要选择图片模型.";
+  const info = availableImageProviders.find((item) => item.id === model);
+  if (!info) return "该模型不在 AstrBot 的模型列表中, 无法确认图片能力.";
+  if (info.image_capability === "unavailable") return "已读取到该模型, 但当前无法读取图片能力声明.";
+  if (info.image_capability === "image") {
+    return info.tool_capability === "tool_use"
+      ? "该模型声明支持图片和工具调用."
+      : "该模型声明支持图片, 但未声明工具调用; 直接读图判定可能失败, 建议使用先描述再判定.";
+  }
+  if (info.image_capability === "no_image") return "该模型声明不支持图片输入, 图片处理会失败.";
+  return "该模型未声明模型能力, 无法确认是否支持图片.";
+}
+function updateImageProviderHints() {
+  const model = el("setting-image_provider_id").value;
+  let text = imageCapabilityHint(model);
+  if (!model && frameworkCaptionProvider) text += ` AstrBot 已配置图片转述模型: ${frameworkCaptionProvider}.`;
+  el("image-provider-help").textContent = text;
+  setPanelVisibility(el("setting-image-caption-label"),
+    el("setting-image_understanding_mode").value === "caption");
+}
+function imageInheritLabel() {
+  const model = currentSettings?.image_provider_id || "";
+  return `跟随全局(${model || "未选择"})`;
+}
+function updateGroupImageFields(animate = false) {
+  const enabled = el("group-image-enabled").value || String(currentSettings?.image_judging_enabled === true);
+  setPanelVisibility(el("group-image-model-label"), enabled === "true", {animate});
+  const inherit = el("group-image-model").querySelector?.('option[value=""]');
+  if (inherit) inherit.textContent = imageInheritLabel();
+  const model = el("group-image-model").value || currentSettings?.image_provider_id || "";
+  el("group-image-model-help").textContent = imageCapabilityHint(model);
+}
+function fillImageModelSelect(id, firstLabel, current) {
+  const select = el(id);
+  select.textContent = "";
+  addOption(select, "", firstLabel);
+  for (const item of availableImageProviders) addOption(select, item.id, imageProviderLabel(item));
+  if (current && !availableImageProviders.some((item) => item.id === current)) {
+    addOption(select, current, `${current} (不在模型列表)`);
+  }
+  select.value = current || "";
+}
+function renderImageProviderOptions() {
+  fillImageModelSelect("setting-image_provider_id", "未选择",
+    el("setting-image_provider_id").value || currentSettings?.image_provider_id || "");
+  fillImageModelSelect("group-image-model", imageInheritLabel(), el("group-image-model").value);
+  updateImageProviderHints();
+  updateGroupImageFields();
 }
 function formatNoticeExample(template) {
   if (typeof template !== "string") return null;
@@ -2729,6 +2853,10 @@ function updateGroupSettingsHints(animate = false) {
   el("group-strategy-inherit").textContent = `全局(${strategy})`;
   el("group-reason-language-inherit").textContent = `全局(${settings.llm_reason_language?.trim() || "自动选择"})`;
   setPanelVisibility(el("group-reason-language-label"), el("group-reason-language-mode").value === "custom", {animate});
+  const inheritedImage = settings.image_judging_enabled === true
+    ? `已启用(${settings.image_provider_id || "未选择图片模型"})` : "未启用";
+  el("group-image-inherit").textContent = `全局(${inheritedImage})`;
+  updateGroupImageFields(animate);
   el("group-execution-inherit").textContent = `全局(${groupExecution})`;
   el("group-policy-inherit").textContent = `全局(${inheritedPolicy})`;
   el("group-quote-inherit").textContent = `全局(${inheritedQuote})`;
@@ -2765,6 +2893,8 @@ function showGroupOverrides() {
   el("group-model-backend").value = overrides.model?.backend || "";
   el("group-model").value = overrides.model?.model || "";
   el("group-strategy").value = overrides.strategy || "";
+  el("group-image-enabled").value = Object.hasOwn(overrides, "image_enabled") ? String(overrides.image_enabled) : "";
+  el("group-image-model").value = overrides.image_model?.model || "";
   groupReasonDraftInitialized = Object.hasOwn(overrides, "llm_reason_language");
   el("group-reason-language-mode").value = groupReasonDraftInitialized ? "custom" : "";
   el("group-reason-language").value = groupReasonDraftInitialized ? overrides.llm_reason_language : "";
@@ -2794,6 +2924,9 @@ function readGroupOverrides() {
   }
   for (const [id, key] of [["group-strategy", "strategy"], ["group-execution", "execution_mode"],
     ["group-protected-policy", "protected_policy"]]) if (el(id).value) overrides[key] = el(id).value;
+  if (el("group-image-enabled").value) overrides.image_enabled = el("group-image-enabled").value === "true";
+  const imageModel = el("group-image-model").value.trim();
+  if (imageModel) overrides.image_model = {backend: "llm", model: imageModel};
   if (el("group-reason-language-mode").value === "custom") {
     overrides.llm_reason_language = el("group-reason-language").value.trim();
   } else if (el("group-reason-language-mode").value !== "") throw new Error("请选择有效的理由语言来源");
@@ -2813,6 +2946,115 @@ function readGroupOverrides() {
   return overrides;
 }
 el("group-model-backend").addEventListener("change", () => updateGroupModelFields(true));
+el("group-image-enabled").addEventListener("change", () => updateGroupImageFields(true));
+el("group-image-model").addEventListener("input", () => updateGroupImageFields());
+el("setting-image_provider_id").addEventListener("input", updateImageProviderHints);
+el("setting-image_understanding_mode").addEventListener("change", updateImageProviderHints);
+let imageViewerScale = 1;
+let imageViewerX = 0;
+let imageViewerY = 0;
+let imageViewerDrag = null;
+let imageViewerOpener = null;
+let imageViewerCloseTimer = null;
+function updateImageViewer() {
+  const viewer = el("image-viewer");
+  const image = viewer.querySelector("img");
+  if (!image) return;
+  const maxX = Math.max(0, (image.offsetWidth * imageViewerScale - viewer.clientWidth + 48) / 2);
+  const maxY = Math.max(0, (image.offsetHeight * imageViewerScale - viewer.clientHeight + 120) / 2);
+  imageViewerX = Math.max(-maxX, Math.min(maxX, imageViewerX));
+  imageViewerY = Math.max(-maxY, Math.min(maxY, imageViewerY));
+  image.style.transform = `translate(${imageViewerX}px, ${imageViewerY}px) scale(${imageViewerScale})`;
+  image.classList.toggle("is-zoomed", imageViewerScale > 1);
+  el("image-zoom-reset").textContent = `${Math.round(imageViewerScale * 100)}%`;
+  el("image-zoom-out").disabled = imageViewerScale <= 1;
+  el("image-zoom-in").disabled = imageViewerScale >= 4;
+}
+function zoomImageViewer(scale) {
+  imageViewerScale = Math.max(1, Math.min(4, scale));
+  if (imageViewerScale === 1) imageViewerX = imageViewerY = 0;
+  updateImageViewer();
+}
+function openImageViewer(source, alt, opener) {
+  const viewer = el("image-viewer");
+  const image = viewer?.querySelector("img");
+  if (!image) return;
+  clearTimeout(imageViewerCloseTimer);
+  viewer.classList.remove("is-closing");
+  imageViewerOpener = opener || document.activeElement;
+  imageViewerScale = 1;
+  imageViewerX = imageViewerY = 0;
+  image.classList.remove("is-dragging");
+  image.src = source;
+  image.alt = alt || "图片预览";
+  viewer.hidden = false;
+  updateImageViewer();
+  viewer.focus?.({preventScroll: true});
+}
+function closeImageViewer() {
+  const viewer = el("image-viewer");
+  if (!viewer || viewer.hidden || viewer.classList.contains("is-closing")) return;
+  imageViewerDrag = null;
+  viewer.classList.add("is-closing");
+  imageViewerOpener?.focus?.({preventScroll: true});
+  const finish = () => {
+    viewer.hidden = true;
+    viewer.classList.remove("is-closing");
+    viewer.querySelector("img")?.removeAttribute("src");
+  };
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) finish();
+  else imageViewerCloseTimer = setTimeout(finish, 180);
+}
+el("image-viewer").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget || event.target.classList.contains("image-viewer-stage")) closeImageViewer();
+});
+el("image-viewer").addEventListener("wheel", (event) => {
+  event.preventDefault();
+  zoomImageViewer(imageViewerScale * (event.deltaY < 0 ? 1.2 : 1 / 1.2));
+}, {passive: false});
+el("image-viewer").addEventListener("pointerdown", (event) => {
+  if (event.target.tagName !== "IMG" || imageViewerScale <= 1 || event.button !== 0) return;
+  imageViewerDrag = {id: event.pointerId, x: event.clientX, y: event.clientY};
+  event.target.setPointerCapture(event.pointerId);
+  event.target.classList.add("is-dragging");
+  event.preventDefault();
+});
+el("image-viewer").addEventListener("pointermove", (event) => {
+  if (!imageViewerDrag || imageViewerDrag.id !== event.pointerId) return;
+  imageViewerX += event.clientX - imageViewerDrag.x;
+  imageViewerY += event.clientY - imageViewerDrag.y;
+  imageViewerDrag.x = event.clientX;
+  imageViewerDrag.y = event.clientY;
+  updateImageViewer();
+});
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  el("image-viewer").addEventListener(type, (event) => {
+    if (imageViewerDrag?.id !== event.pointerId) return;
+    imageViewerDrag = null;
+    el("image-viewer").querySelector("img")?.classList.remove("is-dragging");
+  });
+}
+el("image-zoom-in").addEventListener("click", () => zoomImageViewer(imageViewerScale * 1.25));
+el("image-zoom-out").addEventListener("click", () => zoomImageViewer(imageViewerScale / 1.25));
+el("image-zoom-reset").addEventListener("click", () => zoomImageViewer(1));
+el("image-viewer-close").addEventListener("click", closeImageViewer);
+window.addEventListener("resize", () => { if (!el("image-viewer").hidden) updateImageViewer(); });
+document.addEventListener("keydown", (event) => {
+  const viewer = el("image-viewer");
+  if (viewer.hidden || viewer.classList.contains("is-closing")) return;
+  if (event.key === "Escape") closeImageViewer();
+  else if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomImageViewer(imageViewerScale * 1.25); }
+  else if (event.key === "-") { event.preventDefault(); zoomImageViewer(imageViewerScale / 1.25); }
+  else if (event.key === "0") { event.preventDefault(); zoomImageViewer(1); }
+  else if (event.key === "Tab") {
+    const controls = [el("image-zoom-out"), el("image-zoom-reset"), el("image-zoom-in"), el("image-viewer-close")].filter((item) => !item.disabled);
+    const index = controls.indexOf(document.activeElement);
+    if (index < 0 || (event.shiftKey && index === 0) || (!event.shiftKey && index === controls.length - 1)) {
+      event.preventDefault();
+      controls[event.shiftKey ? controls.length - 1 : 0].focus();
+    }
+  }
+});
 el("group-reason-language-mode").addEventListener("change", () => {
   if (el("group-reason-language-mode").value === "custom" && !groupReasonDraftInitialized) {
     el("group-reason-language").value = currentSettings?.llm_reason_language || "";
@@ -2876,14 +3118,20 @@ function showSettings(settings, submitted = null) {
   for (const item of actionRows) item.inheritOption.textContent = actionModeLabel("inherit");
   for (const update of ruleDescriptions) update();
   for (const key of settingKeys) {
+    if (!Object.hasOwn(settings, key)) continue;
     const field = el(`setting-${key}`);
     if (booleanSettings.has(key)) {
       if (!submitted || field.checked === submitted[key]) field.checked = settings[key] === true;
+    } else if (byteSettings.has(key)) {
+      if (!submitted || Number(field.value) === Number(submitted[key])) {
+        field.value = String(Math.round(Number(settings[key] ?? 0) / MIB));
+      }
     } else if (!submitted || field.value === String(submitted[key] ?? "")) {
       field.value = key === "llm_provider_id" && settings.decision_backend === "" ? "" : String(settings[key] ?? "");
     }
   }
   renderNoticeExample("setting-template-preview", el("setting-protected_target_template").value);
+  updateImageProviderHints();
   updateGroupMonitoring();
   showGroupOverrides();
   renderGroupList();
@@ -2903,6 +3151,25 @@ async function loadSettings() {
     for (const provider of providers) addOption(el("provider-options"), provider.id, provider.id);
     updateGroupModelFields();
   } catch { /* The model input remains available without a provider list. */ }
+  try {
+    const options = await bridge.apiGet("image-model-options");
+    availableImageProviders = Array.isArray(options?.providers) ? options.providers : [];
+    frameworkCaptionProvider = typeof options?.framework_caption_provider_id === "string"
+      ? options.framework_caption_provider_id : "";
+  } catch { /* Older backends do not expose capability data. */ }
+  if (!availableImageProviders.length && availableProviders.length) {
+    // Fall back to the plain provider list so the picker is never empty while
+    // the plugin is still running an older build.
+    availableImageProviders = availableProviders.map((id) => ({id, model: "", modalities: [],
+      image_capability: "unavailable", tool_capability: "unavailable"}));
+    frameworkCaptionProvider = "";
+  }
+  if (availableImageProviders.length) {
+    renderImageProviderOptions();
+    showGroupOverrides();
+    updateImageProviderHints();
+    updateGroupImageFields();
+  }
 }
 el("settings-save").addEventListener("click", async () => {
   el("settings-save").disabled = true;
@@ -2922,8 +3189,15 @@ el("settings-save").addEventListener("click", async () => {
         if (!field.value.trim()) invalid("数值不能为空");
         data[key] = Number(field.value);
         if (!Number.isSafeInteger(data[key])) invalid("数值必须为整数");
+        if (byteSettings.has(key)) data[key] = data[key] * MIB;
       } else data[key] = field.value;
     }
+    if (data.image_max_total_bytes < data.image_max_bytes_per_image) {
+      el("setting-image_max_total_bytes").focus?.();
+      throw new Error("单条图片总量上限不能小于单张图片上限");
+    }
+    const displayData = {...data};
+    for (const key of byteSettings) displayData[key] = data[key] / MIB;
     const template = data.protected_target_template;
     if (formatNoticeExample(template) === null || (data.protected_target_policy === "group_message" && !template.trim())) {
       el("setting-protected_target_template").focus?.();
@@ -2947,8 +3221,10 @@ el("settings-save").addEventListener("click", async () => {
     const result = await postSettings("settings", requestData);
     const changedSinceSubmit = settingKeys.some((key) => booleanSettings.has(key)
       ? el(`setting-${key}`).checked !== data[key]
-      : el(`setting-${key}`).value !== String(data[key] ?? ""));
-    showSettings(result.settings, data);
+      : byteSettings.has(key)
+        ? Number(el(`setting-${key}`).value) !== Number(displayData[key])
+        : el(`setting-${key}`).value !== String(data[key] ?? ""));
+    showSettings(result.settings, displayData);
     if (el("setting-llm_provider_id").value === data.llm_provider_id) modelChoiceEdited = false;
     const message = result.start_error === "model_not_configured"
       ? `${changedSinceSubmit ? "设置已保存, 新修改尚未保存." : "设置已保存."} 请选择默认判定模型.`

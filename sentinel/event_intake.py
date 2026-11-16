@@ -96,7 +96,10 @@ class EventIntake:
                          "invalid_list_mode", "settings_changed_reload_required", "runtime_stopped",
                          "invalid_message_identity", "empty_text", "message_too_long", "rate_limited",
                          "non_text_or_unknown", "management_command_or_unknown", "self_message",
-                         "bot_identity_unverified"}
+                         "bot_identity_unverified", "image_judging_disabled", "image_too_many",
+                         "image_url_rejected", "image_fetch_failed", "image_too_large",
+                         "image_unsupported_format", "image_caption_failed", "image_caption_empty",
+                         "image_model_unconfigured"}
                 self.counts[result if result in known else "other"] += 1
                 if self.overflows:
                     await self._flush_overflows()

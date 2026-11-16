@@ -7,6 +7,7 @@ bytes in its database or journal; clearing a payload is not secure erasure.
 Recovery requires exclusive ownership of the queue and stopped old workers.
 """
 
+import base64
 import json
 import sqlite3
 import uuid
@@ -116,6 +117,13 @@ class DryRunQueue:
                     PRIMARY KEY(platform_id, group_id, message_id)
                 );
                 CREATE INDEX IF NOT EXISTS message_contents_stored_at ON message_contents(stored_at);
+                CREATE TABLE IF NOT EXISTS message_previews (
+                    platform_id TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    image_index INTEGER NOT NULL, mime TEXT NOT NULL, data BLOB NOT NULL,
+                    stored_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    PRIMARY KEY(platform_id, group_id, message_id, image_index)
+                );
+                CREATE INDEX IF NOT EXISTS message_previews_stored_at ON message_previews(stored_at);
                 CREATE TABLE IF NOT EXISTS notification_events (
                     id INTEGER PRIMARY KEY, code TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -188,6 +196,11 @@ class DryRunQueue:
             from .message_retention import stored_retention_days
             days = stored_retention_days(db)
             text = payload.get("original_text", payload.get("text"))
+            images = payload.get("image_urls")
+            if isinstance(text, str) and not text.strip() and isinstance(images, list) and images:
+                # Keep a readable placeholder in the retained message text; the
+                # image itself and any description are never stored.
+                text = f"[图片 x{len(images)}]"
             if days and isinstance(text, str) and len(text) <= 65536:
                 db.execute("INSERT INTO message_contents (platform_id, group_id, message_id, content) VALUES (?, ?, ?, ?)", (*key, text))
             db.commit()
@@ -632,6 +645,68 @@ class DryRunQueue:
                   AND stored_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
                              (platform_id, group_id, message_id, f"-{days} days")).fetchone()
             return row["content"] if row else None
+        finally:
+            db.close()
+
+    def record_previews(self, *, platform_id: str, group_id: str, message_id: str, previews):
+        """Store bounded thumbnails; full images are never persisted."""
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 512
+               for value in (platform_id, group_id, message_id)):
+            raise ValueError("invalid message identity")
+        if not isinstance(previews, (list, tuple)) or not previews:
+            return 0
+        from .message_retention import stored_retention_days
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            days = stored_retention_days(db)
+            if not days:
+                db.commit()
+                return 0
+            db.execute("DELETE FROM message_previews WHERE platform_id=? AND group_id=? AND message_id=?",
+                       (platform_id, group_id, message_id))
+            saved = 0
+            total = 0
+            for index, preview in enumerate(previews[:9]):
+                if not isinstance(preview, (list, tuple)) or len(preview) != 2:
+                    continue
+                mime, data = preview
+                if (mime not in ("image/jpeg", "image/png") or not isinstance(data, bytes)
+                        or not data or len(data) > 131072 or total + len(data) > 1048576):
+                    continue
+                db.execute("INSERT OR REPLACE INTO message_previews "
+                           "(platform_id, group_id, message_id, image_index, mime, data) "
+                           "VALUES (?, ?, ?, ?, ?, ?)",
+                           (platform_id, group_id, message_id, index, mime, data))
+                saved += 1
+                total += len(data)
+            db.commit()
+            return saved
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def message_images(self, *, platform_id: str, group_id: str, message_id: str):
+        """Return retained thumbnails as data URLs, newest retention window only."""
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 512
+               for value in (platform_id, group_id, message_id)):
+            raise ValueError("invalid message identity")
+        from .message_retention import stored_retention_days
+        db = self._connect()
+        try:
+            db.execute("BEGIN")
+            days = stored_retention_days(db)
+            if not days:
+                return []
+            rows = db.execute("""SELECT mime, data FROM message_previews
+                WHERE platform_id=? AND group_id=? AND message_id=?
+                  AND stored_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+                ORDER BY image_index LIMIT 9""",
+                              (platform_id, group_id, message_id, f"-{days} days")).fetchall()
+            return [f"data:{row['mime']};base64,{base64.b64encode(row['data']).decode('ascii')}"
+                    for row in rows]
         finally:
             db.close()
 

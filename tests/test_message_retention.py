@@ -43,7 +43,7 @@ class MessageRetentionTests(unittest.TestCase):
         self.assertEqual(self.content(), "original <b>text</b>")
         self.assertNotIn("original <b>text</b>", json.dumps(self.queue.list_messages(platform_id="p", group_id="g")))
         self.assertNotIn("original <b>text</b>", json.dumps(self.queue.list_events(platform_id="p", group_id="g")))
-        self.assertEqual(self.service.message_content("admin", "p", "g", "m"), {"content": "original <b>text</b>"})
+        self.assertEqual(self.service.message_content("admin", "p", "g", "m"), {"content": "original <b>text</b>", "images": []})
         for actor in ("", "api_key:token"):
             with self.subTest(actor=actor), self.assertRaises(PermissionError):
                 self.service.message_content(actor, "p", "g", "m")
@@ -63,6 +63,25 @@ class MessageRetentionTests(unittest.TestCase):
         self.assertIsNone(self.content("recent"))
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM message_contents").fetchone()[0], 0)
+
+    def test_previews_follow_message_retention(self):
+        self.enqueue("m")
+        preview = ("image/jpeg", b"\xff\xd8\xffpreview")
+        self.assertEqual(self.queue.record_previews(platform_id="p", group_id="g",
+                                                    message_id="m", previews=[preview]), 1)
+        images = self.service.message_content("admin", "p", "g", "m")["images"]
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].startswith("data:image/jpeg;base64,"))
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE message_previews SET stored_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-31 days')")
+            db.commit()
+        self.assertEqual(self.service.message_content("admin", "p", "g", "m")["images"], [])
+        self.config["message_retention_days"] = 0
+        self.settings.save(self.config)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM message_previews").fetchone()[0], 0)
+        self.assertEqual(self.queue.record_previews(platform_id="p", group_id="g",
+                                                    message_id="m", previews=[preview]), 0)
 
     def test_zero_disables_retention_and_invalid_settings_fail_closed(self):
         self.enqueue("before")

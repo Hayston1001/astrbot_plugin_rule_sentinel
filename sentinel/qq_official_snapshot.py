@@ -61,8 +61,31 @@ class Extraction:
     message: IncomingMessage | None = None
 
 
+def _valid_image_reference(value):
+    """Accept a bounded http(s) URL or a local image file set by the framework."""
+    if not isinstance(value, str) or not value:
+        return False
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    if value.startswith(("http://", "https://")):
+        return len(value) <= 8192
+    if len(value) > 4096:
+        return False
+    try:
+        import os
+        if value.startswith("file://"):
+            from urllib.parse import unquote, urlsplit
+            from urllib.request import url2pathname
+            path = url2pathname(unquote(urlsplit(value).path))
+        else:
+            path = value
+        return os.path.isabs(path) and os.path.isfile(path)
+    except (OSError, ValueError):
+        return False
+
+
 def extract(event, *, is_management_command, text_segment_types,
-            quote_segment_types=()) -> Extraction:
+            quote_segment_types=(), image_segment_types=()) -> Extraction:
     if event.get_platform_name() not in ("qq_official", "qq_official_webhook"):
         return Extraction("unsupported_platform")
     obj = event.message_obj
@@ -98,6 +121,21 @@ def extract(event, *, is_management_command, text_segment_types,
         return Extraction("invalid_text_component_types")
     if not isinstance(quote_segment_types, tuple) or not all(isinstance(t, type) for t in quote_segment_types):
         return Extraction("invalid_text_component_types")
+    if not isinstance(image_segment_types, tuple) or not all(isinstance(t, type) for t in image_segment_types):
+        return Extraction("invalid_text_component_types")
+    images = []
+    has_other_media = False
+    for segment in chain:
+        if isinstance(segment, text_segment_types) or isinstance(segment, quote_segment_types):
+            continue
+        if image_segment_types and isinstance(segment, image_segment_types):
+            reference = getattr(segment, "file", None) or getattr(segment, "url", None)
+            if not _valid_image_reference(reference):
+                return Extraction("invalid_image_reference")
+            images.append(reference)
+            continue
+        has_other_media = True
+        break
     raw_type = raw_data.get("message_type")
     quoted = type(raw_type) is int and raw_type == 103
     has_quote_segment = any(isinstance(segment, quote_segment_types) for segment in chain)
@@ -105,12 +143,23 @@ def extract(event, *, is_management_command, text_segment_types,
     # unknown, card and attachment payloads as non-text. A quote payload
     # (message_type 103) legitimately carries msg_elements for the referenced
     # message; it is accepted only when a quote segment proves the framework
-    # separated the quoted content from the sender's own text.
-    is_text = (type(raw_type) is int and raw_type in (0, 103)
-               and not raw_data.get("attachments") and not raw_data.get("ark_data")
-               and (has_quote_segment if quoted else not raw_data.get("msg_elements"))
-               and all(isinstance(segment, text_segment_types)
-                       or isinstance(segment, quote_segment_types) for segment in chain))
+    # separated the quoted content from the sender's own text. A caption or a
+    # face is not media; images count as removable media only when the whole
+    # chain is otherwise textual and the attachment list agrees with the parsed
+    # image segments.
+    attachments = raw_data.get("attachments")
+    payload_ok = (type(raw_type) is int and raw_type in (0, 103)
+                  and not raw_data.get("ark_data")
+                  and (has_quote_segment if quoted else not raw_data.get("msg_elements"))
+                  and not has_other_media)
+    if payload_ok and images:
+        if isinstance(attachments, list) and len(attachments) != len(images):
+            payload_ok = False
+        elif attachments and not isinstance(attachments, list):
+            payload_ok = False
+    is_text = payload_ok and not images and not attachments
+    if not payload_ok:
+        images = []
     text = getattr(obj, "message_str", None)
     if not isinstance(text, str):
         return Extraction("invalid_text")
@@ -128,4 +177,5 @@ def extract(event, *, is_management_command, text_segment_types,
         pass
     return Extraction("ok", IncomingMessage(platform, group, message_id, sender, None,
                                              text, is_text, command, sender_is_verified_non_bot=True,
-                                             session_origin=origin, message_time=message_time, original_text=text))
+                                             session_origin=origin, message_time=message_time, original_text=text,
+                                             image_urls=tuple(images)))

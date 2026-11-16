@@ -5,7 +5,8 @@ import json
 
 
 GROUP_KEYS = frozenset({"model", "strategy", "execution_mode", "protected_policy",
-                        "protected_template", "protected_quote", "llm_reason_language"})
+                        "protected_template", "protected_quote", "llm_reason_language",
+                        "image_enabled", "image_model"})
 
 
 def validate_reason_language(value):
@@ -43,6 +44,21 @@ def resolve_group_settings(config, platform_id, group_id):
         raise ValueError("invalid group model")
     backend = selected["backend"] if selected else config.get("decision_backend", "")
     model = selected["model"] if selected else (config.get("llm_provider_id", "") if backend == "llm" else "")
+    image_selected = group.get("image_model")
+    if "image_model" in group and (not isinstance(image_selected, dict) or set(image_selected) != {"backend", "model"}
+                                   or image_selected["backend"] != "llm"
+                                   or not isinstance(image_selected["model"], str)
+                                   or not image_selected["model"].strip()
+                                   or len(image_selected["model"]) > 128):
+        raise ValueError("invalid group image model")
+    image_enabled = group.get("image_enabled", config.get("image_judging_enabled", False))
+    if type(image_enabled) is not bool:
+        raise ValueError("invalid group image setting")
+    image_model = (image_selected["model"] if "image_model" in group
+                   else config.get("image_provider_id", ""))
+    image_mode = config.get("image_understanding_mode", "direct")
+    if image_mode not in ("caption", "direct"):
+        raise ValueError("invalid image understanding mode")
     strategy = group.get("strategy", config.get("rule_selection_strategy", "model"))
     mode = group.get("execution_mode", config.get("default_execution_mode", "execute"))
     reason_language = validate_reason_language(group.get("llm_reason_language", config.get("llm_reason_language", "")))
@@ -59,7 +75,8 @@ def resolve_group_settings(config, platform_id, group_id):
                                         "protected_target_quote": quote})
     return {"backend": backend, "model": model, "strategy": strategy, "execution_mode": mode,
             "protected_policy": policy, "protected_template": template, "protected_quote": quote,
-            "llm_reason_language": reason_language}
+            "llm_reason_language": reason_language, "image_enabled": image_enabled,
+            "image_model": image_model, "image_understanding_mode": image_mode}
 
 
 def execution_allowed(config, platform_id, group_id):

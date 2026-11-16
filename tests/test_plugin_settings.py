@@ -31,6 +31,32 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.policy.groups, frozenset({("p", "g")}))
         self.assertEqual(read_settings({"model_concurrency": 5}, require_model=False).concurrency, 5)
 
+    def test_image_settings_default_off_and_validate_limits(self):
+        settings = read_settings({}, require_model=False)
+        self.assertFalse(settings.image_judging_enabled)
+        self.assertEqual(settings.image_understanding_mode, "direct")
+        self.assertEqual(settings.image_provider_id, "")
+        self.assertEqual((settings.image_max_count, settings.image_max_bytes_per_image,
+                          settings.image_max_total_bytes, settings.image_fetch_timeout_seconds),
+                         (9, 10485760, 20971520, 15))
+        base = {"decision_backend": "llm", "llm_provider_id": "selected",
+                "image_judging_enabled": True, "image_provider_id": "vision",
+                "image_caption_prompt": "describe"}
+        self.assertTrue(read_settings(base).image_judging_enabled)
+        self.assertTrue(read_settings({**base, "image_understanding_mode": "direct",
+                                       "image_caption_prompt": ""}).image_judging_enabled)
+        for changes in ({"image_provider_id": ""},
+                        {"image_understanding_mode": "caption", "image_caption_prompt": ""},
+                        {"image_max_count": 0}, {"image_max_count": 10},
+                        {"image_max_bytes_per_image": 1024},
+                        {"image_max_total_bytes": 1024},
+                        {"image_fetch_timeout_seconds": 0},
+                        {"image_understanding_mode": "unknown"},
+                        {"image_judging_enabled": "yes"},
+                        {"image_caption_prompt": "x" * 1001}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                read_settings({**base, **changes})
+
 
 class GuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_mismatched_queued_session_never_reaches_model(self):

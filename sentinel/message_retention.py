@@ -27,10 +27,18 @@ def stored_retention_days(db):
 
 def purge_expired_contents(db, days):
     validate_retention_days(days)
-    table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_contents'").fetchone()
-    if not table:
-        return 0
-    if days == 0:
-        return db.execute("DELETE FROM message_contents").rowcount
-    return db.execute("DELETE FROM message_contents WHERE stored_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
-                      (f"-{days} days",)).rowcount
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    count = 0
+    if "message_contents" in tables:
+        if days == 0:
+            count = db.execute("DELETE FROM message_contents").rowcount
+        else:
+            count = db.execute("DELETE FROM message_contents WHERE stored_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+                               (f"-{days} days",)).rowcount
+    if "message_previews" in tables:
+        if days == 0:
+            db.execute("DELETE FROM message_previews")
+        else:
+            db.execute("DELETE FROM message_previews WHERE stored_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+                       (f"-{days} days",))
+    return count

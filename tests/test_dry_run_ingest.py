@@ -57,6 +57,30 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT detail FROM dry_run_events").fetchone()[0], "message_too_long")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue").fetchone()[0], 0)
 
+    async def test_image_message_is_queued_with_references(self):
+        url = "https://cdn.example.com/a.png"
+        admission = DryRunAdmission(self.queue, self.rules, policy=self.policy, capacity=10, model="m",
+                                    image_policy=lambda platform_id, group_id: (True, 2))
+        event = IncomingMessage("p", "g", "m", "u", "bot", "", False, False, image_urls=(url,))
+        self.assertEqual(await admission.submit(event), "queued")
+        item = self.queue.claim("p", "g")
+        self.assertEqual(item.payload["image_urls"], [url])
+        self.assertEqual(item.payload["text"], "")
+
+    async def test_images_are_skipped_when_the_switch_is_off_or_the_limit_is_exceeded(self):
+        url = "https://cdn.example.com/a.png"
+        event = IncomingMessage("p", "g", "m", "u", "bot", "", False, False, image_urls=(url,))
+        disabled = DryRunAdmission(self.queue, self.rules, policy=self.policy, capacity=10, model="m")
+        self.assertEqual(await disabled.submit(event), "image_judging_disabled")
+        limited = DryRunAdmission(self.queue, self.rules, policy=self.policy, capacity=10, model="m",
+                                  image_policy=lambda platform_id, group_id: (True, 1))
+        too_many = IncomingMessage("p", "g", "m", "u", "bot", "", False, False, image_urls=(url, url))
+        self.assertEqual(await limited.submit(too_many), "image_too_many")
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT detail FROM dry_run_events ORDER BY id")],
+                             ["image_judging_disabled", "image_too_many"])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue").fetchone()[0], 0)
+
     async def test_denied_framework_session_does_not_store_text(self):
         async def deny(message):
             return False
@@ -76,6 +100,13 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         permission[0] = True
         self.assertEqual(await admission.record_external_skip(skipped), "skipped")
         self.assertEqual(self.queue.list_events(platform_id="p", group_id="g")[0]["detail"], "bot_identity_unverified")
+
+    async def test_capture_skip_without_a_gate_is_recorded(self):
+        admission = DryRunAdmission(self.queue, self.rules, policy=self.policy, capacity=100, model="m")
+        skipped = Skip("p", "g", "id", "invalid_image_reference", "p:GroupMessage:g")
+        self.assertEqual(await admission.record_external_skip(skipped), "skipped")
+        self.assertEqual(self.queue.list_events(platform_id="p", group_id="g")[0]["detail"],
+                         "invalid_image_reference")
 
     async def test_mismatched_framework_session_never_persists_message(self):
         async def allow(*args):

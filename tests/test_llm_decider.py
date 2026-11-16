@@ -8,8 +8,58 @@ from types import SimpleNamespace
 
 from sentinel.dry_run_queue import DryRunQueue
 from sentinel.dry_run_worker import DryRunWorker
+from sentinel.image_fetch import FetchedImage, ImageFetchError
+from sentinel.image_prefetch import PrefetchedImages
 from sentinel.llm_decider import LlmDecider
 from sentinel.rule_store import RuleStore
+from sentinel.settings_store import SettingsStore
+
+IMAGE = FetchedImage("data:image/png;base64,QUJD", 3)
+IMAGE_WITH_PREVIEW = FetchedImage("data:image/png;base64,QUJD", 3,
+                                  ("image/jpeg", b"\xff\xd8\xffpreview"))
+IMAGE_URL = "https://cdn.example.com/a.png"
+
+
+class Fetcher:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    async def fetch(self, urls):
+        self.calls.append(tuple(urls))
+        if self.error is not None:
+            raise self.error
+        return self.result or (IMAGE,)
+
+
+class Prefetcher:
+    def __init__(self, entry=None):
+        self.entry = entry
+        self.keys = []
+
+    async def consume(self, key):
+        self.keys.append(key)
+        return self.entry
+
+
+class ImageInvoker:
+    def __init__(self, *, caption=None, caption_error=None):
+        self.calls = []
+        self.caption_calls = []
+        self.caption_text = caption
+        self.caption_error = caption_error
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
+            tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
+
+    async def caption(self, **kwargs):
+        self.caption_calls.append(kwargs)
+        if self.caption_error is not None:
+            raise self.caption_error
+        return SimpleNamespace(completion_text=self.caption_text)
 
 
 class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
@@ -248,3 +298,113 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "rejected")
         self.assertEqual(audit["validation"], "invalid_severity")
         self.assertNotIn("proposal", audit)
+
+    def enqueue_image(self, text=""):
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("DELETE FROM dry_run_queue")
+            db.execute("DELETE FROM dry_run_events")
+            db.commit()
+        self.queue.enqueue(platform_id="p", group_id="g", message_id="img", capacity=10,
+                           payload={"text": text, "sender_id": "u", "image_urls": [IMAGE_URL]})
+
+    def raw_audit(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            return [tuple(row) for row in db.execute("SELECT status, detail FROM dry_run_events ORDER BY id")]
+
+    def image_decider(self, invoker, *, fetcher=None, prefetcher=None, image_mode="direct",
+                      image_enabled=True, image_model="vision"):
+        return LlmDecider(self.rules, invoker, model="llm", max_duration_seconds=300, queue=self.queue,
+                          image_enabled=image_enabled, image_model=image_model, image_mode=image_mode,
+                          caption_prompt="describe the image", fetcher=fetcher or Fetcher(),
+                          prefetcher=prefetcher or Prefetcher())
+
+    async def test_direct_image_mode_uses_the_image_model_without_auditing_the_image(self):
+        self.enqueue_image()
+        invoker = ImageInvoker()
+        worker = DryRunWorker(self.queue, self.image_decider(invoker), concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "proposed")
+        self.assertEqual(invoker.calls[0]["model"], "vision")
+        self.assertEqual(invoker.calls[0]["image_urls"], [IMAGE.data_url])
+        self.assertNotIn("image_caption", invoker.calls[0])
+        self.assertEqual(audit["image"]["mode"], "direct")
+        self.assertEqual(audit["image"]["count"], 1)
+        self.assertEqual(audit["image"]["source"], "inline")
+        self.assertEqual(audit["message_chars"], 0)
+        rendered = json.dumps(audit)
+        self.assertNotIn(IMAGE_URL, rendered)
+        self.assertNotIn(IMAGE.data_url, rendered)
+
+    async def test_image_preview_is_stored_for_the_record(self):
+        self.enqueue_image()
+        SettingsStore(self.path, Path(str(self.path) + ".backup")).load_or_migrate({})
+        worker = DryRunWorker(self.queue, self.image_decider(
+            ImageInvoker(), fetcher=Fetcher(result=(IMAGE_WITH_PREVIEW,))),
+            concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        images = self.queue.message_images(platform_id="p", group_id="g", message_id="img")
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].startswith("data:image/jpeg;base64,"))
+
+    async def test_caption_mode_keeps_the_text_model_and_hides_the_caption_from_audit(self):
+        self.enqueue_image(text="hello")
+        invoker = ImageInvoker(caption="a poster with a code")
+        worker = DryRunWorker(self.queue, self.image_decider(invoker, image_mode="caption"),
+                              concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "proposed")
+        self.assertEqual(invoker.caption_calls[0]["model"], "vision")
+        self.assertEqual(invoker.caption_calls[0]["prompt"], "describe the image")
+        self.assertEqual(invoker.calls[0]["model"], "llm")
+        self.assertNotIn("image_urls", invoker.calls[0])
+        self.assertEqual(invoker.calls[0]["image_caption"], "a poster with a code")
+        self.assertEqual(audit["image"]["mode"], "caption")
+        self.assertEqual(audit["image"]["caption_chars"], len("a poster with a code"))
+        self.assertNotIn("a poster with a code", json.dumps(audit))
+
+    async def test_prefetched_images_are_used_without_downloading_again(self):
+        self.enqueue_image()
+        fetcher = Fetcher()
+        prefetcher = Prefetcher(PrefetchedImages((IMAGE,), None, len(IMAGE.data_url)))
+        worker = DryRunWorker(self.queue, self.image_decider(ImageInvoker(), fetcher=fetcher,
+                                                             prefetcher=prefetcher),
+                              concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "proposed")
+        self.assertEqual(fetcher.calls, [])
+        self.assertEqual(prefetcher.keys, [("p", "g", "img")])
+        self.assertEqual(audit["image"]["source"], "prefetch")
+
+    async def test_image_failures_skip_without_calling_a_model(self):
+        self.enqueue_image()
+        invoker = ImageInvoker()
+        worker = DryRunWorker(self.queue, self.image_decider(invoker, fetcher=Fetcher(
+            error=ImageFetchError("image_too_large"))), concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        self.assertEqual(self.raw_audit(), [("skipped", "image_too_large")])
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(invoker.caption_calls, [])
+
+    async def test_caption_failures_skip_without_calling_the_judge(self):
+        for caption, error, expected in ((None, RuntimeError("private"), "image_caption_failed"),
+                                         (None, None, "image_caption_empty")):
+            with self.subTest(expected=expected):
+                self.enqueue_image()
+                invoker = ImageInvoker(caption=caption, caption_error=error)
+                worker = DryRunWorker(self.queue, self.image_decider(invoker, image_mode="caption"),
+                                      concurrency=1, timeout_seconds=2)
+                await worker.drain_group("p", "g")
+                self.assertEqual(self.raw_audit(), [("skipped", expected)])
+                self.assertEqual(invoker.calls, [])
+
+    async def test_images_are_skipped_when_the_group_switch_is_off(self):
+        self.enqueue_image()
+        invoker = ImageInvoker()
+        worker = DryRunWorker(self.queue, self.image_decider(invoker, image_enabled=False),
+                              concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        self.assertEqual(self.raw_audit(), [("skipped", "image_judging_disabled")])
+        self.assertEqual(invoker.calls, [])

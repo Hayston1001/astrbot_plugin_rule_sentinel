@@ -40,6 +40,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         components.At = type("At", (), {})
         components.Plain = type("Plain", (), {})
         components.Reply = type("Reply", (), {})
+        components.Image = type("Image", (), {})
         web = types.ModuleType("astrbot.api.web")
         self.request = types.SimpleNamespace(username="admin", query={}, headers={"content-type": "application/json"})
         async def body():
@@ -77,7 +78,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 32)
+        self.assertEqual(len(self.context.routes), 33)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -191,6 +192,27 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.set_group_monitoring())["status_code"], 403)
             self.assertEqual((await self.plugin.save_group_settings())["status_code"], 403)
             self.assertEqual((await self.plugin.list_providers())["status_code"], 403)
+            self.assertEqual((await self.plugin.list_image_model_options())["status_code"], 403)
+
+    async def test_image_model_options_report_declared_capability(self):
+        providers = [
+            types.SimpleNamespace(provider_config={"id": "no-vision", "modalities": ["text"]},
+                                  get_model=lambda: "no-vision-model"),
+            types.SimpleNamespace(provider_config={"id": "vision", "modalities": ["text", "image", "tool_use"]},
+                                  get_model=lambda: "vision-model"),
+            types.SimpleNamespace(provider_config={"id": "legacy", "modalities": []},
+                                  get_model=lambda: "legacy-model"),
+        ]
+        self.context.get_all_providers = lambda: providers
+        self.context.get_config = lambda: {"provider_settings": {
+            "default_image_caption_provider_id": "vision"}}
+        data = (await self.plugin.list_image_model_options())["data"]
+        self.assertEqual([item["id"] for item in data["providers"]], ["vision", "legacy", "no-vision"])
+        self.assertEqual(data["providers"][0]["image_capability"], "image")
+        self.assertEqual(data["providers"][0]["tool_capability"], "tool_use")
+        self.assertEqual(data["providers"][1]["image_capability"], "undeclared")
+        self.assertEqual(data["providers"][2]["image_capability"], "no_image")
+        self.assertEqual(data["framework_caption_provider_id"], "vision")
 
     async def test_group_settings_register_monitoring_and_platform_isolation(self):
         self.raw_body = json.dumps({"platform_id": "p1", "group_id": "g"}).encode()
@@ -934,9 +956,9 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(self.plugin._queue.enqueue, platform_id="p", group_id="g", message_id="m",
                                 capacity=10, payload={"text": "original"})
         self.request.query = {"platform_id": "p", "group_id": "g", "message_id": "m"}
-        self.assertEqual((await self.plugin.message_content())["data"], {"content": "original"})
+        self.assertEqual((await self.plugin.message_content())["data"], {"content": "original", "images": []})
         self.request.query["group_id"] = "other"
-        self.assertEqual((await self.plugin.message_content())["data"], {"content": None})
+        self.assertEqual((await self.plugin.message_content())["data"], {"content": None, "images": []})
         for username in ("", "api_key:synthetic"):
             self.request.username = username
             self.assertEqual((await self.plugin.message_content())["status_code"], 403)
@@ -1070,8 +1092,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                     tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
             router = plugin.host.runtime.worker.decide.decide
             make_decider = router.make_decider
-            def fake_decider(backend, model, strategy, reason_language):
-                decider = make_decider(backend, model, strategy, reason_language)
+            def fake_decider(*args):
+                decider = make_decider(*args)
                 decider.current().invoke = invoke
                 return decider
             router.make_decider = fake_decider
@@ -1090,7 +1112,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(plugin.intake.inbox.join(), timeout=2)
             await asyncio.wait_for(asyncio.gather(*list(plugin.host.runtime._tasks.values())), timeout=2)
             self.assertEqual(seen_messages, ["private message"])
-            self.assertEqual(management.message_content("admin", "p", "g", "message"), {"content": "/ private message"})
+            self.assertEqual(management.message_content("admin", "p", "g", "message"), {"content": "/ private message", "images": []})
             self.assertEqual(obj.message_str, "/ private message")
             obj.message_id, obj.message_str = "empty", "/  "
             await plugin.capture_group_message(event)

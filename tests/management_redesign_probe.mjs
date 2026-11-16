@@ -112,8 +112,12 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
       ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
       default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "", llm_no_action_reason_enabled: true,
-      protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true};
+      protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true,
+      image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
+      image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
+      image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10};
     if (endpoint === "providers") return [{id: "example"}];
+    if (endpoint === "image-model-options") return {providers: [{id: "example", model: "example", modalities: ["text"], image_capability: "no_image", tool_capability: "undeclared"}], framework_caption_provider_id: ""};
     if (endpoint === "ui-state") return {platform_id: "p", group_id: "g", active_tab: "records"};
     if (endpoint === "platforms") return [{id: "p", type: "qq_official"}];
     if (endpoint === "groups") return [{platform_id: "p", group_id: "g", rule_count: 0}];

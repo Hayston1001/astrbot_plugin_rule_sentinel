@@ -7,6 +7,24 @@ from pathlib import Path
 
 
 class ManagementUiTests(unittest.TestCase):
+    def test_image_viewer_zoom_drag_and_close(self):
+        if not shutil.which("node"):
+            self.skipTest("node is unavailable")
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run([shutil.which("node"), str(root / "tests" / "management_image_viewer_probe.mjs"),
+                                 str(root / "views" / "management" / "app.js")],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_image_viewer_zoom_buttons_have_accessible_icons(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
+        for name, label in (("out", "缩小图片"), ("in", "放大图片")):
+            button = html.split(f'id="image-zoom-{name}"', 1)[1].split("</button>", 1)[0]
+            self.assertIn(f'aria-label="{label}"', button)
+            self.assertIn("<svg", button)
+            self.assertIn('aria-hidden="true"', button)
+
     def test_group_names_and_monitoring_badge_states(self):
         if not shutil.which("node"):
             self.skipTest("node is unavailable")

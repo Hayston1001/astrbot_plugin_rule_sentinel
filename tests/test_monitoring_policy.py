@@ -27,6 +27,16 @@ class EligibilityTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.assertEqual(eligibility(self.policy, **{**self.message, **changes}), result)
 
+    def test_images_need_the_per_group_switch(self):
+        image = {"is_text": False, "has_images": True}
+        self.assertEqual(eligibility(self.policy, **{**self.message, **image}), "image_judging_disabled")
+        self.assertEqual(eligibility(self.policy, **{**self.message, **image, "image_enabled": True}), "eligible")
+        self.assertEqual(eligibility(self.policy, **{**self.message, **image, "image_enabled": True,
+                                                     "has_enabled_rule": False}), "no_enabled_rule")
+        self.assertEqual(eligibility(self.policy, **{**self.message, "is_text": False,
+                                                     "has_images": False, "image_enabled": True}),
+                         "non_text_or_unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,51 @@ class GroupSettingsTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_settings({**self.config, "group_overrides": {key: {}}})
 
+    def test_image_overrides_need_resolvable_model_and_are_fingerprinted(self):
+        with self.assertRaises(ValueError):
+            validate_settings({**self.config, "group_overrides": {"p1/g": {"image_enabled": True}}})
+        for bad in ({"image_enabled": "yes"}, {"image_enabled": 1},
+                    {"image_model": {"backend": "llm"}}, {"image_model": {"backend": "jev", "model": "x"}}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate_settings({**self.config, "group_overrides": {"p1/g": bad}})
+        config = copy.deepcopy(self.config)
+        config["image_provider_id"] = "global-vision"
+        group = {"image_enabled": True}
+        validate_settings({**config, "group_overrides": {"p1/g": group}})
+        inherited = resolve_group_settings({**config, "group_overrides": {"p1/g": group}}, "p1", "g")
+        self.assertTrue(inherited["image_enabled"])
+        self.assertEqual(inherited["image_model"], "global-vision")
+        custom = {"image_enabled": True, "image_model": {"backend": "llm", "model": "local-vision"}}
+        resolved = resolve_group_settings({**config, "group_overrides": {"p1/g": custom}}, "p1", "g")
+        self.assertEqual(resolved["image_model"], "local-vision")
+        self.assertEqual(resolved["image_understanding_mode"], "direct")
+        base_fingerprint = decision_fingerprint(config, "p1", "g")
+        self.assertNotEqual(base_fingerprint, decision_fingerprint(
+            {**config, "image_understanding_mode": "caption"}, "p1", "g"))
+        self.assertNotEqual(base_fingerprint, decision_fingerprint(
+            {**config, "group_overrides": {"p1/g": group}}, "p1", "g"))
+
+    def test_old_image_mode_default_moves_forward_only_when_images_are_unused(self):
+        stored = copy.deepcopy(self.config)
+        stored.update({"image_understanding_mode": "caption", "image_max_count": 4,
+                       "image_max_bytes_per_image": 4194304, "image_max_total_bytes": 8388608,
+                       "image_fetch_timeout_seconds": 10})
+        self.store.save(stored)
+        migrated = self.store.load_or_migrate({})
+        self.assertEqual(migrated["image_understanding_mode"], "direct")
+        self.assertEqual((migrated["image_max_count"], migrated["image_max_bytes_per_image"],
+                          migrated["image_max_total_bytes"], migrated["image_fetch_timeout_seconds"]),
+                         (4, 4194304, 8388608, 10))
+        enabled = {**stored, "image_judging_enabled": True, "image_provider_id": "vision"}
+        self.store.save(enabled)
+        kept = self.store.load_or_migrate({})
+        self.assertEqual(kept["image_understanding_mode"], "caption")
+        self.assertEqual(kept["image_max_count"], 4)
+        group_used = {**stored, "group_overrides": {
+            "p1/g": {"image_enabled": True, "image_model": {"backend": "llm", "model": "vision"}}}}
+        self.store.save(group_used)
+        self.assertEqual(self.store.load_or_migrate({})["image_understanding_mode"], "caption")
+
     def test_migration_preserves_existing_execution_and_independent_defaults(self):
         old = copy.deepcopy(self.config)
         old.pop("default_execution_mode")
@@ -80,6 +125,8 @@ class GroupSettingsTests(unittest.TestCase):
         self.assertTrue(migrated["action_execution_enabled"])
         self.assertEqual(migrated["default_execution_mode"], "execute")
         self.assertEqual(migrated["group_overrides"], {})
+        self.assertFalse(migrated["image_judging_enabled"])
+        self.assertEqual(migrated["image_max_count"], 9)
         migrated["group_overrides"]["p1/g"] = {"strategy": "priority"}
         self.assertEqual(DEFAULTS["group_overrides"], {})
         self.assertEqual(self.store.load_or_migrate({})["group_overrides"], {})
@@ -89,7 +136,7 @@ class GroupSettingsTests(unittest.TestCase):
         config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
                                                "strategy": "priority"}}
         routes = []
-        def make(backend, model, strategy, reason_language):
+        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode):
             routes.append((backend, model, strategy, reason_language))
             async def decide(item):
                 return Decision("no_action", "{}")
@@ -492,8 +539,8 @@ class GroupSettingsTests(unittest.TestCase):
             seen.append(("llm", kwargs["model"], kwargs["strategy"]))
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
                 tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
-        def make(backend, model, strategy, reason_language):
-            decider = original(backend, model, strategy, reason_language)
+        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode):
+            decider = original(backend, model, strategy, reason_language, image_enabled, image_model, image_mode)
             decider.current().invoke = llm
             return decider
         router.make_decider = make

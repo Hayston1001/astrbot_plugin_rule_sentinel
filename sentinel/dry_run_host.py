@@ -30,6 +30,7 @@ class DryRunHost:
         self.on_failure = on_failure
         self.mute_session = None
         self.mute_executor = None
+        self.image_session = None
         self._mute_tasks = set()
         self._plan_tasks = {}
         self.runtime = None
@@ -65,6 +66,11 @@ class DryRunHost:
 
     async def _start(self):
         settings = read_settings(self.config)
+        # A group may enable image judging while the global switch stays off,
+        # so the download session is created when any scope needs it.
+        image_scope = settings.image_judging_enabled or any(
+            isinstance(group, dict) and group.get("image_enabled") is True
+            for group in (self.config.get("group_overrides") or {}).values())
         # The message listener runs after the framework's whitelist, session and
         # plugin checks, so a separate gate is optional. A host fed by a source
         # outside that pipeline must still pass one explicitly.
@@ -106,6 +112,21 @@ class DryRunHost:
                 self.mute_session = aiohttp.ClientSession(trust_env=False)
                 self.mute_executor = MuteExecutor(store, QQMutePlatform(self.mute_session,
                     lambda platform_id: resolve_qq_credentials(self.context, platform_id)))
+            image_fetcher = image_prefetcher = None
+            if image_scope:
+                import aiohttp
+                from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+                from .image_fetch import ImageFetcher
+                from .image_prefetch import ImagePrefetcher
+                self.image_session = aiohttp.ClientSession(trust_env=False)
+                image_fetcher = ImageFetcher(self.image_session,
+                    max_images=settings.image_max_count,
+                    max_bytes_per_image=settings.image_max_bytes_per_image,
+                    max_total_bytes=settings.image_max_total_bytes,
+                    timeout_seconds=settings.image_fetch_timeout_seconds,
+                    local_roots=[get_astrbot_temp_path()])
+                image_prefetcher = ImagePrefetcher(image_fetcher.fetch,
+                    wait_seconds=settings.image_fetch_timeout_seconds)
             if interval > 0:
                 self.notifications = build_notification_dispatcher(context=self.context, queue=self.queue,
                     recipient=target, interval_seconds=interval,
@@ -115,7 +136,8 @@ class DryRunHost:
             self.runtime = build_runtime(context=self.context, config=self.config, rules=self.rules,
                                          queue=self.queue,
                                          notify=self.notifications.offer if self.notifications else None,
-                                          session_gate=self.session_gate, on_failure=self._report_failure)
+                                          session_gate=self.session_gate, on_failure=self._report_failure,
+                                          image_fetcher=image_fetcher, image_prefetcher=image_prefetcher)
             if self.mute_executor is not None:
                 self.runtime.worker.on_finished = self._schedule_item_mute
             await self.runtime.start_after_exclusive_stop()
@@ -210,4 +232,7 @@ class DryRunHost:
                 self._report_failure("notification_buffer_full")
         if self.mute_session is not None:
             await self.mute_session.close()
+        if self.image_session is not None:
+            await self.image_session.close()
+            self.image_session = None
         await run_sync_safely(self.lock.release)

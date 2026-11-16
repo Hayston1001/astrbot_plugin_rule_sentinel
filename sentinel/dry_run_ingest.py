@@ -24,13 +24,14 @@ class IncomingMessage:
     session_origin: str | None = None
     message_time: str | None = None
     original_text: str | None = None
+    image_urls: tuple[str, ...] = ()
 
 
 class DryRunAdmission:
     """Admit group-scoped messages after the applicable policy checks."""
 
     def __init__(self, queue, rules, *, policy, capacity: int, model: str, rate_limiter=None,
-                 settings_match=None, notify=None, session_gate=None):
+                 settings_match=None, notify=None, session_gate=None, image_policy=None):
         if type(capacity) is not int or capacity <= 0:
             raise ValueError("queue capacity must be a positive integer")
         if not isinstance(model, str) or not model.strip():
@@ -44,6 +45,7 @@ class DryRunAdmission:
         self.settings_match = settings_match
         self.notify = notify
         self.session_gate = session_gate
+        self.image_policy = image_policy
 
     async def submit(self, message: IncomingMessage) -> str:
         # Persist nothing when identity is insufficient for a group-scoped record.
@@ -55,15 +57,27 @@ class DryRunAdmission:
         if self.session_gate is not None and await self.session_gate(message) is not True:
             return "framework_session_denied"
         rules = await run_sync_safely(self.rules.current_for_group, message.platform_id, message.group_id)
+        text = message.text if isinstance(message.text, str) else ""
+        images = tuple(message.image_urls) if isinstance(message.image_urls, (tuple, list)) else ()
+        image_enabled, image_limit = False, 0
+        if images and self.image_policy is not None:
+            try:
+                enabled, limit = self.image_policy(message.platform_id, message.group_id)
+            except Exception:
+                enabled, limit = False, 0
+            image_enabled = enabled is True
+            image_limit = limit if type(limit) is int and limit > 0 else 0
         status = eligibility(self.policy, platform_id=message.platform_id, group_id=message.group_id,
                              sender_id=message.sender_id, bot_id=message.bot_id,
                              sender_is_verified_non_bot=message.sender_is_verified_non_bot,
                              has_enabled_rule=any(rule.enabled for rule in rules),
                              is_management_command=message.is_management_command,
-                             is_text=message.is_text)
-        if status == "eligible" and (not isinstance(message.text, str) or not message.text.strip()):
+                             is_text=message.is_text, has_images=bool(images), image_enabled=image_enabled)
+        if status == "eligible" and images and image_limit and len(images) > image_limit:
+            status = "image_too_many"
+        if status == "eligible" and (not text.strip() and not images):
             status = "empty_text"
-        if status == "eligible" and len(message.text) > MAX_MESSAGE_CHARS:
+        if status == "eligible" and len(text) > MAX_MESSAGE_CHARS:
             status = "message_too_long"
         if status == "eligible" and (message.original_text is not None and
                 (not isinstance(message.original_text, str) or len(message.original_text) > MAX_MESSAGE_CHARS)):
@@ -78,7 +92,9 @@ class DryRunAdmission:
             return status
         if self.settings_match is not None and not self.settings_match():
             return "settings_changed_reload_required"
-        payload = {"text": message.text, "sender_id": message.sender_id, "session_origin": message.session_origin}
+        payload = {"text": text, "sender_id": message.sender_id, "session_origin": message.session_origin}
+        if images:
+            payload["image_urls"] = list(images)
         if message.original_text is not None:
             payload["original_text"] = message.original_text
         if message.message_time is not None:
@@ -106,7 +122,9 @@ class DryRunAdmission:
             return "invalid_list_mode"
         session = SimpleNamespace(platform_id=skipped.platform_id, group_id=skipped.group_id,
                                   session_origin=skipped.session_origin)
-        if self.session_gate is None or await self.session_gate(session) is not True:
+        # A caller reading events outside the framework pipeline must pass a
+        # gate; the standard listener already passed it and leaves this None.
+        if self.session_gate is not None and await self.session_gate(session) is not True:
             return "framework_session_denied"
         rules = await run_sync_safely(self.rules.current_for_group, skipped.platform_id, skipped.group_id)
         if not any(rule.enabled for rule in rules):

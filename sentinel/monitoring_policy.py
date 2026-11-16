@@ -14,7 +14,8 @@ class MonitoringPolicy:
 def eligibility(policy: MonitoringPolicy, *, platform_id: str, group_id: str,
                 sender_id: str, bot_id: str | None, has_enabled_rule: bool,
                 is_management_command: bool, is_text: bool,
-                sender_is_verified_non_bot: bool = False) -> str:
+                sender_is_verified_non_bot: bool = False,
+                has_images: bool = False, image_enabled: bool = False) -> str:
     """Return an explicit skip reason or 'eligible'. Inputs are trusted metadata."""
     if policy.mode not in ("allowlist", "blocklist"):
         return "invalid_list_mode"
@@ -33,7 +34,10 @@ def eligibility(policy: MonitoringPolicy, *, platform_id: str, group_id: str,
     if is_management_command is not False:
         return "management_command_or_unknown"
     if is_text is not True:
-        return "non_text_or_unknown"
+        if has_images is not True:
+            return "non_text_or_unknown"
+        if image_enabled is not True:
+            return "image_judging_disabled"
     if has_enabled_rule is not True:
         return "no_enabled_rule"
     return "eligible"

@@ -51,7 +51,10 @@ const settings = {quick_start_completed: true, action_execution_enabled: true, m
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,
   max_duration_seconds: 2592000, model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60,
   group_rate_per_minute: 30, model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
-  ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0};
+  ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
+  image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
+  image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
+  image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10};
 const groups = [
   {platform_id: "p1", group_id: "long-group-12345678", rule_count: 2, alias: "技术交流群", platform_name: "官方群名"},
   {platform_id: "p1", group_id: "other-group-87654321", rule_count: 1},
@@ -65,6 +68,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
     if (endpoint === "status") return {monitoring: "dry_run", action_execution_enabled: true, action_execution_available: true};
     if (endpoint === "settings") return structuredClone(settings);
     if (endpoint === "providers") return [];
+    if (endpoint === "image-model-options") return {providers: [], framework_caption_provider_id: ""};
     if (endpoint === "ui-state") return saved;
     if (endpoint === "platforms") return [{id: "p1", type: "qq_official"}, {id: "p2", type: "qq_official"}];
     if (endpoint === "groups") return groups;
@@ -136,7 +140,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
 const source = await readFile(process.argv[2], "utf8");
 const html = await readFile(process.argv[2].replace(/app\.js$/, "index.html"), "utf8");
 await import("data:text/javascript;base64," + Buffer.from(source + "\nglobalThis.__disclosureTest = {setPanelVisibility, setDetailsOpen, updateVisiblePanel};\n").toString("base64"));
-assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers"].includes(endpoint)), ["ui-state", "status", "platforms", "groups", "rules", "messages", "summary"]);
+assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers", "image-model-options"].includes(endpoint)), ["ui-state", "status", "platforms", "groups", "rules", "messages", "summary"]);
 assert.equal(elements["group-select"].value, JSON.stringify(["p1", "long-group-12345678"]));
 assert.equal(elements["group-detail-panel"].parentNode, elements["group-detail-home"]);
 assert.deepEqual(elements["groups-list"].children.map((row) => row.children[3].attributes["aria-expanded"]), ["false", "false", "false"]);

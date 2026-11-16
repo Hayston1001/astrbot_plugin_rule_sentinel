@@ -10,6 +10,9 @@ const settings = {
   model_concurrency: 20, model_timeout_seconds: 35, global_rate_per_minute: 100,
   group_rate_per_minute: 60, model_failure_threshold: 5, model_cooldown_seconds: 120,
   queue_capacity_per_group: 100, ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
+  image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
+  image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
+  image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10,
 };
 const groups = [];
 const rules = [];
@@ -144,6 +147,8 @@ window.AstrBotPluginView = {
     const data = {
       status: {monitoring: settings.decision_backend === "llm" && settings.llm_provider_id ? "dry_run" : "disabled", backend: settings.decision_backend},
       settings, providers: [{id: "model-a"}], "ui-state": uiState,
+      "image-model-options": {providers: [{id: "model-a", model: "model-a", modalities: ["text", "image", "tool_use"],
+        image_capability: "image", tool_capability: "tool_use"}], framework_caption_provider_id: ""},
       platforms: [{id: "p", type: "qq_official"}], groups, rules, messages: [],
       "available-groups": {groups: [{platform_id: "p", group_id: "g", name: "测试群"}], history_available: true},
       summary: {total_messages: 0, status_counts: {}, recent_24h: {messages: 0, proposed: 0, no_action: 0, failed: 0, review: 0}},
