@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
@@ -262,7 +262,7 @@ class RuleSentinel(Star):
             # This version exposes management only through the dashboard;
             # no plugin chat-management commands are registered.
             result = extract(event, is_management_command=lambda text: False,
-                             text_segment_types=(Plain, At))
+                             text_segment_types=(Plain, At), quote_segment_types=(Reply,))
             if result.message is not None:
                 from dataclasses import replace
                 result_message = replace(result.message, text=strip_wake_prefix(event, self.context, result.message.text, At))

@@ -4,12 +4,55 @@ AstrBot 4.29.3 can use placeholder self IDs, so this module never treats event
 self_id as proof. Only explicit QQ author.bot=false with a matching member
 identifier is accepted. Missing or ambiguous bot metadata is skipped. The
 result contains no platform client and cannot perform moderation actions.
+
+A quote reply carries the referenced message in its own segment. Only the
+sender's new text is judged; the quoted content belongs to another message and
+is never attributed to the sender.
+
+QQ replaces an @mention in the message text with an opaque member id. When the
+payload's mention list provides a display name for that id, the snapshot shows
+the name instead. An id without a name keeps its original markup.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .dry_run_ingest import IncomingMessage
+
+# Both forms are produced by QQ clients: `<@openid>` and the tag form.
+_MENTION_MARKUP = re.compile(r"<@!?([^<>\s\"]{1,128})>|<qqbot-at-user\s+id=\"([^<>\s\"]{1,128})\"\s*/>")
+
+
+def _mention_names(raw_data):
+    """Map mention ids to display names using the payload's mention list."""
+    mentions = raw_data.get("mentions") if isinstance(raw_data, dict) else None
+    if not isinstance(mentions, list):
+        return {}
+    names = {}
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        name = mention.get("username")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        for key in ("member_openid", "id", "user_openid"):
+            value = mention.get(key)
+            if isinstance(value, str) and value.strip():
+                names[value] = name.strip()
+    return names
+
+
+def _render_mentions(text, names):
+    """Replace mention markup for known ids with the member's display name."""
+    if not names:
+        return text
+
+    def replace(match):
+        name = names.get(match.group(1) or match.group(2))
+        return f"@{name}" if name else match.group(0)
+
+    return _MENTION_MARKUP.sub(replace, text)
 
 
 @dataclass(frozen=True)
@@ -18,7 +61,8 @@ class Extraction:
     message: IncomingMessage | None = None
 
 
-def extract(event, *, is_management_command, text_segment_types) -> Extraction:
+def extract(event, *, is_management_command, text_segment_types,
+            quote_segment_types=()) -> Extraction:
     if event.get_platform_name() not in ("qq_official", "qq_official_webhook"):
         return Extraction("unsupported_platform")
     obj = event.message_obj
@@ -46,20 +90,31 @@ def extract(event, *, is_management_command, text_segment_types) -> Extraction:
     chain = getattr(obj, "message", None)
     if not isinstance(chain, list):
         return Extraction("invalid_message_chain")
-    # At segments do not disqualify an otherwise textual message. Quoted or
-    # media segments are conservatively skipped until their context is handled.
+    # At segments do not disqualify an otherwise textual message. A quoted
+    # reply adds a segment that only references another message, so it is
+    # ignored here; the new text still has to be purely textual and any media
+    # or rich payload on the current message keeps it non-text.
     if not isinstance(text_segment_types, tuple) or not text_segment_types or not all(isinstance(t, type) for t in text_segment_types):
         return Extraction("invalid_text_component_types")
+    if not isinstance(quote_segment_types, tuple) or not all(isinstance(t, type) for t in quote_segment_types):
+        return Extraction("invalid_text_component_types")
     raw_type = raw_data.get("message_type")
+    quoted = type(raw_type) is int and raw_type == 103
+    has_quote_segment = any(isinstance(segment, quote_segment_types) for segment in chain)
     # The normalized message chain alone may omit rich payload fields. Treat
-    # unknown, quoted, card, attachment and nested-element payloads as non-text.
-    is_text = (type(raw_type) is int and raw_type == 0
+    # unknown, card and attachment payloads as non-text. A quote payload
+    # (message_type 103) legitimately carries msg_elements for the referenced
+    # message; it is accepted only when a quote segment proves the framework
+    # separated the quoted content from the sender's own text.
+    is_text = (type(raw_type) is int and raw_type in (0, 103)
                and not raw_data.get("attachments") and not raw_data.get("ark_data")
-               and not raw_data.get("msg_elements")
-               and all(isinstance(segment, text_segment_types) for segment in chain))
+               and (has_quote_segment if quoted else not raw_data.get("msg_elements"))
+               and all(isinstance(segment, text_segment_types)
+                       or isinstance(segment, quote_segment_types) for segment in chain))
     text = getattr(obj, "message_str", None)
     if not isinstance(text, str):
         return Extraction("invalid_text")
+    text = _render_mentions(text, _mention_names(raw_data))
     command = is_management_command(text)
     if type(command) is not bool:
         return Extraction("command_classification_unknown")

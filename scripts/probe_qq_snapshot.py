@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def main():
     with tempfile.TemporaryDirectory(prefix="sentinel-qq-probe-") as root:
         os.environ["ASTRBOT_ROOT"] = root
-        from astrbot.api.message_components import At, Plain
+        from astrbot.api.message_components import At, Plain, Reply
         from astrbot.core.platform.message_type import MessageType
         from astrbot.core.platform.platform_metadata import PlatformMetadata
         from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import QQOfficialMessageEvent
@@ -38,7 +38,8 @@ def main():
             event = event_class(message.message_str, message,
                 PlatformMetadata(name=name, description="test", id="p"), message.session_id, None)
             assert event.unified_msg_origin == "p:GroupMessage:g"
-            return extract(event, is_management_command=lambda text: False, text_segment_types=(Plain, At))
+            return extract(event, is_management_command=lambda text: False, text_segment_types=(Plain, At),
+                           quote_segment_types=(Reply,))
 
         async def probe():
             human = {"member_openid": "sender", "bot": False}
@@ -51,8 +52,25 @@ def main():
             assert missing_bot.status == "bot_identity_unverified" and missing_bot.message is None
             bot = await run_case({"member_openid": "sender", "bot": True}, {"message_type": 0})
             assert bot.status == "bot_message" and bot.message is None
+            quoted = await run_case(human, {"message_type": 103, "msg_elements": [
+                {"id": "quoted", "content": "quoted text", "attachments": []}]})
+            assert quoted.status == "ok" and quoted.message.is_text is True
+            assert quoted.message.text == "example text"
+            webhook_quoted = await run_case(human, {"message_type": 103, "msg_elements": [
+                {"id": "quoted", "content": "quoted text"}]}, webhook=True)
+            assert webhook_quoted.status == "ok" and webhook_quoted.message.is_text is True
+            mentioned = await run_case(human, {
+                "message_type": 0,
+                "content": "你好 <@MEMBER> 和 <@all>",
+                "mentions": [{"id": "MEMBER", "member_openid": "MEMBER", "username": "小明"}],
+            })
+            assert mentioned.status == "ok"
+            assert mentioned.message.text == "你好 @小明 和 <@all>"
             for extra in ({}, {"message_type": 103},
-                          {"message_type": 0, "message_reference": {"message_id": "quoted"}}):
+                          {"message_type": 103,
+                           "msg_elements": [{"id": "quoted", "content": "quoted text"}],
+                           "attachments": [{"url": "https://example.com/i.png",
+                                            "content_type": "image/png"}]}):
                 result = await run_case(human, extra)
                 assert result.status == "ok" and result.message.is_text is False
 

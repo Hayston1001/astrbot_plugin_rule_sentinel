@@ -17,6 +17,10 @@ class Image:
     pass
 
 
+class Reply:
+    pass
+
+
 class SnapshotTests(unittest.TestCase):
     def event(self, **changes):
         obj = SimpleNamespace(raw_message=SimpleNamespace(group_openid="g", raw_data={"author": {"member_openid": "sender", "bot": False}, "message_type": 0}), group_id="g",
@@ -64,8 +68,60 @@ class SnapshotTests(unittest.TestCase):
     def test_raw_rich_payload_and_unknown_type_are_not_treated_as_text(self):
         author = {"member_openid": "sender", "bot": False}
         for fields in ({}, {"message_type": 103}, {"message_type": 0, "attachments": [{"url": "image"}]},
-                       {"message_type": 0, "ark_data": {"title": "card"}}):
+                       {"message_type": 0, "ark_data": {"title": "card"}},
+                       {"message_type": 0, "msg_elements": [{"content": "nested"}]}):
             with self.subTest(fields=fields):
                 raw = SimpleNamespace(group_openid="g", raw_data={"author": author, **fields})
                 result = extract(self.event(raw_message=raw), is_management_command=lambda _: False, text_segment_types=(Plain, At))
                 self.assertFalse(result.message.is_text)
+
+    def test_quoted_text_is_accepted_without_the_quoted_content(self):
+        raw = SimpleNamespace(group_openid="g", raw_data={
+            "author": {"member_openid": "sender", "bot": False},
+            "message_type": 103,
+            "msg_elements": [{"id": "quoted", "content": "quoted words"}],
+        })
+        event = self.event(raw_message=raw, message=[Reply(), Plain()], message_str="reply text")
+        result = extract(event, is_management_command=lambda _: False,
+                         text_segment_types=(Plain, At), quote_segment_types=(Reply,))
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.message.is_text)
+        self.assertEqual(result.message.text, "reply text")
+
+    def test_mentions_are_rendered_with_display_names(self):
+        raw = SimpleNamespace(group_openid="g", raw_data={
+            "author": {"member_openid": "sender", "bot": False},
+            "message_type": 0,
+            "mentions": [
+                {"id": "id-xiaoming", "member_openid": "member-xiaoming", "username": " 小明 "},
+                {"id": "id-xiaohong", "username": "   "},
+            ],
+        })
+        text = '你好 <@member-xiaoming>, <@id-xiaohong>, <@all> 和 <qqbot-at-user id="id-xiaoming" />'
+        event = self.event(raw_message=raw, message_str=text)
+        result = extract(event, is_management_command=lambda _: False, text_segment_types=(Plain, At))
+        self.assertEqual(result.message.text, "你好 @小明, <@id-xiaohong>, <@all> 和 @小明")
+        self.assertEqual(result.message.original_text, result.message.text)
+        self.assertEqual(event.message_obj.message_str, text)
+
+    def test_quote_segment_stays_non_text_until_the_caller_identifies_it(self):
+        raw = SimpleNamespace(group_openid="g", raw_data={
+            "author": {"member_openid": "sender", "bot": False},
+            "message_type": 103,
+            "msg_elements": [{"id": "quoted", "content": "quoted words"}],
+        })
+        event = self.event(raw_message=raw, message=[Reply(), Plain()], message_str="reply text")
+        result = extract(event, is_management_command=lambda _: False, text_segment_types=(Plain, At))
+        self.assertFalse(result.message.is_text)
+
+    def test_quote_with_its_own_media_is_still_not_text(self):
+        raw = SimpleNamespace(group_openid="g", raw_data={
+            "author": {"member_openid": "sender", "bot": False},
+            "message_type": 103,
+            "msg_elements": [{"id": "quoted", "content": "quoted words"}],
+            "attachments": [{"url": "image"}],
+        })
+        event = self.event(raw_message=raw, message=[Reply(), Plain(), Image()], message_str="reply text")
+        result = extract(event, is_management_command=lambda _: False,
+                         text_segment_types=(Plain, At), quote_segment_types=(Reply,))
+        self.assertFalse(result.message.is_text)

@@ -39,6 +39,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         components = types.ModuleType("astrbot.api.message_components")
         components.At = type("At", (), {})
         components.Plain = type("Plain", (), {})
+        components.Reply = type("Reply", (), {})
         web = types.ModuleType("astrbot.api.web")
         self.request = types.SimpleNamespace(username="admin", query={}, headers={"content-type": "application/json"})
         async def body():
@@ -1020,6 +1021,30 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules, {name: None for name in command_modules()}):
                 await self.plugin.capture_group_message(event)
                 self.assertEqual(offered[-1].text, "加微信拉群")
+        finally:
+            self.plugin.intake = None
+
+    async def test_quoted_message_reaches_intake_with_its_own_text(self):
+        policy = types.SimpleNamespace(enabled=True, mode="blocklist", groups=set())
+        admission = types.SimpleNamespace(policy=policy, settings_match=None)
+        offered = []
+        self.plugin.intake = types.SimpleNamespace(runtime=types.SimpleNamespace(admission=admission), offer=offered.append)
+        self.plugin.group_index = types.SimpleNamespace(is_enabled=lambda *_: True)
+        self.context.get_config = lambda *, umo: {"wake_prefix": []}
+        components = sys.modules["astrbot.api.message_components"]
+        raw = types.SimpleNamespace(group_openid="g", raw_data={
+            "author": {"member_openid": "sender", "bot": False},
+            "message_type": 103,
+            "msg_elements": [{"id": "quoted", "content": "quoted words"}]})
+        obj = types.SimpleNamespace(raw_message=raw, group_id="g", message_id="message",
+                                    message=[components.Reply(), components.Plain()], message_str="reply text")
+        event = types.SimpleNamespace(message_obj=obj, get_platform_name=lambda: "qq_official", get_platform_id=lambda: "p",
+                                      get_sender_id=lambda: "sender", unified_msg_origin="p:GroupMessage:g")
+        try:
+            await self.plugin.capture_group_message(event)
+            self.assertEqual(len(offered), 1)
+            self.assertTrue(offered[0].is_text)
+            self.assertEqual(offered[0].text, "reply text")
         finally:
             self.plugin.intake = None
 
