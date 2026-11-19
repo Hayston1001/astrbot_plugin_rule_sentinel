@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from .astrbot_llm import AstrBotLlmInvoker
 from .circuit_breaker import CircuitBreaker
+from .chat_context import ChatContext
 from .dry_run_ingest import DryRunAdmission
 from .dry_run_runtime import DryRunRuntime
 from .dry_run_worker import DryRunWorker
@@ -50,7 +51,8 @@ class GroupDecider:
         key = (item.platform_id, item.group_id)
         effective = resolve_group_settings(self.config, *key)
         route = (effective["backend"], effective["model"], effective["strategy"], effective["llm_reason_language"],
-                 effective["image_enabled"], effective["image_model"], effective["image_understanding_mode"])
+                 effective["image_enabled"], effective["image_model"], effective["image_understanding_mode"],
+                 bool(effective["context_messages"]))
         if route not in self.deciders:
             self.deciders[route] = self.make_decider(*route)
         result = await self.deciders[route](item)
@@ -61,10 +63,11 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
                   on_failure=None, image_fetcher=None, image_prefetcher=None):
     settings = read_settings(config)
     group_overrides = deepcopy(config.get("group_overrides", {}))
+    chat_context = ChatContext()
     if settings.backend != "llm":
         raise ValueError("decision backend required")
     def make_decider(backend, model, strategy, reason_language=None, image_enabled=False,
-                     image_model="", image_mode="direct"):
+                     image_model="", image_mode="direct", context_enabled=False):
         if backend == "llm":
             language = config.get("llm_reason_language", "") if reason_language is None else reason_language
             def make_llm_decider(enabled):
@@ -74,7 +77,8 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
                                   no_action_reason_enabled=enabled, image_enabled=image_enabled,
                                   image_model=image_model or None, image_mode=image_mode,
                                   caption_prompt=settings.image_caption_prompt,
-                                  fetcher=image_fetcher, prefetcher=image_prefetcher)
+                                   fetcher=image_fetcher, prefetcher=image_prefetcher,
+                                   chat_context=chat_context if context_enabled else None)
             decider = ReasonConfiguredDecider(config, make_llm_decider)
             decider.current()
             return decider
@@ -108,10 +112,13 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
     admission = DryRunAdmission(queue, rules, policy=settings.policy, capacity=settings.capacity,
                                 model=settings.model, rate_limiter=limiter, settings_match=settings_match,
                                 notify=notify, session_gate=session_gate,
-                                image_policy=_image_policy(config, settings.image_max_count))
+                                image_policy=_image_policy(config, settings.image_max_count),
+                                chat_context=chat_context, context_policy=lambda platform_id, group_id:
+                                resolve_group_settings(config, platform_id, group_id)["context_messages"])
     worker = DryRunWorker(queue, guarded, concurrency=settings.concurrency,
                           timeout_seconds=settings.timeout_seconds, breaker=breaker, notify=notify)
-    return DryRunRuntime(admission, worker, on_failure=on_failure, prefetcher=image_prefetcher)
+    return DryRunRuntime(admission, worker, on_failure=on_failure, prefetcher=image_prefetcher,
+                         chat_context=chat_context)
 
 
 def _image_policy(config, max_count):

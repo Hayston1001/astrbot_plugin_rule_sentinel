@@ -3,9 +3,13 @@
 import hashlib
 import json
 
+from .chat_context import validate_context_messages
+
+
 GROUP_KEYS = frozenset({"model", "strategy", "execution_mode", "protected_policy",
                         "protected_template", "protected_quote", "llm_reason_language",
-                        "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups"})
+                        "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups",
+                        "context_messages"})
 
 
 def resolve_violation_groups(group):
@@ -126,7 +130,8 @@ def resolve_group_settings(config, platform_id, group_id):
             "protected_policy": policy, "protected_template": template, "protected_quote": quote,
             "llm_reason_language": reason_language, "image_enabled": image_enabled,
              "image_model": image_model, "image_understanding_mode": image_mode,
-               "shared_violation_groups": shared}
+               "shared_violation_groups": shared,
+               "context_messages": validate_context_messages(group.get("context_messages", 0))}
 
 
 def execution_allowed(config, platform_id, group_id):
@@ -138,6 +143,8 @@ def decision_fingerprint(config, platform_id, group_id):
     group = resolve_group_settings(config, platform_id, group_id)
     # Names and order do not change the rules contributing to a count.
     group["shared_violation_groups"] = sorted(item["rule_ids"] for item in group["shared_violation_groups"])
+    if not group["context_messages"]:
+        del group["context_messages"]  # Keep existing fingerprints when context is off.
     if group["backend"] != "llm":
         group["llm_reason_language"] = None
     payload = {"group": group, "monitoring_mode": config.get("monitoring_mode", "allowlist"),

@@ -29,7 +29,7 @@ class LlmDecider:
     def __init__(self, rules, invoke, *, model: str, max_duration_seconds: int, queue, strategy: str = "model",
                  no_action_reason_enabled: bool = True, image_enabled: bool = False,
                  image_model: str | None = None, image_mode: str = "direct",
-                 caption_prompt: str = "", fetcher=None, prefetcher=None):
+                 caption_prompt: str = "", fetcher=None, prefetcher=None, chat_context=None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if type(max_duration_seconds) is not int or max_duration_seconds <= 0:
@@ -57,6 +57,7 @@ class LlmDecider:
         self.caption_prompt = caption_prompt
         self.fetcher = fetcher
         self.prefetcher = prefetcher
+        self.chat_context = chat_context
 
     async def __call__(self, item):
         rules = await asyncio.to_thread(self.rules.current_for_group, item.platform_id, item.group_id)
@@ -71,6 +72,16 @@ class LlmDecider:
         sender = item.payload.get("sender_id")
         if ((not message.strip() and not images) or not isinstance(sender, str) or not sender.strip()):
             return Decision("failed", "invalid_message_snapshot", model_attempted=False)
+        def unavailable_context():
+            return Decision("review", json.dumps({
+                "review_reason": "chat_context_unavailable",
+                "chat_context": {"status": "unavailable",
+                                 "count": 0, "chars": 0, "limited": False},
+            }), model_attempted=False)
+
+        context = self.chat_context.take(item) if self.chat_context is not None else None
+        if self.chat_context is not None and context is None:
+            return unavailable_context()
         image_data_urls = None
         image_count = 0
         image_bytes = 0
@@ -141,6 +152,8 @@ class LlmDecider:
         language = select_prompt_language([rule.text for rule in enabled], message or caption or "")
         start_detail = {"backend": "llm", "model": judge_model, "strategy": self.strategy, "rules": rule_data,
                         "sender_id": sender, "prompt_language": language}
+        if context is not None:
+            start_detail["chat_context"] = context.audit()
         if images:
             start_detail["image"] = {"mode": self.image_mode, "model": self.image_model, "count": image_count,
                                      "bytes": image_bytes, "source": image_source,
@@ -155,16 +168,23 @@ class LlmDecider:
         started = time.monotonic()
         invoke_kwargs = {"model": judge_model, "message": message, "rules": model_rules,
                          "strategy": self.strategy, "language": language}
+        if context is not None:
+            invoke_kwargs["chat_context"] = context.prompt_data()
         if images and self.image_mode == "direct":
             invoke_kwargs["image_urls"] = image_data_urls
         elif images and caption:
             invoke_kwargs["image_caption"] = caption
         response = await self.invoke(**invoke_kwargs)
         elapsed_ms = round((time.monotonic() - started) * 1000, 3)
-        normalized = normalize_priority_response(response) if self.strategy == "priority" else normalize_response(response)
+        normalized = (normalize_priority_response(response) if self.strategy == "priority" else
+                      normalize_response(response, allow_context_review=context is not None))
         detail = {"backend": "llm", "model": judge_model, "rules": rule_data,
                   "strategy": self.strategy, "prompt_language": language, "response_status": normalized.reason,
                   "model_latency_ms": elapsed_ms, "message_chars": len(message)}
+        if context is not None:
+            detail["chat_context"] = context.audit()
+        if normalized.status == "review":
+            detail["review_reason"] = normalized.reason
         if images:
             detail["image"] = {"mode": self.image_mode, "model": self.image_model, "count": image_count,
                                "bytes": image_bytes, "source": image_source,

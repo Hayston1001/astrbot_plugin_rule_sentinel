@@ -780,6 +780,10 @@ const skipReasonText = {
   settings_changed_reload_required: "监控设置已变化, 需要重新加载, 未处理.",
   self_message: "机器人自己发送的消息, 未处理.",
 };
+const contextReviewText = {
+  chat_context_unavailable: "这条消息的上下文快照已失效或不可用, 需要人工复核.",
+  context_evidence_insufficient: "上下文证据不足, 需要人工复核.",
+};
 function recordReason(row, detail, decision, proposal) {
   const supplied = proposal.reason || decision.reason;
   if (typeof supplied === "string" && supplied.trim()) return {text: supplied, fallback: false};
@@ -789,9 +793,10 @@ function recordReason(row, detail, decision, proposal) {
     (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : ""));
   const nonText = row.status === "skipped" && value === "non_text_or_unknown";
   const removedModel = row.status === "review" && value === "decision_model_removed";
+  const contextReview = row.status === "review" && Object.hasOwn(contextReviewText, value) ? contextReviewText[value] : "";
   const skipped = row.status === "skipped" && Object.hasOwn(skipReasonText, value) ? skipReasonText[value] : "";
-  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : skipped || value,
-    fallback: nonText || removedModel || Boolean(skipped)};
+  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : contextReview || skipped || value,
+    fallback: nonText || removedModel || Boolean(contextReview || skipped)};
 }
 function matchesRecord(row) {
   if (currentFilter !== "all" && decisionBucket(row) !== currentFilter) return false;
@@ -897,6 +902,14 @@ function renderRecords(rows, append = false, update = false) {
     if (failureReason && !explainedByActions) addRecordDetail(info, "结果说明", failureReason);
     addRecordDetail(info, "判定理由", fullReason || "暂无理由.", fallbackReason);
     addRecordDetail(info, "相关规则", rules.title || "暂无规则信息.");
+    const context = decision.chat_context;
+    if (context?.status === "used" && Number.isInteger(context.count) && Number.isInteger(context.chars)) {
+      addRecordDetail(info, "群聊上下文", `使用 ${context.count} 条先前文字摘录, 共 ${context.chars} 字符${context.limited ? ", 受条数或长度限制" : ""}.`);
+    } else if (context?.status === "empty") {
+      addRecordDetail(info, "群聊上下文", "没有可用的前文.");
+    } else if (context?.status === "unavailable") {
+      addRecordDetail(info, "群聊上下文", "快照不可用, 未发送上下文判定请求.");
+    }
     content.appendChild(info);
     const process = recordElement("div", "record-detail-process");
     const actionSection = recordElement("section", "record-detail-section");
@@ -2943,7 +2956,7 @@ const MIB = 1048576;
 let modelChoiceEdited = false;
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
   "group-protected-policy", "group-protected-quote", "group-protected-template",
-  "group-image-enabled", "group-image-model"];
+  "group-image-enabled", "group-image-model", "group-context-messages"];
 function rememberGroupDraft() {
   const scope = group();
   if (!currentSettings || !scope.platform_id || !scope.group_id) return;
@@ -3109,6 +3122,7 @@ function showGroupOverrides() {
   el("group-model-backend").value = overrides.model?.backend || "";
   el("group-model").value = overrides.model?.model || "";
   el("group-strategy").value = overrides.strategy || "";
+  el("group-context-messages").value = String(overrides.context_messages ?? 0);
   el("group-image-enabled").value = Object.hasOwn(overrides, "image_enabled") ? String(overrides.image_enabled) : "";
   el("group-image-model").value = overrides.image_model?.model || "";
   groupReasonDraftInitialized = Object.hasOwn(overrides, "llm_reason_language");
@@ -3581,6 +3595,12 @@ function sharedCountControl() {
 }
 function readGroupOverrides() {
   const overrides = {};
+  const context = el("group-context-messages").value;
+  if (!/^\d+$/.test(context) || Number(context) > 20) {
+    el("group-context-messages").focus?.();
+    throw new Error("群聊上下文条数必须是 0 到 20 的整数");
+  }
+  if (Number(context)) overrides.context_messages = Number(context);
   const backend = el("group-model-backend").value;
   if (backend) {
     const model = el("group-model").value.trim();

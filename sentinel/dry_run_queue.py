@@ -347,6 +347,8 @@ class DryRunQueue:
                         if not isinstance(terminal, dict):
                             terminal = {"reason": detail}
                         terminal["prompt_language"] = start_detail["prompt_language"]
+                        if "chat_context" in start_detail:
+                            terminal["chat_context"] = start_detail["chat_context"]
                         try:
                             updated = json.dumps(terminal, ensure_ascii=False, allow_nan=False)
                         except (TypeError, ValueError, RecursionError):

@@ -64,7 +64,7 @@ def _openai_finish_conflicts(response, has_tools):
     return (finish in ("tool_calls", "function_call")) != has_tools
 
 
-def normalize_response(response: object) -> ToolResponse:
+def normalize_response(response: object, *, allow_context_review: bool = False) -> ToolResponse:
     """Accept at most one proposal from a completed assistant response.
 
     The caller must still apply rule, sender, duration and authorization checks.
@@ -88,6 +88,8 @@ def normalize_response(response: object) -> ToolResponse:
         if not isinstance(text, str):
             return ToolResponse("failed", [], "unconfirmed_no_action")
         lines = text.strip().split("\n", 1)
+        if allow_context_review and lines == ["NEEDS_REVIEW"]:
+            return ToolResponse("review", [], "context_evidence_insufficient")
         if lines[0].strip() != "NO_ACTION":
             return ToolResponse("failed", [], "unconfirmed_no_action")
         explanation = lines[1].strip() if len(lines) == 2 else None

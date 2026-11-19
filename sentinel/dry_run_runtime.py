@@ -14,11 +14,12 @@ class DryRunRuntime:
     No platform event or management handler is registered here.
     """
 
-    def __init__(self, admission, worker, *, on_failure=None, prefetcher=None):
+    def __init__(self, admission, worker, *, on_failure=None, prefetcher=None, chat_context=None):
         self.admission = admission
         self.worker = worker
         self.queue = worker.queue
         self.prefetcher = prefetcher
+        self.chat_context = chat_context
         self._tasks = {}
         self._generation = {}
         self._closed = False
@@ -134,6 +135,8 @@ class DryRunRuntime:
                     raise outcome
         if self.prefetcher is not None:
             await self.prefetcher.close()
+        if self.chat_context is not None:
+            self.chat_context.close()
 
     def stop_new_decisions(self):
         request_stop = getattr(self.worker, "request_stop", None)

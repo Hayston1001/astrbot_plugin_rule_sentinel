@@ -69,7 +69,7 @@ class AstrBotLlmInvoker:
         self.no_action_reason_enabled = no_action_reason_enabled
 
     async def __call__(self, *, model: str, message: str, rules: list, strategy: str = "model",
-                       language: str = "en", image_urls=None, image_caption=None):
+                       language: str = "en", image_urls=None, image_caption=None, chat_context=None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if (not isinstance(message, str) or not isinstance(rules, list) or not rules
@@ -80,13 +80,12 @@ class AstrBotLlmInvoker:
         if language not in PROMPTS:
             raise ValueError("unsupported prompt language")
         if image_urls:
-            prompt = json.dumps({"rules": rules, "message_untrusted": {
-                "text": message, "image_count": len(image_urls)}}, ensure_ascii=False)
+            trigger = {"text": message, "image_count": len(image_urls)}
         elif image_caption:
-            prompt = json.dumps({"rules": rules, "message_untrusted": {
-                "text": message, "image_caption": image_caption}}, ensure_ascii=False)
+            trigger = {"text": message, "image_caption": image_caption}
         else:
-            prompt = json.dumps({"rules": rules, "message_untrusted": message}, ensure_ascii=False)
+            trigger = message
+        prompt_data = {"rules": rules, "message_untrusted": trigger}
         prompt_key = "system_" + strategy + ("" if self.no_action_reason_enabled else "_no_reason")
         system_prompt = PROMPTS[language][prompt_key]
         if self.reason_language:
@@ -96,6 +95,12 @@ class AstrBotLlmInvoker:
             system_prompt += "\n" + PROMPTS[language]["image_direct"]
         elif image_caption:
             system_prompt += "\n" + PROMPTS[language]["image_caption_note"]
+        if chat_context is not None:
+            prompt_data["prior_messages_untrusted"] = chat_context
+            system_prompt += "\n" + PROMPTS[language]["chat_context"]
+            if strategy == "model":
+                system_prompt += " " + PROMPTS[language]["chat_context_review"]
+        prompt = json.dumps(prompt_data, ensure_ascii=False)
         return await self.context.llm_generate(chat_provider_id=model, prompt=prompt,
                                                image_urls=list(image_urls) if image_urls else None,
                                                tools=self.tool_set_factory(strategy, language),

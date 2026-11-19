@@ -692,6 +692,24 @@ class ManagementSaveStabilityTests(unittest.TestCase):
                     expect(page.locator("#text")).to_have_value("original rule")
                     buttons.nth(1).click()
 
+    def test_group_context_is_off_by_default_and_saves_only_for_the_selected_group(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.locator("#tab-groups").click()
+        rows = page.locator(".group-row")
+        rows.first.get_by_role("button", name="配置", exact=True).click()
+        field = page.get_by_role("spinbutton", name="群聊上下文条数")
+        expect(field).to_have_value("0")
+        expect(field).to_have_accessible_description("填 0 关闭. 可将触发判定的消息与前n条消息一并发给模型.")
+        field.fill("8")
+        page.locator("#group-settings-save").click()
+        expect(page.locator("#group-settings-status")).not_to_contain_text("尚未保存")
+        rows.nth(1).get_by_role("button", name="配置", exact=True).click()
+        expect(field).to_have_value("0")
+        rows.first.get_by_role("button", name="配置", exact=True).click()
+        expect(field).to_have_value("8")
+
     def test_group_and_global_saves_keep_their_forms_in_place(self):
         from playwright.sync_api import expect
 

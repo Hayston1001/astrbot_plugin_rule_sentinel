@@ -241,10 +241,11 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.plugin.register_group())["data"]["alias"], "group")
         self.raw_body = json.dumps({"platform_id": "p2", "group_id": "g", "overrides": {
             "model": {"backend": "llm", "model": "local"}, "strategy": "priority", "execution_mode": "record",
-            "llm_reason_language": "English"}}).encode()
+            "llm_reason_language": "English", "context_messages": 6}}).encode()
         result = (await self.plugin.save_group_settings())["data"]["settings"]
         self.assertEqual(result["group_overrides"]["p2/g"]["model"]["model"], "local")
         self.assertEqual(result["group_overrides"]["p2/g"]["llm_reason_language"], "English")
+        self.assertEqual(result["group_overrides"]["p2/g"]["context_messages"], 6)
         self.assertNotIn("p1/g", result["group_overrides"])
         self.assertNotIn("jev_api_key", result)
         self.raw_body = json.dumps({"platform_id": "p2", "group_id": "g", "enabled": True}).encode()
@@ -256,7 +257,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         groups = (await self.plugin.list_groups())["data"]
         self.assertEqual({(item["platform_id"], item["group_id"]) for item in groups}, {("p1", "g"), ("p2", "g")})
         for overrides in ({"model": None}, {"execution_mode": "invalid"}, {"protected_quote": 1},
-                          {"llm_reason_language": None}, {"llm_reason_language": "English\ninvalid"}, {"other": True}):
+                          {"llm_reason_language": None}, {"llm_reason_language": "English\ninvalid"},
+                          {"context_messages": 21}, {"context_messages": True}, {"other": True}):
             self.raw_body = json.dumps({"platform_id": "p1", "group_id": "g", "overrides": overrides}).encode()
             self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
         self.raw_body = b'{"platform_id":"p1","group_id":"g","overrides":{},"overrides":{}}'

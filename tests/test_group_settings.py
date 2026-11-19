@@ -157,7 +157,7 @@ class GroupSettingsTests(unittest.TestCase):
         config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
                                                "strategy": "priority"}}
         routes = []
-        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode):
+        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode, context_enabled):
             routes.append((backend, model, strategy, reason_language))
             async def decide(item):
                 return Decision("no_action", "{}")
@@ -560,8 +560,8 @@ class GroupSettingsTests(unittest.TestCase):
             seen.append(("llm", kwargs["model"], kwargs["strategy"]))
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
                 tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
-        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode):
-            decider = original(backend, model, strategy, reason_language, image_enabled, image_model, image_mode)
+        def make(*route):
+            decider = original(*route)
             decider.current().invoke = llm
             return decider
         router.make_decider = make
