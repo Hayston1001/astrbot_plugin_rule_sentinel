@@ -8,6 +8,7 @@ This module does not perform any of those operations.
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .dry_run_queue import SYSTEM_PLATFORM
@@ -112,7 +113,7 @@ class RuleStore:
             allowed_actions = [action["type"] for action in actions]
             mute = next((action for action in actions if action["type"] == "mute"), None)
             duration_mode = mute["duration_mode"] if mute else "strict"
-            severity_seconds = mute["severity_seconds"] if mute else {}
+            severity_seconds = mute.get("severity_seconds", {}) if mute else {}
 
         db = self._connect()
         try:
@@ -126,15 +127,26 @@ class RuleStore:
             current = row["version"] or 0
             if current != expected_version:
                 raise VersionConflict("rule version changed")
+            if current:
+                row = db.execute(
+                    "SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? AND version=?",
+                    (platform_id, group_id, rule_id, current),
+                ).fetchone()
+                existing = self._decode(row)
+                if (existing.text == text and existing.enabled == enabled
+                        and existing.priority == priority and existing.actions == actions):
+                    db.commit()
+                    return existing
             db.execute(
                 """INSERT INTO rule_versions
                    (platform_id, group_id, rule_id, version, text, enabled, allowed_actions,
-                    duration_mode, severity_seconds, modified_by, priority, actions)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     duration_mode, severity_seconds, modified_by, priority, actions, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (platform_id, group_id, rule_id, current + 1, text, int(enabled),
                  json.dumps(allowed_actions), duration_mode,
                  json.dumps(severity_seconds, sort_keys=True), modified_by, priority,
-                 json.dumps(actions, ensure_ascii=False, sort_keys=True)),
+                  json.dumps(actions, ensure_ascii=False, sort_keys=True),
+                  datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")),
             )
             row = db.execute(
                 "SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? AND version=?",

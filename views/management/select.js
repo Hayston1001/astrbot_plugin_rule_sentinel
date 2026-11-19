@@ -382,7 +382,7 @@ function enhance(select) {
   trigger.addEventListener("click", () => { if (active === state) closeMenu(); else openMenu(state); });
   trigger.addEventListener("keydown", (event) => handleKey(state, event));
   new MutationObserver(() => sync(state)).observe(select, {subtree: true, childList: true, characterData: true, attributes: true,
-    attributeFilter: ["disabled", "hidden", "label", "value", "selected", "title", "aria-describedby", "aria-invalid"]});
+    attributeFilter: ["disabled", "hidden", "label", "value", "selected", "title", "aria-label", "aria-describedby", "aria-invalid"]});
   sync(state);
 }
 

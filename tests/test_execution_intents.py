@@ -408,7 +408,8 @@ class ExecutionIntentTests(unittest.TestCase):
         executor = MuteExecutor(MuteExecutionStore(self.path, notify=self.queue.publish_intent),
                                 QQMutePlatform(session, lambda _: ("app", "secret")))
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "blocked")
-        self.assertEqual(sum(url.endswith("restrict_chat_setting") for _, url, _ in session.calls), 1)
+        self.assertEqual([method for method, url, _ in session.calls if url.endswith("restrict_chat_setting")],
+                         ["GET", "POST"])
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT status, attempts, platform_code, reason_code FROM execution_intents").fetchone(),
                              ("blocked", 1, "40103004", "protected_target"))
@@ -588,7 +589,7 @@ class ExecutionIntentTests(unittest.TestCase):
         self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
         class Session(FakeSession):
             def request(self, method, url, **kwargs):
-                if url.endswith("restrict_chat_setting"):
+                if method == "POST" and url.endswith("restrict_chat_setting"):
                     self.calls.append((method, url, kwargs))
                     return FakeResponse(400, {"code": 40103004})
                 if url.endswith("/messages"):
@@ -691,7 +692,7 @@ class ExecutionIntentTests(unittest.TestCase):
         self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
         class Session(FakeSession):
             def request(self, method, url, **kwargs):
-                if url.endswith("restrict_chat_setting"):
+                if method == "POST" and url.endswith("restrict_chat_setting"):
                     self.calls.append((method, url, kwargs))
                     return FakeResponse(400, {"code": 40103004})
                 if url.endswith("/messages"):
@@ -735,7 +736,8 @@ class ExecutionIntentTests(unittest.TestCase):
             delays.append(delay)
         executor = MuteExecutor(MuteExecutionStore(self.path), QQMutePlatform(session, lambda _: ("app", "secret")), sleep=sleep)
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "failed")
-        self.assertEqual(sum(url.endswith("restrict_chat_setting") for _, url, _ in session.calls), 3)
+        self.assertEqual([method for method, url, _ in session.calls if url.endswith("restrict_chat_setting")],
+                         ["GET", "POST"] * 3)
         self.assertEqual(delays, [1, 2])
 
     def test_http_5xx_is_unknown_and_not_retried(self):
@@ -745,7 +747,8 @@ class ExecutionIntentTests(unittest.TestCase):
         session.mute_status = 500
         executor = MuteExecutor(MuteExecutionStore(self.path), QQMutePlatform(session, lambda _: ("app", "secret")))
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "unknown")
-        self.assertEqual(sum(url.endswith("restrict_chat_setting") for _, url, _ in session.calls), 1)
+        self.assertEqual([method for method, url, _ in session.calls if url.endswith("restrict_chat_setting")],
+                         ["GET", "POST"])
 
     def test_existing_database_migrates_reason_columns(self):
         with closing(sqlite3.connect(self.path)) as db:

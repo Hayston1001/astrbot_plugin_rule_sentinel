@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .prompts import PROMPTS
+from .violation_store import count_cumulative_mute, initialize_violation_store, revoke_violation, utc_microseconds
 
 SYSTEM_PLATFORM = "__rule_sentinel_system__"
 OVERFLOW_GROUP = "__ingress_overflow__"
@@ -54,7 +55,7 @@ class DryRunQueue:
                     id INTEGER PRIMARY KEY,
                     platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
                     message_id TEXT NOT NULL, payload TEXT,
-                    state TEXT NOT NULL, lease TEXT,
+                    state TEXT NOT NULL, lease TEXT, admitted_at_us INTEGER,
                     UNIQUE(platform_id, group_id, message_id)
                 );
                 CREATE INDEX IF NOT EXISTS dry_run_queue_group_state
@@ -129,9 +130,12 @@ class DryRunQueue:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 );
             """)
-            # SQLite databases created by early development versions lack the
-            # attempt column. Serialize the migration across processes.
+            # Serialize schema migrations across processes.
             db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(dry_run_queue)")}
+            if "admitted_at_us" not in columns:
+                # Do not assign new admission times to pre-upgrade messages.
+                db.execute("ALTER TABLE dry_run_queue ADD COLUMN admitted_at_us INTEGER")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dashboard_ui_state)")}
             if "active_tab" not in columns:
                 db.execute("ALTER TABLE dashboard_ui_state ADD COLUMN active_tab TEXT NOT NULL DEFAULT 'status'")
@@ -167,6 +171,11 @@ class DryRunQueue:
                 db.execute("ALTER TABLE execution_intents_plan RENAME TO execution_intents")
             db.execute("CREATE INDEX IF NOT EXISTS execution_intents_pending_group "
                        "ON execution_intents(status, action, platform_id, group_id, id)")
+            # Older pending cumulative actions promised that confirmation would only count.
+            db.execute("""UPDATE execution_intents SET status='inactive', reason_code='cumulative_mute_held',
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE status='pending_confirm' AND reason_code='cumulative_on_confirmation'""")
+            initialize_violation_store(db)
             db.commit()
         finally:
             db.close()
@@ -192,7 +201,10 @@ class DryRunQueue:
                 db.commit()
                 self._publish(key, event.lastrowid)
                 return "queue_full"
-            db.execute("INSERT INTO dry_run_queue (platform_id, group_id, message_id, payload, state) VALUES (?, ?, ?, ?, 'pending')", (*key, encoded))
+            db.execute("""INSERT INTO dry_run_queue
+                (platform_id, group_id, message_id, payload, state, admitted_at_us)
+                VALUES (?, ?, ?, ?, 'pending', ?)""",
+                (*key, encoded, utc_microseconds(datetime.now(timezone.utc))))
             from .message_retention import stored_retention_days
             days = stored_retention_days(db)
             text = payload.get("original_text", payload.get("text"))
@@ -444,7 +456,7 @@ class DryRunQueue:
             has_settings = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dashboard_settings'").fetchone()
             stored_settings = db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone() if has_settings else None
             settings = json.loads(stored_settings["payload"]) if stored_settings else {}
-            from .group_settings import execution_allowed
+            from .group_settings import execution_allowed, resolve_group_settings
             from .action_config import resolve_action_mode
             execution_enabled = execution_allowed(settings, item.platform_id, item.group_id)
             default_action_mode = settings.get("default_action_mode")
@@ -463,9 +475,32 @@ class DryRunQueue:
             except (KeyError, TypeError, ValueError, OverflowError):
                 pass
             intent = {"platform_id": item.platform_id, "group_id": item.group_id, "message_id": item.message_id, "rule_id": rule_id,
-                      "rule_version": version, "action": action, "target_sender_id": sender,
-                      "duration_seconds": duration, "mode": actual_mode}
-            if action == "mute":
+                       "rule_version": version, "action": action, "target_sender_id": sender,
+                       "duration_seconds": duration, "mode": actual_mode, "source_event_id": event_id}
+            state = ("pending_auto" if actual_mode == "auto" else "pending_confirm") if execution_enabled else "inactive"
+            reason = None
+            if action == "mute" and selected["duration_mode"] == "cumulative":
+                if duration is not None:
+                    raise ValueError("cumulative mute does not accept a proposed duration")
+                if state == "pending_confirm":
+                    reason = "cumulative_mute_on_confirmation"
+                else:
+                    group = resolve_group_settings(settings, item.platform_id, item.group_id)
+                    count = count_cumulative_mute(db, intent, rule, selected, group, now)
+                    if count is not None:
+                        duration = count.duration_seconds
+                    if execution_enabled:
+                        intent["duration_seconds"] = duration
+                        if count is None:
+                            state, reason = "review", "cumulative_not_counted"
+                        else:
+                            check = revalidate_mute(intent, rule=rule, max_duration_seconds=limit,
+                                                    default_action_mode=default_action_mode, cumulative_duration=count.duration_seconds)
+                            if check.allowed:
+                                expires = (now + timedelta(seconds=duration)).isoformat(timespec="milliseconds")
+                            else:
+                                state, reason = "review", check.reason
+            elif action == "mute":
                 if not revalidate_mute(intent, rule=rule, max_duration_seconds=limit, default_action_mode=default_action_mode).allowed:
                     raise ValueError("invalid mute")
                 expires = (now + timedelta(seconds=duration)).isoformat(timespec="seconds")
@@ -480,6 +515,8 @@ class DryRunQueue:
                 except (TypeError, ValueError, OverflowError):
                     missing_time = True
                     message_time = None
+                if execution_enabled and missing_time:
+                    state, reason = "review", "invalid_message_time"
             else:
                 duration = None
             timestamp = now.isoformat(timespec="milliseconds")
@@ -489,10 +526,7 @@ class DryRunQueue:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (event_id, item.lease, item.platform_id, item.group_id, item.message_id, rule_id, version,
                  action, sender, actual_mode, duration, expires,
-                 "review" if action == "recall" and execution_enabled and missing_time else
-                 ("pending_auto" if actual_mode == "auto" else "pending_confirm") if execution_enabled
-                 else "inactive", timestamp, timestamp, message_time,
-                 "invalid_message_time" if action == "recall" and execution_enabled and missing_time else None,
+                  state, timestamp, timestamp, message_time, reason,
                  f"event:{event_id}", action_index))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid execution intent") from error
@@ -607,7 +641,37 @@ class DryRunQueue:
             latest["executions"] = self._executions_for_event(db, event_id)
             latest["execution"] = latest["executions"][0] if latest["executions"] else None
             latest["execution_summary"] = self._execution_summary(latest["executions"])
+            count = self._violation_for_event(db, event_id)
+            if count is not None:
+                latest["violation_count"] = count
             return latest
+        finally:
+            db.close()
+
+    @staticmethod
+    def _violation_for_event(db, event_id):
+        row = db.execute("""SELECT ordinal, duration_seconds, counted_at_us, revoked_at_us, revoked_by
+            FROM violation_counts WHERE source_event_id=?""", (event_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def revoke_violation_count(self, platform_id, group_id, message_id, actor):
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            changed = revoke_violation(db, platform_id=platform_id, group_id=group_id, message_id=message_id,
+                                       revoked_at=datetime.now(timezone.utc), revoked_by=actor)
+            row = db.execute("SELECT source_event_id FROM violation_counts WHERE platform_id=? AND group_id=? AND message_id=?",
+                             (platform_id, group_id, message_id)).fetchone()
+            if row is None:
+                raise ValueError("no violation count")
+            result = self._violation_for_event(db, row["source_event_id"])
+            db.commit()
+            if changed:
+                self._publish((platform_id, group_id, message_id), row["source_event_id"])
+            return result
+        except BaseException:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -744,10 +808,10 @@ class DryRunQueue:
                 key = (row["platform_id"], row["group_id"], row["message_id"])
                 actions = [dict(item) for item in db.execute("""SELECT i.id, i.action, i.mode, i.status,
                     i.rule_id, i.rule_version, i.duration_seconds, i.expires_at, i.message_time,
-                    i.action_index, e.detail, e.created_at FROM execution_intents i
+                    i.action_index, i.reason_code, e.detail, e.created_at FROM execution_intents i
                     JOIN dry_run_events e ON e.id=i.source_event_id
                     WHERE i.platform_id=? AND i.group_id=? AND i.message_id=?
-                      AND i.status='pending_confirm' AND i.mode='confirm' AND i.action='mute'
+                       AND i.status='pending_confirm' AND i.mode='confirm' AND i.action='mute'
                     ORDER BY i.source_event_id DESC, i.action_index""", key).fetchall()]
                 content = None
                 if days:
@@ -822,6 +886,9 @@ class DryRunQueue:
                     row["executions"] = self._executions_for_event(db, row["id"])
                     row["execution"] = row["executions"][0] if row["executions"] else None
                     row["execution_summary"] = self._execution_summary(row["executions"])
+                    count = self._violation_for_event(db, row["id"])
+                    if count is not None:
+                        row["violation_count"] = count
                 placeholders = ",".join("(?,?,?)" for _ in result)
                 timeline = db.execute(
                     "SELECT platform_id, group_id, message_id, id, status, created_at FROM dry_run_events "

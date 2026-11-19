@@ -78,7 +78,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 33)
+        self.assertEqual(len(self.context.routes), 34)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -112,6 +112,24 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                               "severity_seconds": {"low": 2592001}}]
         self.raw_body = json.dumps(fields).encode()
         self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
+
+    async def test_save_cumulative_rule_with_explicit_minute_tiers(self):
+        actions = [
+            {"type": "recall", "mode": "auto"},
+            {"type": "mute", "mode": "inherit", "duration_mode": "cumulative",
+             "window_seconds": 30 * 86400, "window_unit": 86400,
+             "tiers_seconds": [60, 600, 3600], "tier_units": [60, 60, 60]},
+        ]
+        fields = {"platform_id": "p", "group_id": "g", "rule_id": "r", "expected_version": 0,
+                  "text": "No advertising", "enabled": True, "actions": actions}
+        self.raw_body = json.dumps(fields).encode()
+        preview = await self.plugin.preview_rule()
+        self.assertIn("data", preview)
+        self.raw_body = json.dumps(preview["data"]).encode()
+        result = await self.plugin.confirm_rule()
+        self.assertEqual(result["data"]["actions"], actions)
+        self.request.query = {"platform_id": "p", "group_id": "g"}
+        self.assertEqual((await self.plugin.list_rules())["data"][0]["actions"], actions)
 
     async def test_mute_confirmation_accepts_only_id_and_dashboard_user(self):
         host = types.SimpleNamespace(mute_executor=object(), confirm_mute=AsyncMock(return_value="succeeded"))
@@ -256,6 +274,46 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.raw_body = json.dumps({"llm_no_action_reason_enabled": value}).encode()
             self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
         self.assertFalse(self.plugin.config["llm_no_action_reason_enabled"])
+
+    async def test_shared_count_groups_require_disjoint_rules_from_the_same_group(self):
+        for rule_id in ("a", "b", "c", "d", "strict", "other"):
+            self.plugin.management.rules.save(
+                platform_id="p", group_id="g2" if rule_id == "other" else "g", rule_id=rule_id,
+                text="Rule", enabled=False, actions=[] if rule_id == "strict" else [{"type": "mute", "mode": "auto",
+                    "duration_mode": "cumulative", "window_seconds": 86400, "tiers_seconds": [60]}],
+                expected_version=0, modified_by="admin",
+            )
+
+        async def save(**payload):
+            self.raw_body = json.dumps({"platform_id": "p", "group_id": "g", **payload}).encode()
+            return await self.plugin.save_group_settings()
+
+        first = {"name": "", "rule_ids": ["a", "b"]}
+        second = {"name": "", "rule_ids": ["c", "d"]}
+        for groups in ([first, {**second, "rule_ids": ["b", "c"]}],
+                       [first, {**second, "rule_ids": ["c", "other"]}],
+                       [first, {**second, "rule_ids": ["c", "strict"]}]):
+            self.assertEqual((await save(expected_groups=[], shared_violation_groups=groups))["status_code"], 400)
+        await save(overrides={"execution_mode": "record", "llm_reason_language": "English"})
+        saved = [first, second]
+        result = await save(expected_groups=[], shared_violation_groups=saved)
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"], {
+            "execution_mode": "record", "llm_reason_language": "English", "shared_violation_groups": saved})
+        result = await save(overrides={"execution_mode": "execute"})
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"], {
+            "execution_mode": "execute", "shared_violation_groups": saved})
+        self.assertEqual((await save(overrides={"shared_violation_groups": []}))["status_code"], 400)
+        self.assertEqual((await save(expected_groups=[], shared_violation_groups=[]))["status_code"], 409)
+        self.assertEqual(self.plugin.config["group_overrides"]["p/g"]["shared_violation_groups"], saved)
+        self.plugin.management.rules.save(
+            platform_id="p", group_id="g", rule_id="a", text="Rule", enabled=False, actions=[],
+            expected_version=1, modified_by="admin",
+        )
+        renamed = [{**first, "name": "推广"}, second]
+        result = await save(expected_groups=saved, shared_violation_groups=renamed)
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"]["shared_violation_groups"], renamed)
+        result = await save(expected_groups=renamed, shared_violation_groups=[])
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"], {"execution_mode": "execute"})
 
     async def test_event_stream_invalid_scope_and_limit(self):
         for query in ({}, {"platform_id": "p", "group_id": " "},

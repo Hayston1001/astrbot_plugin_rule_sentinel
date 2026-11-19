@@ -587,15 +587,18 @@ function renderPending() {
     const actions = element("ol", "overview-pending-actions");
     for (const action of message.actions) {
       const item = element("li", "overview-pending-action");
-      item.appendChild(element("strong", "", `禁言 ${duration(action.duration_seconds)}`));
-      item.appendChild(element("p", "field-help", `规则: ${action.rule_id} / 第 ${action.rule_version} 版`));
+      const cumulative = action.reason_code === "cumulative_mute_on_confirmation";
+      item.appendChild(element("strong", "", cumulative ? "累计禁言" : `禁言 ${duration(action.duration_seconds)}`));
+      item.appendChild(element("p", "field-help", `规则: ${action.rule_id}`));
       item.appendChild(element("p", "field-help", `判定理由: ${reason(action)}`));
       if (action.expires_at) item.appendChild(element("p", "field-help", `动作有效期至: ${time(action.expires_at)}`));
       if (action.expires_at && Number.isFinite(Date.parse(action.expires_at)) && Date.parse(action.expires_at) <= Date.now()) {
         item.appendChild(element("p", "field-help", "动作可能已到期, 确认时将重新核验."));
       }
       item.appendChild(progress());
-      item.appendChild(element("p", "field-help", "确认将尝试执行此项禁言, 实际结果以执行记录为准."));
+      item.appendChild(element("p", "field-help", cumulative
+        ? "确认时计入本次违规并计算时长. 若成员已被禁言, 本次时长接在原到期时间后."
+        : "确认将尝试执行此项禁言, 实际结果以执行记录为准."));
       const execute = button("确认并尝试禁言", async () => {
         if (confirming.has(action.id)) return;
         confirming.add(action.id);
@@ -608,8 +611,9 @@ function renderPending() {
             not_claimed: "动作状态已变化或执行前检查未通过, 请查看判定记录."};
           const reasons = {intent_expired: "动作已到期, 禁言未执行.", invalid_expiry: "动作有效期无效, 禁言未执行.",
             group_not_monitored: "本群监控未开启, 禁言未执行.", rule_disabled: "规则已停用, 禁言未执行.",
-            rule_version_changed: "规则版本已变化, 禁言未执行.", action_not_allowed: "规则不再允许此动作, 禁言未执行.",
-            duration_not_in_rule: "禁言时长不在规则设置中, 禁言未执行.", invalid_duration: "禁言时长无效或超过上限, 禁言未执行."};
+            rule_version_changed: "规则配置已变化, 禁言未执行.", action_not_allowed: "规则不再允许此动作, 禁言未执行.",
+             duration_not_in_rule: "禁言时长不在规则设置中, 禁言未执行.", invalid_duration: "禁言时长无效或超过上限, 禁言未执行.",
+             cumulative_not_counted: "该消息不在本次累计范围内, 禁言未执行."};
           const message = result?.status === "not_claimed" && Object.hasOwn(reasons, result.reason_code)
             ? reasons[result.reason_code] : labels[result?.status] || "执行状态未知, 请查看判定记录.";
           const tone = result?.status === "succeeded" ? "success" : ["unknown", "review", "not_claimed"].includes(result?.status) ? "warning" : "error";

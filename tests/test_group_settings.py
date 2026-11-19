@@ -32,6 +32,27 @@ class GroupSettingsTests(unittest.TestCase):
                            action_execution_enabled=True)
         self.store.save(self.config)
 
+    def test_shared_groups_validate_and_legacy_keeps_same_fingerprint(self):
+        legacy = {**self.config, "group_overrides": {"p1/g": {"shared_violation_rules": ["b", "a"]}}}
+        named = {**self.config, "group_overrides": {"p1/g": {"shared_violation_groups": [
+            {"name": "Renamed", "rule_ids": ["a", "b"]},
+        ]}}}
+        self.assertEqual(resolve_group_settings(legacy, "p1", "g")["shared_violation_groups"],
+                         [{"name": "", "rule_ids": ["a", "b"]}])
+        self.assertEqual(decision_fingerprint(legacy, "p1", "g"), decision_fingerprint(named, "p1", "g"))
+        unnamed = {**self.config, "group_overrides": {"p1/g": {"shared_violation_groups": [
+            {"rule_ids": ["b", "a"]}, {"name": "", "rule_ids": ["c", "d"]},
+        ]}}}
+        validate_settings(unnamed)
+        self.assertEqual(resolve_group_settings(unnamed, "p1", "g")["shared_violation_groups"], [
+            {"name": "", "rule_ids": ["a", "b"]}, {"name": "", "rule_ids": ["c", "d"]}])
+        first = {"name": "A", "rule_ids": ["a", "b"]}
+        for invalid in ([first, {"name": "B", "rule_ids": ["b", "c"]}],
+                        [first, {"name": "A", "rule_ids": ["c", "d"]}],
+                        [{"name": "A", "rule_ids": ["a"]}], [{"name": "A\nB", "rule_ids": ["a", "b"]}]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_settings({**self.config, "group_overrides": {"p1/g": {"shared_violation_groups": invalid}}})
+
     def test_inheritance_override_and_platform_isolation(self):
         config = copy.deepcopy(self.config)
         config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},

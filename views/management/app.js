@@ -553,7 +553,7 @@ el("audit").addEventListener("click", () => loadAudit(true));
 el("audit-next").addEventListener("click", () => loadAudit(false));
 function localTimeFor(value) {
   const timestamp = String(value ?? "");
-  const date = new Date(timestamp);
+  const date = new Date(typeof value === "number" ? value : timestamp);
   const pad = (part) => String(part).padStart(2, "0");
   return Number.isNaN(date.getTime()) ? timestamp || "-" :
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
@@ -562,11 +562,21 @@ function compactTime(value) {
   const full = localTimeFor(value);
   return /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(full) ? full.slice(5, 16) : full;
 }
+const durationUnits = [[86400, "天"], [3600, "小时"], [60, "分钟"], [1, "秒"]];
+function defaultDurationUnit(seconds) {
+  return Number.isSafeInteger(seconds) && seconds > 0
+    ? durationUnits.find(([unit]) => seconds % unit === 0)[0] : 1;
+}
+function formatConfiguredDuration(seconds, unit) {
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) return "-";
+  const selected = durationUnits.find(([size]) => size === unit && seconds % size === 0);
+  return selected ? `${seconds / selected[0]}${selected[1]}` : formatDuration(seconds);
+}
 function formatDuration(seconds) {
   if (!Number.isSafeInteger(seconds) || seconds <= 0) return "-";
   let rest = seconds;
   const parts = [];
-  for (const [unit, label] of [[86400, "天"], [3600, "小时"], [60, "分钟"], [1, "秒"]]) {
+  for (const [unit, label] of durationUnits) {
     const count = Math.floor(rest / unit);
     if (count) parts.push(`${count}${label}`);
     rest %= unit;
@@ -610,7 +620,7 @@ function recordRules(decision, status) {
   const format = (rule, shorten) => {
     const chars = Array.from(String(rule.rule_id));
     const id = shorten && chars.length > 24 ? `${chars.slice(0, 21).join("")}...` : chars.join("");
-    return `${id} / ${rule.version ?? "-"}`;
+    return id;
   };
   const shown = entries.length > 2 ? `${format(entries[0], true)} 等 ${entries.length} 条` : entries.map((rule) => format(rule, true)).join(", ");
   return {text: shown, title: entries.map((rule) => format(rule, false)).join(", ")};
@@ -663,9 +673,14 @@ const failureStates = new Set(["blocked", "permission_denied", "denied", "unsupp
 function executionFailureReason(execution) {
   const reasons = {protected_target: "目标是管理员或机器人", permission_denied: "机器人权限不足或核验失败",
     recall_expired: "消息已超过可撤回时间", invalid_message: "消息标识无效", quote_expired: "引用消息已过期",
-    group_not_monitored: "本群监控未开启", rule_disabled: "规则已停用", rule_version_changed: "规则版本已变化",
+    group_not_monitored: "本群监控未开启", rule_disabled: "规则已停用", rule_version_changed: "规则配置已变化",
     rule_scope_mismatch: "规则与当前群不匹配", action_not_allowed: "规则不再允许此动作", invalid_duration: "禁言时长无效或超过上限",
-    duration_not_in_rule: "禁言时长不在规则设置中", intent_expired: "动作已过期", invalid_expiry: "动作到期时间无效"};
+     duration_not_in_rule: "禁言时长不在规则设置中", intent_expired: "动作已过期", invalid_expiry: "动作到期时间无效",
+     cumulative_mute_held: "已计入违规, 未执行 QQ 禁言", cumulative_not_counted: "该消息不在本次累计范围内",
+     invalid_cumulative_count: "计数已撤销或与执行记录不符", already_muted: "成员已被禁言, 未更改现有禁言",
+     mute_status_unavailable: "无法确认 QQ 禁言状态, 未执行禁言", earlier_mute_unresolved: "前一次禁言结果尚未确认",
+     mute_status_changed: "禁言状态已变化, 未再次设置",
+     mute_limit_reached: "剩余禁言已达到 QQ 的 30 天上限, 未延长"};
   let reason = Object.hasOwn(reasons, execution.reason_code) ? reasons[execution.reason_code] : "";
   if (!reason && String(execution.platform_code) === "40103004") reason = "目标是管理员或机器人";
   if (!reason && execution.status === "unsupported") reason = "当前版本不支持该动作";
@@ -836,7 +851,7 @@ function renderRecords(rows, append = false, update = false) {
     tr.setAttribute("aria-label", allGroups() ? `查看 ${groupLabel} 的消息 ${messageId} 的详情` : `查看消息 ${messageId} 的详情`);
     for (const [index, value] of [compactTime(timestamp), row.status, reason, rules.text, latency].entries()) {
       const cell = document.createElement("td");
-      cell.setAttribute("data-label", ["时间", "结果", "理由摘要", "规则 ID / 版本", "模型延迟"][index]);
+      cell.setAttribute("data-label", ["时间", "结果", "理由摘要", "规则 ID", "模型延迟"][index]);
       if (index === 1) {
         const badge = document.createElement("span");
         const [label, tone] = recordStatus(row);
@@ -904,7 +919,8 @@ function renderRecords(rows, append = false, update = false) {
       item.appendChild(heading);
       if (failureStates.has(state)) item.appendChild(recordElement("p", "record-action-note", `原因: ${executionFailureReason(action.execution)}`));
       if (action.kind === "mute" && state === "succeeded" && action.execution.expires_at) {
-        item.appendChild(recordElement("p", "record-action-note", `到期时间: ${localTimeFor(action.execution.expires_at)}`));
+        const applied = action.execution.history?.findLast((attempt) => attempt.status === "succeeded");
+        item.appendChild(recordElement("p", "record-action-note", `到期时间: ${localTimeFor(applied?.expires_at || action.execution.expires_at)}`));
       }
       const notice = action.execution?.notice;
       if (notice) {
@@ -914,25 +930,27 @@ function renderRecords(rows, append = false, update = false) {
         item.appendChild(recordElement("p", "record-action-note", `群提示: ${parts.join(" / ")}`));
       }
       if (action.mode === "confirm" && state === "pending_confirm") {
-        const progress = recordElement("ol", "action-progress");
-        for (const [label, stage] of [["判定完成", "done"], ["待确认", "current"], ["执行结果尚未产生", "future"]]) {
+         const cumulative = action.execution.reason_code === "cumulative_mute_on_confirmation";
+         const progress = recordElement("ol", "action-progress");
+         for (const [label, stage] of [["判定完成", "done"], ["待确认", "current"], [cumulative ? "确认时计入并计算禁言时长" : "执行结果尚未产生", "future"]]) {
           const step = recordElement("li", "", label);
           step.setAttribute("data-state", stage);
           progress.appendChild(step);
         }
         item.appendChild(progress);
-        const button = recordElement("button", "secondary", `执行${Object.hasOwn(actionNames, action.kind) ? actionNames[action.kind] : action.kind}`);
+         const button = recordElement("button", "secondary", cumulative ? "确认并尝试禁言" : `执行${Object.hasOwn(actionNames, action.kind) ? actionNames[action.kind] : action.kind}`);
         button.type = "button";
         button.addEventListener("click", async () => {
           button.disabled = true;
-          try {
-            const result = await bridge.apiPost("execute-action", {intent_id: action.execution.id});
-            const feedback = {succeeded: ["动作已执行.", "success"], failed: ["动作执行失败, 请查看记录.", "error"],
+           try {
+             const result = await bridge.apiPost(cumulative ? "confirm-pending-mute" : "execute-action", {intent_id: action.execution.id});
+             const feedback = {succeeded: ["动作已执行.", "success"], failed: ["动作执行失败, 请查看记录.", "error"],
               blocked: ["动作无法执行, 请查看记录.", "error"], permission_denied: ["权限不足, 动作未执行.", "error"],
               unknown: ["执行结果不明, 请核查后再操作.", "warning"], review: ["动作需复核, 请查看记录.", "warning"],
               not_claimed: ["动作未执行, 请查看记录.", "warning"]};
             const [message, tone] = feedback[result?.status] || ["执行状态未知, 请查看记录.", "warning"];
-            showFeedback(message, tone);
+             showFeedback(message, tone);
+             if (cumulative) refreshVisibleRecords();
           } catch (error) { button.disabled = false; feedbackError(error); }
         });
         item.appendChild(button);
@@ -941,6 +959,33 @@ function renderRecords(rows, append = false, update = false) {
     }
     actionSection.appendChild(actions.length ? actionList : recordElement("p", "record-detail-muted", "暂无动作信息."));
     process.appendChild(actionSection);
+    if (Number.isSafeInteger(row.violation_count?.ordinal)) {
+      const section = recordElement("section", "record-detail-section");
+      section.appendChild(recordElement("h3", "", "违规累计"));
+      const showCount = (count) => {
+        const revoked = count.revoked_at_us != null;
+        note.textContent = `${revoked ? "已撤销 / " : ""}计入时第 ${count.ordinal} 次 / 计算时长 ${formatDuration(count.duration_seconds)}`;
+        revoke.hidden = revoked;
+        audit.hidden = !revoked;
+        if (revoked) audit.textContent = `撤销: ${localTimeFor(count.revoked_at_us / 1000)} / ${count.revoked_by}`;
+      };
+      const note = recordElement("p", "");
+      const audit = recordElement("p", "record-detail-muted");
+      const revoke = recordElement("button", "secondary", "撤销");
+      revoke.type = "button";
+      revoke.setAttribute("aria-label", "撤销本次违规计数");
+      revoke.addEventListener("click", async () => {
+        revoke.disabled = true;
+        try {
+          const result = await bridge.apiPost("revoke-violation-count", {...recordScope(row), message_id: messageId});
+          showCount(result);
+          showFeedback("已撤销本次计数, 不会解除禁言.", "success");
+        } catch (error) { revoke.disabled = false; feedbackError(error, "撤销计数失败"); }
+      });
+      showCount(row.violation_count);
+      for (const child of [note, audit, revoke]) section.appendChild(child);
+      process.appendChild(section);
+    }
     const events = Array.isArray(row.events) ? row.events : [];
     const timeline = recordElement("section", "record-detail-section");
     timeline.appendChild(recordElement("h3", "", "判定过程"));
@@ -1521,7 +1566,7 @@ function addAction(initial = {}) {
   const durationLabel = document.createElement("label");
   durationLabel.textContent = "禁言时长模式";
   const duration = document.createElement("select");
-  for (const [value, label] of [["strict", "严格映射"], ["autonomous", "模型提出时长"]]) addOption(duration, value, label);
+   for (const [value, label] of [["strict", "严格映射"], ["autonomous", "模型提出时长"], ["cumulative", "按违规次数累计"]]) addOption(duration, value, label);
   duration.value = initial.duration_mode || "strict";
   durationLabel.appendChild(duration);
   const mappingLabel = document.createElement("div");
@@ -1535,7 +1580,7 @@ function addAction(initial = {}) {
   mapping.className = "severity-list";
   const mappingRows = [];
   const updateColor = () => updateActionColor(row, type, mode, template, duration, mappingRows);
-  function addSeverity(level = "", seconds = "") {
+  function addSeverity(level = "", seconds = "", savedUnit) {
     const entry = document.createElement("div");
     entry.className = "severity-row";
     const levelLabel = document.createElement("label");
@@ -1550,14 +1595,13 @@ function addAction(initial = {}) {
     secondsInput.type = "number";
     secondsInput.min = "1";
     secondsInput.step = "1";
-    const units = [[86400, "天"], [3600, "小时"], [60, "分钟"], [1, "秒"]];
-    const initialUnit = Number.isSafeInteger(seconds) && seconds > 0 ? units.find(([size]) => seconds % size === 0)[0] : 1;
+    const initialUnit = savedUnit ?? defaultDurationUnit(seconds);
     secondsInput.value = String(seconds === "" ? "" : seconds / initialUnit);
     secondsLabel.appendChild(secondsInput);
     const unitLabel = document.createElement("label");
     unitLabel.textContent = "单位";
     const unitInput = document.createElement("select");
-    for (const [size, label] of units) addOption(unitInput, String(size), label);
+    for (const [size, label] of durationUnits) addOption(unitInput, String(size), label);
     unitInput.value = String(initialUnit);
     unitLabel.appendChild(unitInput);
     const removeSeverity = document.createElement("button");
@@ -1573,18 +1617,109 @@ function addAction(initial = {}) {
     mappingRows.push(record);
     mapping.appendChild(entry);
   }
-  for (const [level, seconds] of Object.entries(initial.severity_seconds ?? {})) addSeverity(level, seconds);
+  for (const [level, seconds] of Object.entries(initial.severity_seconds ?? {})) {
+    addSeverity(level, seconds, Object.hasOwn(initial.severity_units || {}, level) ? initial.severity_units[level] : undefined);
+  }
   const addSeverityButton = document.createElement("button");
   addSeverityButton.type = "button";
   addSeverityButton.textContent = "添加级别";
   addSeverityButton.addEventListener("click", () => { addSeverity(); clearPreview(); updateColor(); });
-  for (const child of [mappingTitle, mapping, addSeverityButton, mappingHelp]) mappingLabel.appendChild(child);
+   for (const child of [mappingTitle, mapping, addSeverityButton, mappingHelp]) mappingLabel.appendChild(child);
+   const cumulative = document.createElement("div");
+   cumulative.className = "severity-editor cumulative-mute-fields";
+  const windowField = document.createElement("div");
+  windowField.className = "cumulative-window-field";
+  const windowLabel = document.createElement("label");
+  windowLabel.textContent = "统计窗口";
+  const windowRow = document.createElement("div");
+  windowRow.className = "cumulative-window-row";
+  const windowDays = document.createElement("input");
+  windowDays.id = `cumulative-window-${actionId}`;
+  windowDays.type = "number";
+  windowDays.min = "1"; windowDays.step = "1";
+  windowLabel.setAttribute("for", windowDays.id);
+  const windowUnit = document.createElement("select");
+  windowUnit.setAttribute("aria-label", "统计窗口单位");
+  for (const [seconds, label] of durationUnits) addOption(windowUnit, String(seconds), label);
+  const initialWindow = initial.window_seconds;
+  const initialUnit = initial.window_unit ?? (initialWindow ? defaultDurationUnit(initialWindow) : 86400);
+  windowUnit.value = String(initialUnit);
+  windowDays.value = initialWindow ? String(initialWindow / initialUnit) : "";
+  const windowHelp = document.createElement("p");
+  windowHelp.id = `cumulative-window-help-${actionId}`;
+  windowHelp.className = "field-help";
+  windowHelp.textContent = "只统计最近这段时间内计入的违规, 更早的不算.";
+  windowDays.setAttribute("aria-describedby", windowHelp.id);
+  windowUnit.setAttribute("aria-describedby", windowHelp.id);
+  for (const node of [windowDays, windowUnit]) windowRow.appendChild(node);
+  for (const node of [windowLabel, windowRow, windowHelp]) windowField.appendChild(node);
+  const tiersTitle = document.createElement("strong");
+  tiersTitle.textContent = "禁言阶梯";
+  const tierList = document.createElement("div");
+  tierList.className = "cumulative-tier-list";
+  const tierRows = [];
+  const cumulativeHelp = document.createElement("p");
+  cumulativeHelp.className = "field-help";
+  cumulativeHelp.id = `cumulative-tiers-help-${actionId}`;
+  cumulativeHelp.textContent = "按违规次数依次设置时长, 后一档不能短于前一档. 超出档数后使用最后一档. 成员已有禁言时, 本次时长接在原到期时间后.";
+  const addTierButton = document.createElement("button");
+  addTierButton.type = "button";
+  addTierButton.textContent = "添加档位";
+  function refreshTierLabels() {
+    tierRows.forEach(({label, unit, removeTier}, index) => {
+      label.textContent = `第 ${index + 1} 次违规`;
+      unit.setAttribute("aria-label", `第 ${index + 1} 档禁言单位`);
+      removeTier.setAttribute("aria-label", `删除第 ${index + 1} 档`);
+      removeTier.disabled = tierRows.length === 1;
+    });
+    addTierButton.disabled = tierRows.length >= 30;
+  }
+  let tierSequence = 0;
+  function addTier(seconds, savedUnit) {
+    const entry = document.createElement("div");
+    entry.className = "cumulative-tier-row";
+    const label = document.createElement("label");
+    const amount = document.createElement("input");
+    amount.id = `cumulative-tier-${actionId}-${++tierSequence}`;
+    amount.type = "number";
+    amount.min = amount.step = "1";
+    amount.setAttribute("aria-describedby", cumulativeHelp.id);
+    label.setAttribute("for", amount.id);
+    const unit = document.createElement("select");
+    for (const [size, text] of durationUnits) addOption(unit, String(size), text);
+    const selectedUnit = savedUnit ?? (seconds === undefined ? 60 : defaultDurationUnit(seconds));
+    unit.value = String(selectedUnit);
+    amount.value = seconds === undefined ? "" : String(seconds / selectedUnit);
+    const removeTier = document.createElement("button");
+    removeTier.type = "button";
+    removeTier.textContent = "删除";
+    const tier = {label, amount, unit, removeTier};
+    removeTier.addEventListener("click", () => {
+      tierRows.splice(tierRows.indexOf(tier), 1);
+      entry.remove();
+      refreshTierLabels();
+      clearPreview();
+    });
+    for (const control of [amount, unit]) control.addEventListener("input", clearPreview);
+    for (const node of [label, amount, unit, removeTier]) entry.appendChild(node);
+    tierList.appendChild(entry);
+    tierRows.push(tier);
+    refreshTierLabels();
+  }
+  (initial.tiers_seconds || []).forEach((seconds, index) => addTier(seconds, initial.tier_units?.[index]));
+  if (!tierRows.length) addTier();
+  addTierButton.addEventListener("click", () => { addTier(); clearPreview(); tierRows.at(-1).amount.focus(); });
+  for (const node of [windowField, tiersTitle, tierList, addTierButton, cumulativeHelp]) cumulative.appendChild(node);
+  const sharedCount = sharedCountControl();
+  for (const node of [windowDays, windowUnit]) node.addEventListener("input", clearPreview);
   const remove = document.createElement("button");
   remove.type = "button"; remove.textContent = "删除动作";
   const updateVisibility = (animate = true) => {
     setPanelVisibility(templateLabel, type.value === "reply", {animate});
     setPanelVisibility(durationLabel, type.value === "mute", {animate});
     setPanelVisibility(mappingLabel, type.value === "mute" && duration.value === "strict", {animate});
+    setPanelVisibility(cumulative, type.value === "mute" && duration.value === "cumulative", {animate});
+    sharedCount.update(type.value === "mute", duration.value === "cumulative");
   };
   for (const field of [type, mode, template, duration]) {
     field.addEventListener("input", clearPreview);
@@ -1613,7 +1748,8 @@ function addAction(initial = {}) {
   order.appendChild(number);
   header.appendChild(order);
   header.appendChild(handle);
-  const item = {row, type, mode, inheritOption, template, duration, mappingRows, number, handle, up, down};
+  const item = {row, type, mode, inheritOption, template, duration, mappingRows, windowDays, windowUnit, tierRows,
+    initial, number, handle, up, down, updateVisibility};
   remove.addEventListener("click", () => { stopActionFollow(); cancelActionDrag(); actionRows = actionRows.filter((entry) => entry !== item); row.remove(); updateActionOrder(); clearPreview(); });
   up.addEventListener("click", () => { cancelActionDrag(); moveAction(item, actionRows.indexOf(item) - 1, up, true); });
   down.addEventListener("click", () => { cancelActionDrag(); moveAction(item, actionRows.indexOf(item) + 1, down, true); });
@@ -1625,7 +1761,7 @@ function addAction(initial = {}) {
     moveAction(item, actionRows.indexOf(item) + (event.key === "ArrowUp" ? -1 : 1), handle, true);
   });
   row.appendChild(header);
-  for (const child of [type, mode, templateLabel, durationLabel, mappingLabel, remove, up, down]) row.appendChild(child);
+   for (const child of [type, mode, templateLabel, durationLabel, mappingLabel, remove, up, down]) row.appendChild(child);
   const typeLabel = document.createElement("label");
   typeLabel.className = "action-type-label";
   typeLabel.setAttribute("for", type.id);
@@ -1634,8 +1770,10 @@ function addAction(initial = {}) {
   modeLabel.className = "action-mode-label";
   modeLabel.setAttribute("for", mode.id);
   modeLabel.textContent = "执行方式";
-  row.appendChild(typeLabel);
-  row.appendChild(modeLabel);
+   row.appendChild(typeLabel);
+   row.appendChild(modeLabel);
+  row.appendChild(cumulative);
+  row.appendChild(sharedCount.node);
   el("action-list").appendChild(row);
   actionRows.push(item);
   updateActionOrder();
@@ -1652,14 +1790,48 @@ function setActions(actions) {
   for (const action of actions) addAction(action);
 }
 function readActions() {
-  return actionRows.map(({type, mode, template, duration, mappingRows}) => {
+  return actionRows.map(({type, mode, template, duration, mappingRows, windowDays, windowUnit, tierRows, initial}) => {
     if (!["reply", "mute", "recall"].includes(type.value)) { type.focus?.(); throw new Error("请选择动作类型"); }
     const result = {type: type.value, mode: mode.value};
     if (type.value === "reply") result.template = template.value;
     if (type.value === "mute") {
-      result.duration_mode = duration.value;
+       result.duration_mode = duration.value;
+       if (duration.value === "cumulative") {
+         const amount = Number(windowDays.value);
+         const windowSize = Number(windowUnit.value);
+         const seconds = amount * windowSize;
+         if (!Number.isInteger(amount) || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 365 * 86400) {
+           windowDays.focus?.();
+           throw new Error("统计窗口须为 1 秒至 365 天, 请填写整数");
+         }
+         const values = [];
+         const units = [];
+         for (const tier of tierRows) {
+           const amount = Number(tier.amount.value);
+           const unit = Number(tier.unit.value);
+           const total = amount * unit;
+           if (!Number.isSafeInteger(amount) || amount < 1 || !Number.isSafeInteger(total) || total > 2592000) {
+             tier.amount.focus?.();
+             throw new Error("每档禁言时长须为正整数, 最长 30 天");
+           }
+           if (total < (values.at(-1) ?? 0)) {
+             tier.amount.focus?.();
+             throw new Error("后一档禁言时长不能短于前一档");
+           }
+           values.push(total);
+           units.push(unit);
+         }
+         result.window_seconds = seconds;
+         result.tiers_seconds = values;
+         if (initial.window_unit !== undefined || initial.window_seconds !== seconds
+             || windowSize !== defaultDurationUnit(seconds)) result.window_unit = windowSize;
+         if (initial.tier_units || initial.tiers_seconds?.length !== values.length || values.some((seconds, index) =>
+           initial.tiers_seconds[index] !== seconds || units[index] !== defaultDurationUnit(seconds))) result.tier_units = units;
+         return result;
+       }
       const mapping = {};
       if (duration.value === "strict") {
+        const units = Object.create(null);
         if (!mappingRows.length) throw new Error("请至少添加一个严重级别");
         for (const {levelInput, secondsInput, unitInput} of mappingRows) {
           const level = levelInput.value;
@@ -1668,7 +1840,13 @@ function readActions() {
           if (!level.trim()) throw new Error("请填写级别名称");
           if (Object.hasOwn(mapping, level)) throw new Error("级别名称不能重复");
           if (!secondsInput.value.trim() || !Number.isSafeInteger(amount) || amount <= 0 || !Number.isSafeInteger(seconds) || seconds > 2592000) throw new Error("禁言时长须为正整数, 最长 30 天");
-          Object.defineProperty(mapping, level, {value: seconds, enumerable: true});
+           Object.defineProperty(mapping, level, {value: seconds, enumerable: true});
+          units[level] = Number(unitInput.value);
+         }
+        if (initial.severity_units || Object.entries(mapping).some(([level, seconds]) =>
+          !Object.hasOwn(initial.severity_seconds || {}, level) ||
+          initial.severity_seconds[level] !== seconds || units[level] !== defaultDurationUnit(seconds))) {
+          result.severity_units = units;
         }
       }
       result.severity_seconds = mapping;
@@ -1690,7 +1868,7 @@ el("preview").addEventListener("click", async () => {
     if (!scope.platform_id || !scope.group_id) throw new Error("请选择所属群");
     if (!allGroups() && JSON.stringify(group()) !== JSON.stringify(scope)) throw new Error("请返回原群编辑, 或重新选择当前群的规则");
     const version = Number(el("version").value);
-    if (!Number.isSafeInteger(version) || version < 0) throw new Error("版本必须是非负整数");
+    if (!Number.isSafeInteger(version) || version < 0) throw new Error("规则状态无效, 请刷新页面后重试");
     const priority = Number(el("priority").value);
     if (!Number.isInteger(priority) || priority < -2147483648 || priority > 2147483647) throw new Error("优先级必须是 32 位整数");
     const fields = {...scope, rule_id: el("rule").value.trim(), expected_version: version,
@@ -1710,6 +1888,7 @@ el("preview").addEventListener("click", async () => {
         el("rule-group-picker").hidden = true;
         el("new-rule-enabled").hidden = true;
         el("rule-form-title").textContent = "编辑规则";
+        for (const action of actionRows) action.updateVisibility(false);
       }
       clearPreview();
       const completedRevision = revision;
@@ -2075,9 +2254,13 @@ function describeRuleAction(action) {
   let extra = "";
   if (action.type === "mute") {
     if (action.duration_mode === "strict") {
-      const levels = Object.entries(action.severity_seconds || {}).map(([level, seconds]) => `${level}: ${formatDuration(seconds)}`);
+      const levels = Object.entries(action.severity_seconds || {}).map(([level, seconds]) =>
+        `${level}: ${formatConfiguredDuration(seconds, action.severity_units?.[level])}`);
       extra = ` (${levels.join(", ") || "未配置级别"})`;
-    } else extra = action.duration_mode === "autonomous" ? " (模型提出时长)" : " (时长模式未知)";
+     } else if (action.duration_mode === "cumulative") {
+       const tiers = (action.tiers_seconds || []).map((seconds, index) => formatConfiguredDuration(seconds, action.tier_units?.[index]));
+       extra = ` (${formatConfiguredDuration(action.window_seconds, action.window_unit)}内累计: ${tiers.join(" / ")})`;
+     } else extra = action.duration_mode === "autonomous" ? " (模型提出时长)" : " (时长模式未知)";
   } else if (action.type === "reply") extra = ` (${action.template ?? ""})`;
   return `${name} / ${mode}${extra}`;
 }
@@ -2309,11 +2492,6 @@ async function loadCurrentRules() {
       toggleLabel.appendChild(toggle);
       meta.appendChild(title);
       meta.appendChild(toggleLabel);
-      const version = document.createElement("span");
-      version.className = "rule-version";
-      version.textContent = `当前版本: 第 ${rule.version} 版`;
-      version.title = "每次保存都会生成新版本";
-      meta.appendChild(version);
       const text = document.createElement("p");
       text.textContent = rule.text;
       const currentConfig = document.createElement("section");
@@ -2363,7 +2541,7 @@ async function loadCurrentRules() {
       const historyButton = document.createElement("button");
       historyButton.type = "button";
       historyButton.className = "rule-history-toggle";
-      historyButton.textContent = "历史版本";
+      historyButton.textContent = "修改记录";
       historyButton.disabled = saving;
       historyButton.setAttribute("aria-expanded", "false");
       const historyPanel = document.createElement("div");
@@ -2422,7 +2600,7 @@ async function loadCurrentRules() {
           historyPanel.textContent = "";
           const loading = document.createElement("p");
           loading.className = "history-loading is-loading";
-          loading.textContent = "正在读取历史版本...";
+          loading.textContent = "正在读取修改记录...";
           historyPanel.appendChild(loading);
           historyPanel.setAttribute("aria-busy", "true");
           setPanelVisibility(historyPanel, true, {force: true});
@@ -2433,26 +2611,64 @@ async function loadCurrentRules() {
             if (requestRevision !== panelRevision || scopeRevision !== historyRevision) return;
             updateVisiblePanel(historyPanel, () => {
               historyPanel.textContent = "";
-              if (history.some((entry) => entry.version > rule.version)) { historyPanel.textContent = "规则已更新, 请刷新页面后查看历史版本."; return; }
-              const older = history.filter((entry) => entry.version < rule.version).reverse();
-              if (!older.length) { historyPanel.textContent = "暂无历史版本."; return; }
+              if (history.some((entry) => entry.version > rule.version)) { historyPanel.textContent = "规则已更新, 请刷新页面后查看修改记录."; return; }
+              const older = history.slice().reverse();
+              if (!older.length) { historyPanel.textContent = "暂无修改记录."; return; }
               const hint = document.createElement("p");
               hint.className = "history-hint";
-              hint.textContent = "历史版本仅供查看, 不参与判定.";
+              hint.textContent = "修改记录仅供查看, 判定使用当前配置.";
               historyPanel.appendChild(hint);
               for (const entry of older) {
                 const section = document.createElement("section");
                 section.className = "history-entry";
+                const header = document.createElement("div");
+                header.className = "history-entry-header";
                 const heading = document.createElement("strong");
-                heading.textContent = `第 ${entry.version} 版`;
-                const info = document.createElement("p");
-                info.textContent = `${localTimeFor(entry.created_at)} / ${entry.modified_by || "-"} / 保存时: ${entry.enabled ? "启用" : "停用"} / 优先级 ${entry.priority ?? 0}`;
+                heading.textContent = entry.version === history[0].version ? "创建规则" : "修改规则";
+                const time = document.createElement("time");
+                time.textContent = localTimeFor(entry.created_at);
+                header.appendChild(heading);
+                header.appendChild(time);
+                const info = document.createElement("div");
+                info.className = "history-entry-meta";
+                for (const value of [`操作人: ${entry.modified_by || "-"}`, entry.enabled ? "已启用" : "已停用", `优先级: ${entry.priority ?? 0}`]) {
+                  const item = document.createElement("span");
+                  item.textContent = value;
+                  info.appendChild(item);
+                }
+                const body = document.createElement("div");
+                body.className = "history-entry-body";
+                const textLabel = document.createElement("span");
+                textLabel.className = "history-entry-label";
+                textLabel.textContent = "规则内容";
                 const text = document.createElement("p");
+                text.className = "history-entry-text";
                 text.textContent = entry.text;
-                const actions = document.createElement("p");
-                const update = () => { actions.textContent = (entry.actions || []).map((action, index) => `${index + 1}. ${describeRuleAction(action)}`).join("\n") || "未配置动作"; };
-                update(); ruleDescriptions.push(update);
-                for (const child of [heading, info, text, actions]) section.appendChild(child);
+                const actionLabel = document.createElement("span");
+                actionLabel.className = "history-entry-label";
+                actionLabel.textContent = "处理动作";
+                const actions = document.createElement("ol");
+                actions.className = "rule-current-actions history-entry-actions";
+                if (Array.isArray(entry.actions) && entry.actions.length) {
+                  for (const [index, action] of entry.actions.entries()) {
+                    const line = document.createElement("li");
+                    const number = document.createElement("span");
+                    number.className = "rule-action-number";
+                    number.textContent = String(index + 1);
+                    const description = document.createElement("span");
+                    const update = () => { description.textContent = describeRuleAction(action); };
+                    update(); ruleDescriptions.push(update);
+                    line.appendChild(number);
+                    line.appendChild(description);
+                    actions.appendChild(line);
+                  }
+                } else {
+                  const empty = document.createElement("li");
+                  empty.textContent = "未配置动作";
+                  actions.appendChild(empty);
+                }
+                for (const child of [textLabel, text, actionLabel, actions]) body.appendChild(child);
+                for (const child of [header, info, body]) section.appendChild(child);
                 historyPanel.appendChild(section);
               }
             });
@@ -2913,6 +3129,455 @@ function showGroupOverrides() {
   el("group-settings-status").textContent = draft ? "有尚未保存的修改." : "";
   updateGroupModelFields();
   updateGroupSettingsHints();
+}
+const canShareCount = (rule) => rule?.actions?.some((action) => action.type === "mute" && action.duration_mode === "cumulative");
+function sharedCountButton(text, handle) {
+  const button = recordElement("button", "secondary", text);
+  button.type = "button";
+  button.addEventListener("click", handle);
+  return button;
+}
+function countGroupsFor(settings, scope) {
+  const overrides = settings?.group_overrides?.[`${scope.platform_id}/${scope.group_id}`] || {};
+  const legacy = overrides.shared_violation_rules || [];
+  return (overrides.shared_violation_groups || (legacy.length > 1 ? [{rule_ids: legacy}] : []))
+    .map((item) => ({name: item.name || "", rule_ids: [...item.rule_ids].sort()}));
+}
+function sharedCountControl() {
+  const section = recordElement("section", "shared-count-config");
+  section.setAttribute("aria-label", "共享计数");
+  const header = recordElement("div", "shared-count-heading");
+  const summary = recordElement("div", "shared-count-summary");
+  const editor = recordElement("div", "shared-count-editor");
+  editor.hidden = true;
+  let scope, ruleId, savedRule, cumulative;
+  let baseline = [];
+  let revision = 0;
+  let busy = false;
+  const toggle = sharedCountButton("编辑共享", () => editor.hidden ? open() : close());
+  toggle.setAttribute("aria-expanded", "false");
+  header.appendChild(recordElement("strong", "", "共享计数"));
+  header.appendChild(toggle);
+  for (const child of [header, summary, editor]) section.appendChild(child);
+  function showSummary() {
+    summary.textContent = "";
+    const item = baseline.find((group) => group.rule_ids.includes(ruleId));
+    if (!item) {
+      const message = !cumulative ? "选择按违规次数累计后可配置共享计数." :
+        !savedRule ? "先保存这条规则, 再设置共享计数." :
+        currentSettings ? "单独计数" : "共享状态待读取";
+      summary.appendChild(recordElement("p", "field-help", message));
+      return;
+    }
+    if (item.name) summary.appendChild(recordElement("strong", "", item.name));
+    summary.appendChild(recordElement("p", "field-help", cumulative ? `${item.rule_ids.length} 条规则同组` :
+      "已保留分组, 选择按违规次数累计后生效."));
+    summary.appendChild(memberList(item.rule_ids));
+  }
+  function memberList(ids, draggableRule) {
+    const list = recordElement("ul", "shared-count-members");
+    for (const id of ids) {
+      const item = recordElement("li", id === ruleId ? "shared-count-current" : "", id === ruleId ? `${id} (当前)` : id);
+      if (draggableRule) draggableRule(item, id);
+      list.appendChild(item);
+    }
+    return list;
+  }
+  function close(restoreFocus = true) {
+    revision += 1;
+    editor.hidden = true;
+    editor.textContent = "";
+    toggle.textContent = "编辑共享";
+    toggle.setAttribute("aria-expanded", "false");
+    summary.hidden = false;
+    if (restoreFocus && !section.hidden && !toggle.disabled) toggle.focus?.();
+  }
+  async function open() {
+    const request = ++revision;
+    toggle.textContent = "收起";
+    toggle.setAttribute("aria-expanded", "true");
+    editor.hidden = false;
+    const loading = recordElement("p", "field-help", "正在读取共享计数...");
+    loading.setAttribute("role", "status");
+    editor.textContent = "";
+    editor.appendChild(loading);
+    try {
+      const [rules, settings] = await Promise.all([bridge.apiGet("rules", scope), bridge.apiGet("settings")]);
+      if (request !== revision) return;
+      if (!Array.isArray(rules) || !settings || typeof settings.group_overrides !== "object") throw new Error("invalid data");
+      baseline = countGroupsFor(settings, scope);
+      showSummary();
+      if (!rules.some((rule) => rule.rule_id === ruleId && canShareCount(rule))) {
+        editor.textContent = "请先保存此规则的累计禁言动作.";
+        return;
+      }
+      drawEditor(rules);
+    } catch {
+      if (request !== revision) return;
+      editor.textContent = "";
+      editor.appendChild(sharedCountButton("读取失败, 重试", open));
+    }
+  }
+  function drawEditor(rules) {
+    editor.textContent = "";
+    summary.hidden = true;
+    let groups = baseline.map((item) => ({name: item.name, rule_ids: [...item.rule_ids]}));
+    const available = new Map(rules.filter(canShareCount).map((rule) => [rule.rule_id, rule]));
+    const initialTarget = {name: "", rule_ids: [ruleId]};
+    const newTarget = {name: "", rule_ids: []};
+    const owner = (id) => groups.find((item) => item.rule_ids.includes(id));
+    const defaultTarget = () => owner(ruleId) || (groups.length < 50 ? initialTarget : groups[0]) || null;
+    let active = defaultTarget();
+    let renameTarget = null;
+    let previous = null;
+    let released = new Set();
+    let dragged = null;
+    const selected = new Set();
+    const board = recordElement("div", "shared-count-board");
+    const searchLabel = recordElement("label", "", "搜索规则");
+    const search = recordElement("input", "");
+    search.type = "search";
+    search.placeholder = "规则标识或内容";
+    searchLabel.appendChild(search);
+    const picker = recordElement("div", "shared-count-picker");
+    const status = recordElement("p", "field-help");
+    status.setAttribute("role", "status");
+    const impact = recordElement("p", "field-help shared-count-impact");
+    const selection = recordElement("p", "field-help");
+    const targetInfo = recordElement("p", "shared-count-destination");
+    const draftState = recordElement("p", "field-help");
+    const groupTools = recordElement("div", "shared-count-group-tools");
+    const selectionBar = recordElement("div", "shared-count-selection");
+    const controls = recordElement("div", "shared-count-editor-actions");
+    const newGroup = sharedCountButton("新建组", () => {
+      active = active === newTarget ? defaultTarget() : newTarget;
+      renameTarget = null;
+      drawBoard();
+    });
+    const add = sharedCountButton("移入目标组", () => { move([...selected], active); focusSearch(); });
+    const ungroup = sharedCountButton("改为单独计数", () => { move([...selected], null); focusSearch(); });
+    const clearSelection = sharedCountButton("清除勾选", () => {
+      selected.clear();
+      drawPicker();
+      focusSearch();
+    });
+    const undo = sharedCountButton("撤回上一步", () => {
+      if (!previous || busy) return;
+      groups = previous.groups.map(({item, ids}) => { item.rule_ids = ids; return item; });
+      released = previous.released;
+      active = previous.active;
+      renameTarget = null;
+      previous = null;
+      status.textContent = "已撤回上一步分组操作.";
+      drawBoard();
+      focusSearch();
+    });
+    const save = sharedCountButton("保存分组", persist);
+    save.className = "primary";
+    const cancel = sharedCountButton("取消", () => close());
+    const identify = (item) => item.name.trim() || (item.rule_ids.length > 3
+      ? `${item.rule_ids.slice(0, 3).join(" / ")} 等 ${item.rule_ids.length} 条规则`
+      : item.rule_ids.join(" / ")) || "待添加规则";
+    const normalized = () => groups.map((item) => ({name: item.name.trim(), rule_ids: [...item.rule_ids].sort()}));
+    const focusSearch = () => search.focus?.({preventScroll: true});
+    const isNewTarget = (item) => item === initialTarget || item === newTarget;
+    const targetName = (item) => item === initialTarget ? "与当前规则成组" : item === newTarget ? "新建共享组" : identify(item);
+    function rememberMove() {
+      previous = {groups: groups.map((item) => ({item, ids: [...item.rule_ids]})), released: new Set(released), active};
+    }
+    function refreshButtons() {
+      const incomplete = groups.find((item) => item.rule_ids.length < 2);
+      const dirty = JSON.stringify(normalized()) !== JSON.stringify(baseline);
+      newGroup.disabled = busy || (active !== newTarget && (available.size < 2 || groups.length >= 50 || !!incomplete));
+      newGroup.textContent = active === newTarget ? "取消新组" : "新建组";
+      const movable = [...selected].filter((id) => available.has(id) && !active?.rule_ids.includes(id)).length;
+      const canAdd = !!active && movable > 0 && (active !== newTarget || movable >= 2);
+      const removable = [...selected].filter(owner).length;
+      add.disabled = busy || !canAdd;
+      ungroup.disabled = busy || !removable;
+      add.textContent = active === newTarget ? "用所选规则成组" :
+        active === initialTarget ? "与当前规则成组" : `移入目标组${canAdd ? ` (${movable})` : ""}`;
+      ungroup.textContent = removable ? `改为单独计数 (${removable})` : "改为单独计数";
+      targetInfo.textContent = active ? `移动目标: ${targetName(active)}` : "请选择移动目标";
+      selection.textContent = available.size < 2 ? "至少需要两条使用累计禁言的规则才能成组." :
+        selected.size ? `已选 ${selected.size} 条${active === newTarget && movable < 2
+          ? ", 至少勾选两条累计规则" : ""}` : "勾选规则后可批量移动";
+      clearSelection.hidden = !selected.size;
+      clearSelection.disabled = busy;
+      undo.hidden = !previous;
+      undo.disabled = busy;
+      save.disabled = busy || !!incomplete || !dirty;
+      save.textContent = busy ? "正在保存..." : "保存分组";
+      draftState.textContent = incomplete ? "新组还缺一条规则, 可继续拖入或撤回上一步." :
+        dirty ? "分组有未保存的修改" : "分组与规则正文分开保存";
+      toggle.textContent = dirty ? "放弃修改" : "收起";
+      const leftovers = [...released].filter((id) => !owner(id) && baseline.some((item) => item.rule_ids.includes(id))).sort();
+      impact.textContent = leftovers.length ? `保存后将单独计数: ${leftovers.join(" / ")}.` : "";
+      cancel.disabled = busy;
+      toggle.disabled = busy || !savedRule || !cumulative;
+      search.disabled = busy;
+    }
+    function move(ids, target) {
+      if (busy) return;
+      const moving = ids.filter((id) => target ? available.has(id) && !target.rule_ids.includes(id) : owner(id));
+      if (!moving.length) return;
+      rememberMove();
+      if (isNewTarget(target)) target = {name: "", rule_ids: [...target.rule_ids]};
+      let dissolved = 0;
+      groups = groups.filter((item) => {
+        if (item === target) return true;
+        const kept = item.rule_ids.filter((id) => !moving.includes(id));
+        if (kept.length === item.rule_ids.length) return true;
+        if (kept.length < 2) {
+          if (item.rule_ids.length >= 2) { dissolved += 1; kept.forEach((id) => released.add(id)); }
+          return false;
+        }
+        item.rule_ids = kept;
+        return true;
+      });
+      if (target) {
+        target.rule_ids = [...target.rule_ids, ...moving].sort();
+        if (!groups.includes(target)) groups.push(target);
+      } else moving.forEach((id) => released.add(id));
+      active = target || (groups.includes(active) ? active : defaultTarget());
+      if (!groups.includes(renameTarget)) renameTarget = null;
+      for (const id of ids) selected.delete(id);
+      status.textContent = `${moving.length} 条规则${target ? "已移入草稿分组" : "已改为单独计数"}.${
+        dissolved ? ` 有 ${dissolved} 个原组不足两条规则, 已在草稿中解散.` : ""}`;
+      drawBoard();
+    }
+    function draggableRule(element, id) {
+      if (!available.has(id)) return;
+      element.draggable = true;
+      element.addEventListener("dragstart", (event) => {
+        if (busy || !event.dataTransfer) { event.preventDefault(); return; }
+        dragged = id;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", id);
+      });
+      element.addEventListener("dragend", () => {
+        dragged = null;
+        for (const slot of board.querySelectorAll(".shared-count-drop-active")) slot.classList.remove("shared-count-drop-active");
+      });
+    }
+    function dropZone(element, target) {
+      const valid = () => !busy && dragged !== null &&
+        (target ? available.has(dragged) && !target.rule_ids.includes(dragged) : !!owner(dragged));
+      element.addEventListener("dragover", (event) => {
+        if (!valid()) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        element.classList.add("shared-count-drop-active");
+      });
+      element.addEventListener("dragleave", (event) => {
+        if (!element.contains(event.relatedTarget)) element.classList.remove("shared-count-drop-active");
+      });
+      element.addEventListener("drop", (event) => {
+        if (!valid()) return;
+        event.preventDefault();
+        const id = dragged;
+        dragged = null;
+        move([id], target);
+      });
+    }
+    function drawPicker(resetScroll = false) {
+      const scroll = resetScroll ? 0 : picker.scrollTop;
+      picker.textContent = "";
+      const query = search.value.trim().toLowerCase();
+      const options = new Map(available);
+      for (const group of groups) for (const id of group.rule_ids) if (!options.has(id)) options.set(id, null);
+      for (const [id, rule] of options) {
+        if (query && !`${id} ${rule?.text || ""}`.toLowerCase().includes(query)) continue;
+        const label = recordElement("label", "shared-count-option");
+        const input = recordElement("input", "");
+        input.type = "checkbox";
+        input.checked = selected.has(id);
+        input.disabled = busy;
+        input.addEventListener("change", () => { if (input.checked) selected.add(id); else selected.delete(id); refreshButtons(); });
+        const text = recordElement("span", "shared-count-option-copy");
+        const name = recordElement("strong", "", id === ruleId ? `${id} (当前)` : id);
+        const group = owner(id);
+        text.appendChild(name);
+        if (rule?.text) {
+          const excerpt = rule.text.replace(/\s+/g, " ").trim();
+          const description = recordElement("span", "field-help shared-count-description", excerpt);
+          description.title = excerpt;
+          text.appendChild(description);
+        }
+        const state = [group ? `同组: ${identify(group)}` : "单独计数",
+          !rule ? "未使用累计禁言" : rule.enabled === false ? "规则已停用" : ""].filter(Boolean).join(" · ");
+        label.appendChild(input);
+        label.appendChild(text);
+        label.appendChild(recordElement("span", "field-help shared-count-rule-state", state));
+        draggableRule(text, id);
+        picker.appendChild(label);
+      }
+      if (!picker.children.length) picker.appendChild(recordElement("p", "field-help shared-count-empty", "没有匹配的规则."));
+      picker.scrollTop = scroll;
+      refreshButtons();
+    }
+    function drawBoard() {
+      const scroll = board.querySelector(".shared-count-lanes")?.scrollTop || 0;
+      board.textContent = "";
+      const offerInitial = !owner(ruleId) && groups.length < 50 && !groups.some((item) => item.rule_ids.length < 2);
+      if (active === initialTarget && !offerInitial) active = owner(ruleId) || groups[0] || null;
+      const targets = [owner(ruleId), ...groups].filter((item, index, all) => item && all.indexOf(item) === index);
+      if (offerInitial) targets.unshift(initialTarget);
+      if (active === newTarget) targets.unshift(newTarget);
+      const lanes = recordElement("div", "shared-count-lanes");
+      board.appendChild(lanes);
+      for (const item of targets) {
+        const lane = recordElement("div", "shared-count-lane");
+        lane.classList.toggle("shared-count-target", item === active);
+        const caption = item.name.trim() || (isNewTarget(item) ? targetName(item) :
+          item.rule_ids.length >= 2 ? `${item.rule_ids.length} 条规则` : "再添加一条规则");
+        const pick = sharedCountButton("", () => {
+          if (active === item) return;
+          active = item;
+          renameTarget = null;
+          drawBoard();
+          board.querySelector('[aria-pressed="true"]')?.focus({preventScroll: true});
+        });
+        pick.className = "secondary shared-count-pick";
+        pick.setAttribute("aria-label", `移动目标: ${targetName(item)}`);
+        pick.setAttribute("aria-pressed", String(item === active));
+        pick.disabled = busy;
+        const heading = recordElement("strong", "", caption);
+        pick.appendChild(heading);
+        pick.appendChild(recordElement("span", "shared-count-pick-state", item === active ? "当前目标" : "选为目标"));
+        lane.appendChild(pick);
+        if (item.rule_ids.length) lane.appendChild(memberList(item.rule_ids, draggableRule));
+        else lane.appendChild(recordElement("p", "field-help", "拖入或勾选至少两条累计规则."));
+        dropZone(lane, item);
+        lanes.appendChild(lane);
+      }
+      lanes.scrollTop = scroll;
+      if (groups.length) {
+        const solo = recordElement("div", "shared-count-lane shared-count-solo");
+        solo.appendChild(recordElement("strong", "", "单独计数"));
+        solo.appendChild(recordElement("span", "field-help", "拖到这里移出分组"));
+        dropZone(solo, null);
+        board.appendChild(solo);
+      }
+      drawGroupTools();
+      drawPicker();
+    }
+    function drawGroupTools() {
+      groupTools.textContent = "";
+      if (!groups.includes(active)) return;
+      const item = active;
+      const rename = sharedCountButton(item === renameTarget ? "收起组名" : "编辑组名", () => {
+        renameTarget = renameTarget === item ? null : item;
+        drawGroupTools();
+        groupTools.querySelector(renameTarget ? "input" : "button")?.focus({preventScroll: true});
+      });
+      rename.setAttribute("aria-expanded", String(item === renameTarget));
+      rename.disabled = busy;
+      const dissolve = sharedCountButton(item.rule_ids.length < 2 ? "移除未完成组" : "解散此组", () => {
+        selected.clear();
+        if (item.rule_ids.length >= 2) move(item.rule_ids, null);
+        else if (previous?.groups.every(({item: old}) => old !== item)) undo.click();
+        else move(item.rule_ids, null);
+        focusSearch();
+      });
+      dissolve.disabled = busy;
+      groupTools.appendChild(rename);
+      groupTools.appendChild(dissolve);
+      if (item === renameTarget) {
+        const label = recordElement("label", "", "组名 (选填)");
+        const name = recordElement("input", "");
+        name.value = item.name;
+        name.maxLength = 60;
+        name.disabled = busy;
+        name.addEventListener("input", () => {
+          item.name = name.value;
+          const selectedGroup = board.querySelector('[aria-pressed="true"]');
+          selectedGroup.querySelector("strong").textContent = item.name.trim() ||
+            (item.rule_ids.length >= 2 ? `${item.rule_ids.length} 条规则` : "再添加一条规则");
+          selectedGroup.setAttribute("aria-label", `移动目标: ${targetName(item)}`);
+          drawPicker();
+        });
+        label.appendChild(name);
+        groupTools.appendChild(label);
+      }
+    }
+    async function persist() {
+      if (save.disabled) return;
+      const submitted = normalized();
+      const request = revision;
+      const targetScope = scope;
+      const names = submitted.map((item) => item.name).filter(Boolean);
+      if (new Set(names).size !== names.length || names.some((name) => /[\x00-\x1f\x7f]/.test(name))) {
+        status.textContent = "已填写的组名不能重复或包含控制字符.";
+        return;
+      }
+      if (submitted.reduce((total, item) => total + item.rule_ids.length, 0) > 100) {
+        status.textContent = "本群最多可共享 100 条规则.";
+        return;
+      }
+      busy = true;
+      drawBoard();
+      try {
+        const result = await postSettings("group-settings", {...targetScope, expected_groups: baseline, shared_violation_groups: submitted});
+        currentSettings = result.settings;
+        if (request === revision) {
+          baseline = countGroupsFor(result.settings, targetScope);
+          showSummary();
+          close(false);
+          if (section.isConnected && !section.hidden && !el("rule-form").hidden) {
+            toggle.disabled = false;
+            toggle.focus?.();
+          }
+        }
+        showFeedback(result.start_error ? "分组已保存, 请检查监控状态." : "共享分组已保存.", result.start_error ? "warning" : "success");
+      } catch (error) {
+        status.textContent = `保存失败: ${error.message || "请重试"}`;
+      } finally {
+        busy = false;
+        if (request === revision && !editor.hidden) { drawBoard(); save.focus?.(); }
+        else toggle.disabled = !savedRule || !cumulative;
+      }
+    }
+    search.addEventListener("input", () => drawPicker(true));
+    const boardTitle = recordElement("div", "shared-count-card-top");
+    const boardCopy = recordElement("div", "shared-count-board-copy");
+    boardCopy.appendChild(recordElement("strong", "", "本群分组"));
+    boardCopy.appendChild(recordElement("p", "field-help shared-count-drag-hint", "拖放规则, 或在下方勾选后移动."));
+    boardTitle.appendChild(boardCopy);
+    boardTitle.appendChild(newGroup);
+    const moves = recordElement("div", "shared-count-editor-actions shared-count-moves");
+    for (const button of [add, ungroup]) moves.appendChild(button);
+    selectionBar.appendChild(selection);
+    selectionBar.appendChild(clearSelection);
+    const footer = recordElement("div", "shared-count-footer");
+    for (const button of [undo, cancel, save]) controls.appendChild(button);
+    footer.appendChild(draftState);
+    footer.appendChild(controls);
+    editor.appendChild(recordElement("p", "field-help",
+      "同组规则共享同一成员的次数, 统计窗口和禁言阶梯仍各自设置."));
+    const groupsPanel = recordElement("div", "shared-count-groups");
+    for (const node of [boardTitle, board, groupTools]) groupsPanel.appendChild(node);
+    const rulePanel = recordElement("div", "shared-count-rules");
+    const actionBar = recordElement("div", "shared-count-move-bar");
+    for (const node of [targetInfo, moves]) actionBar.appendChild(node);
+    for (const node of [searchLabel, selectionBar, picker, actionBar]) rulePanel.appendChild(node);
+    for (const node of [groupsPanel, rulePanel, status, impact, footer]) editor.appendChild(node);
+    drawBoard();
+  }
+  return {node: section, update(isMute, isCumulative) {
+    scope = editingScope ? JSON.parse(editingScope) : null;
+    ruleId = el("rule").value;
+    savedRule = !!scope?.platform_id && !!scope?.group_id && el("rule").readOnly;
+    cumulative = isCumulative;
+    section.hidden = !isMute;
+    if ((!isMute || !isCumulative) && !editor.hidden) close(false);
+    if (editor.hidden) {
+      baseline = savedRule ? countGroupsFor(currentSettings, scope) : [];
+      showSummary();
+    }
+    toggle.hidden = !isCumulative;
+    toggle.disabled = busy || !savedRule;
+  }};
 }
 function readGroupOverrides() {
   const overrides = {};

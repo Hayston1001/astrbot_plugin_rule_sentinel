@@ -12,6 +12,7 @@ from .rule_store import RuleStore
 from .action_config import resolve_action_mode, validate_actions
 from .mute_validation import MuteCheck
 from .group_settings import execution_allowed, resolve_group_settings
+from .violation_store import count_cumulative_mute
 
 
 class MuteExecutionStore:
@@ -31,7 +32,8 @@ class MuteExecutionStore:
         return db
 
     @staticmethod
-    def _check_rule(intent, rule, max_duration_seconds, default_action_mode=None):
+    def _check_rule(intent, rule, max_duration_seconds, default_action_mode=None, *, cumulative_duration=None,
+                    awaiting_count=False):
         if intent.get("action") == "reply":
             if any(not isinstance(intent.get(key), str) or not intent[key].strip()
                    for key in ("platform_id", "group_id", "message_id", "target_sender_id")):
@@ -51,7 +53,19 @@ class MuteExecutionStore:
             return MuteCheck(allowed, "validated" if allowed else "action_not_allowed")
         if intent.get("action") == "recall":
             return revalidate_recall(intent, rule=rule, default_action_mode=default_action_mode)
-        return revalidate_mute(intent, rule=rule, max_duration_seconds=max_duration_seconds, default_action_mode=default_action_mode)
+        return revalidate_mute(intent, rule=rule, max_duration_seconds=max_duration_seconds,
+                               default_action_mode=default_action_mode, cumulative_duration=cumulative_duration,
+                               awaiting_count=awaiting_count)
+
+    @staticmethod
+    def _counted_duration(db, intent):
+        if intent["action"] != "mute":
+            return None
+        row = db.execute("""SELECT duration_seconds FROM violation_counts WHERE source_event_id=?
+            AND platform_id=? AND group_id=? AND message_id=? AND rule_id=? AND sender_id=? AND revoked_at_us IS NULL""",
+            (intent["source_event_id"], intent["platform_id"], intent["group_id"], intent["message_id"],
+             intent["rule_id"], intent["target_sender_id"])).fetchone()
+        return row[0] if row else None
 
     @staticmethod
     def _recall_expired(intent):
@@ -92,13 +106,32 @@ class MuteExecutionStore:
             settings = read_settings(config)
             key = (intent["platform_id"], intent["group_id"])
             policy = settings.policy
+            cumulative = False
             if (policy.mode == "allowlist" and key not in policy.groups) or (policy.mode == "blocklist" and key in policy.groups):
                 reason = "group_not_monitored"
             else:
                 rule_row = db.execute("""SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=?
                     ORDER BY version DESC LIMIT 1""", (*key, intent["rule_id"])).fetchone()
                 rule = RuleStore._decode(rule_row) if rule_row else None
-                check = self._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"))
+                mute = next((action for action in rule.actions if action["type"] == "mute"), None) if rule else None
+                cumulative = bool(intent["action"] == "mute" and mute and mute["duration_mode"] == "cumulative")
+                awaiting_count = (cumulative and intent["reason_code"] == "cumulative_mute_on_confirmation"
+                                  and requested_mode == "confirm" and not allow_retry and intent["attempts"] == 0)
+                counted_duration = self._counted_duration(db, intent) if cumulative else None
+                check = self._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
+                                         cumulative_duration=counted_duration, awaiting_count=awaiting_count)
+                if check.reason == "awaiting_count":
+                    now = datetime.now(timezone.utc)
+                    count = count_cumulative_mute(db, intent, rule, mute, resolve_group_settings(config, *key), now)
+                    if count is None:
+                        check = MuteCheck(False, "cumulative_not_counted")
+                    else:
+                        intent.update(duration_seconds=count.duration_seconds, created_at=now.isoformat(timespec="milliseconds"),
+                                      expires_at=(now + timedelta(seconds=count.duration_seconds)).isoformat(timespec="milliseconds"))
+                        db.execute("""UPDATE execution_intents SET duration_seconds=?, created_at=?, expires_at=?, reason_code=NULL
+                            WHERE id=?""", (intent["duration_seconds"], intent["created_at"], intent["expires_at"], intent_id))
+                        check = self._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
+                                                 cumulative_duration=count.duration_seconds)
                 reason = None if check.allowed else check.reason
             if intent["action"] != "reply":
                 try:
@@ -142,10 +175,16 @@ class MuteExecutionStore:
         finally:
             db.close()
 
-    def complete_attempt(self, intent_id, attempt, *, outcome, platform_code=None, trace_id=None, reason_code=None):
+    def complete_attempt(self, intent_id, attempt, *, outcome, platform_code=None, trace_id=None, reason_code=None,
+                         retry_allowed=True):
         if type(intent_id) is not int or type(attempt) is not int or outcome not in ("succeeded", "failed", "unknown", "blocked", "permission_denied", "review"):
             raise ValueError("invalid execution result")
-        if reason_code not in (None, "protected_target", "permission_denied", "recall_expired", "invalid_message", "quote_expired") or (outcome == "blocked" and reason_code not in ("protected_target", "recall_expired")):
+        if reason_code not in (None, "protected_target", "permission_denied", "recall_expired", "invalid_message",
+                               "quote_expired", "mute_status_unavailable", "already_muted", "intent_expired",
+                               "earlier_mute_unresolved", "mute_status_changed", "mute_limit_reached") or (
+                                   outcome == "blocked" and reason_code not in (
+                                       "protected_target", "recall_expired", "already_muted", "intent_expired",
+                                       "mute_limit_reached")):
             raise ValueError("invalid execution reason")
         if platform_code is not None and (not isinstance(platform_code, str) or not re.fullmatch(r"[0-9-]{1,20}", platform_code)):
             raise ValueError("invalid platform code")
@@ -162,7 +201,7 @@ class MuteExecutionStore:
                 WHERE intent_id=? AND attempt=? AND status='intent'""", (outcome, platform_code, trace_id, reason_code, now, intent_id, attempt))
             if result.rowcount != 1:
                 raise ValueError("attempt not recorded")
-            state = "pending_retry" if outcome == "failed" and reason_code != "invalid_message" and attempt < 3 else outcome
+            state = "pending_retry" if retry_allowed and outcome == "failed" and reason_code != "invalid_message" and attempt < 3 else outcome
             if row["action"] == "reply" and attempt == 2:
                 first = db.execute("SELECT reason_code FROM execution_attempts WHERE intent_id=? AND attempt=1", (intent_id,)).fetchone()
                 if not first or first["reason_code"] != "quote_expired":
@@ -224,7 +263,8 @@ class MuteExecutionStore:
             rule_row = db.execute("SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? ORDER BY version DESC LIMIT 1",
                                   (*key, intent["rule_id"])).fetchone()
             rule = RuleStore._decode(rule_row) if rule_row else None
-            return MuteExecutionStore._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode")).allowed
+            return MuteExecutionStore._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
+                                                   cumulative_duration=MuteExecutionStore._counted_duration(db, intent)).allowed
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             return False
 
@@ -245,10 +285,43 @@ class MuteExecutionStore:
                     return "recall_expired"
                 db.close()
                 return None
+            current = db.execute("""SELECT a.id, i.platform_id, i.group_id, i.target_sender_id
+                FROM execution_intents i JOIN execution_attempts a ON a.intent_id=i.id
+                WHERE i.id=? AND a.attempt=? AND i.action='mute'""", (intent_id, attempt)).fetchone()
+            if current:
+                earlier = db.execute("""SELECT 1 FROM execution_intents i JOIN execution_attempts a
+                    ON a.intent_id=i.id AND a.attempt=i.attempts
+                    WHERE i.action='mute' AND i.platform_id=? AND i.group_id=? AND i.target_sender_id=?
+                      AND (i.status='unknown' OR (i.status='executing' AND a.id < ?)) AND i.id != ?
+                      AND (julianday(a.expires_at) IS NULL OR julianday(a.expires_at) > julianday('now'))
+                    LIMIT 1""", (current["platform_id"], current["group_id"], current["target_sender_id"],
+                                 current["id"], intent_id)).fetchone()
+                if earlier:
+                    db.close()
+                    return "earlier_mute_unresolved"
             return db
         except BaseException:
             db.close()
             raise
+
+    def persist_mute_extension(self, guard, intent_id, attempt, expires_at):
+        """Persist the updated deadline before QQ may apply it, then resume the guard."""
+        row = guard.execute("""SELECT i.expires_at FROM execution_intents i
+            JOIN execution_attempts a ON a.intent_id=i.id AND a.attempt=i.attempts
+            WHERE i.id=? AND i.attempts=? AND i.action='mute' AND i.status='executing' AND a.status='intent'""",
+            (intent_id, attempt)).fetchone()
+        now = datetime.now(timezone.utc)
+        target = datetime.fromisoformat(expires_at)
+        if (row is None or target.utcoffset() is None or target <= now
+                or target > now + timedelta(days=30) or target < datetime.fromisoformat(row["expires_at"])):
+            raise ValueError("invalid mute extension deadline")
+        updated = guard.execute("""UPDATE execution_attempts SET expires_at=?
+            WHERE intent_id=? AND attempt=? AND status='intent'""", (expires_at, intent_id, attempt))
+        if updated.rowcount != 1:
+            raise ValueError("mute extension attempt missing")
+        guard.commit()
+        guard.execute("BEGIN IMMEDIATE")
+        return self._recheck_in_transaction(guard, intent_id, attempt)
 
     @staticmethod
     def _notice_allowed(db, row):

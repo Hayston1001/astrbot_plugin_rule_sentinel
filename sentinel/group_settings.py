@@ -3,10 +3,58 @@
 import hashlib
 import json
 
-
 GROUP_KEYS = frozenset({"model", "strategy", "execution_mode", "protected_policy",
                         "protected_template", "protected_quote", "llm_reason_language",
-                        "image_enabled", "image_model"})
+                        "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups"})
+
+
+def resolve_violation_groups(group):
+    """Resolve disjoint groups, including the old single-list format."""
+    def valid_rules(rules):
+        return (isinstance(rules, list) and len(rules) <= 100
+                and all(isinstance(rule, str) and rule.strip() for rule in rules)
+                and len(set(rules)) == len(rules))
+
+    if "shared_violation_groups" not in group:
+        rules = group.get("shared_violation_rules", [])
+        if not valid_rules(rules):
+            raise ValueError("invalid shared violation rules")
+        return [{"name": "", "rule_ids": sorted(rules)}] if len(rules) > 1 else []
+    groups = group["shared_violation_groups"]
+    if "shared_violation_rules" in group or not isinstance(groups, list) or len(groups) > 50:
+        raise ValueError("invalid shared violation groups")
+    names, assigned, result = set(), set(), []
+    for item in groups:
+        if not isinstance(item, dict) or set(item) not in ({"name", "rule_ids"}, {"rule_ids"}):
+            raise ValueError("invalid shared violation group")
+        name, rules = item.get("name", ""), item["rule_ids"]
+        if (not isinstance(name, str) or len(name) > 60 or name.strip() != name
+                or any(ord(char) < 32 or ord(char) == 127 for char in name) or (name and name in names)):
+            raise ValueError("invalid or duplicate shared group name")
+        if not valid_rules(rules) or len(rules) < 2 or assigned.intersection(rules):
+            raise ValueError("invalid or overlapping shared group rules")
+        names.add(name)
+        assigned.update(rules)
+        result.append({"name": name, "rule_ids": sorted(rules)})
+    if len(assigned) > 100:
+        raise ValueError("too many shared violation rules")
+    return result
+
+
+def validate_violation_group_members(groups, previous, rules):
+    """Only saved cumulative rules can join; inactive members may stay or leave."""
+    known = {rule["rule_id"] for rule in rules}
+    cumulative = {rule["rule_id"] for rule in rules if any(
+        action["type"] == "mute" and action.get("duration_mode") == "cumulative"
+        for action in rule["actions"])}
+    old_members = {rule_id: set(item["rule_ids"]) for item in previous for rule_id in item["rule_ids"]}
+    for item in groups:
+        members = set(item["rule_ids"])
+        if not members <= known:
+            raise ValueError("shared violation rules must belong to the group")
+        for rule_id in members - cumulative:
+            if not ((members - {rule_id}) & old_members.get(rule_id, set())):
+                raise ValueError("shared violation rules must use cumulative mute")
 
 
 def validate_reason_language(value):
@@ -36,6 +84,7 @@ def resolve_group_settings(config, platform_id, group_id):
     group = overrides.get(key, {})
     if not isinstance(group, dict) or set(group) - GROUP_KEYS:
         raise ValueError("invalid group settings")
+    shared = resolve_violation_groups(group)
     selected = group.get("model")
     if "model" in group and (not isinstance(selected, dict) or set(selected) != {"backend", "model"}
                                  or selected["backend"] != "llm"
@@ -76,7 +125,8 @@ def resolve_group_settings(config, platform_id, group_id):
     return {"backend": backend, "model": model, "strategy": strategy, "execution_mode": mode,
             "protected_policy": policy, "protected_template": template, "protected_quote": quote,
             "llm_reason_language": reason_language, "image_enabled": image_enabled,
-            "image_model": image_model, "image_understanding_mode": image_mode}
+             "image_model": image_model, "image_understanding_mode": image_mode,
+               "shared_violation_groups": shared}
 
 
 def execution_allowed(config, platform_id, group_id):
@@ -86,6 +136,8 @@ def execution_allowed(config, platform_id, group_id):
 
 def decision_fingerprint(config, platform_id, group_id):
     group = resolve_group_settings(config, platform_id, group_id)
+    # Names and order do not change the rules contributing to a count.
+    group["shared_violation_groups"] = sorted(item["rule_ids"] for item in group["shared_violation_groups"])
     if group["backend"] != "llm":
         group["llm_reason_language"] = None
     payload = {"group": group, "monitoring_mode": config.get("monitoring_mode", "allowlist"),

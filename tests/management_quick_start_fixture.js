@@ -195,7 +195,18 @@ window.AstrBotPluginView = {
     }
     if (endpoint === "group-settings") {
       const key = `${body.platform_id}/${body.group_id}`;
-      if (Object.keys(body.overrides).length) settings.group_overrides[key] = body.overrides;
+      const previous = settings.group_overrides[key] || {};
+      const overrides = body.overrides ? {...previous, ...body.overrides} : {...previous};
+      if (body.overrides) {
+        for (const property of Object.keys(previous)) {
+          if (!property.startsWith("shared_violation_") && !(property in body.overrides)) delete overrides[property];
+        }
+      } else {
+        delete overrides.shared_violation_rules;
+        delete overrides.shared_violation_groups;
+        if (body.shared_violation_groups.length) overrides.shared_violation_groups = body.shared_violation_groups;
+      }
+      if (Object.keys(overrides).length) settings.group_overrides[key] = overrides;
       else delete settings.group_overrides[key];
       return {settings: structuredClone(settings)};
     }

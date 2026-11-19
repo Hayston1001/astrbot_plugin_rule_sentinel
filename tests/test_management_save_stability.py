@@ -43,6 +43,188 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         self.page.close()
         self.assertEqual(self.errors, [])
 
+    def test_cumulative_rule_config(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 750})
+        page.emulate_media(color_scheme="dark", reduced_motion="reduce")
+        page.evaluate("""() => {
+          const api = window.AstrBotPluginView;
+          const get = api.apiGet, post = api.apiPost;
+          window.savedCumulative = {};
+          const cumulative = {type: 'mute', mode: 'confirm', duration_mode: 'cumulative',
+                              window_seconds: 3600, window_unit: 60, tiers_seconds: [60, 300], tier_units: [1, 60]};
+          api.apiGet = async (endpoint, params) => endpoint === 'rules'
+            ? (await get(endpoint, params)).map(rule => ({...rule, actions: [cumulative]}))
+            : get(endpoint, params);
+          api.apiPost = async (endpoint, params) => {
+            window.savedCumulative[endpoint] = params;
+            return post(endpoint, params);
+          };
+        }""")
+        page.set_default_timeout(5000)
+        self.select_group("g1")
+        card = page.locator(".rule-card").filter(has_text="内累计").first
+        expect(card).to_contain_text("60分钟内累计: 60秒 / 5分钟")
+        card.get_by_role("button", name="编辑", exact=True).click()
+        editor = page.locator(".cumulative-mute-fields")
+        expect(editor).to_be_visible()
+        window_value = editor.get_by_role("spinbutton", name="统计窗口", exact=True)
+        window_unit = editor.get_by_role("combobox", name="统计窗口单位: 分钟", exact=True)
+        expect(window_value).to_have_value("60")
+        expect(window_value).to_have_accessible_description("只统计最近这段时间内计入的违规, 更早的不算.")
+        help_text = editor.get_by_text("只统计最近这段时间内计入的违规, 更早的不算.", exact=True)
+        tier_value = editor.get_by_role("spinbutton", name="第 1 次违规", exact=True)
+        tier_unit = editor.get_by_role("combobox", name="第 1 档禁言单位: 秒", exact=True)
+        fields = [node.element_handle() for node in (window_value, window_unit, help_text, tier_value, tier_unit)]
+        for width, theme in ((390, "dark"), (1100, "light")):
+            with self.subTest(width=width, theme=theme):
+                page.set_viewport_size({"width": width, "height": 750})
+                page.emulate_media(color_scheme=theme, reduced_motion="reduce")
+                # Resizing can reposition the page between separate browser calls.
+                value, unit, help_box, tier_amount, tier_scale = page.evaluate(
+                    "nodes => nodes.map(node => node.getBoundingClientRect().toJSON())", fields
+                )
+                self.assertAlmostEqual(value["y"], unit["y"], delta=1)
+                self.assertGreater(unit["x"], value["x"] + value["width"])
+                self.assertGreater(help_box["y"], unit["y"] + unit["height"])
+                self.assertLessEqual(unit["width"], 76)
+                self.assertAlmostEqual(tier_amount["y"], tier_scale["y"], delta=1)
+                self.assertAlmostEqual(tier_scale["width"], unit["width"], delta=1)
+        window_unit.click()
+        page.get_by_role("option", name="秒", exact=True).click()
+        window_value.fill("900")
+        editor.get_by_role("button", name="添加档位").click()
+        editor.get_by_role("spinbutton", name="第 3 次违规", exact=True).fill("15")
+        page.locator("#preview").click()
+        page.wait_for_function("window.savedCumulative['rules/preview']?.actions[0].tiers_seconds.length === 3")
+        self.assertEqual(page.evaluate("window.savedCumulative['rules/preview'].actions[0].window_seconds"), 900)
+        self.assertEqual(page.evaluate("window.savedCumulative['rules/preview'].actions[0].window_unit"), 1)
+        self.assertEqual(page.evaluate("window.savedCumulative['rules/preview'].actions[0].tier_units"), [1, 60, 60])
+
+    def test_shared_count_group_editor_keeps_groups_separate(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 750})
+        page.emulate_media(color_scheme="dark", reduced_motion="reduce")
+        page.evaluate("""() => {
+          const api = window.AstrBotPluginView;
+          const get = api.apiGet, post = api.apiPost;
+          window.savedGroups = [];
+          const action = {type: 'mute', mode: 'auto', duration_mode: 'cumulative',
+                          window_seconds: 3600, tiers_seconds: [60, 300]};
+          api.apiGet = async (endpoint, params) => {
+            if (endpoint !== 'rules' || params.group_id !== 'g') return get(endpoint, params);
+            return ['advertising', 'links', 'flood', 'spam'].map(rule_id => ({rule_id, platform_id: 'p', group_id: 'g',
+              text: rule_id === 'links' ? 'Promotion links' : `Rule ${rule_id}`, version: 1, enabled: true,
+              actions: [{type: 'recall', mode: 'auto'}, action]}));
+          };
+          api.apiPost = async (endpoint, params) => {
+            if (endpoint === 'group-settings' || endpoint.startsWith('rules/')) window.savedGroups.push({endpoint, params});
+            return post(endpoint, params);
+          };
+        }""")
+        self.select_group("g")
+        card = page.locator(".rule-card").filter(has_text="Rule advertising")
+        card.get_by_role("button", name="编辑", exact=True).click()
+        section = card.get_by_role("region", name="共享计数", exact=True)
+        expect(section).to_have_count(1)
+        duration = page.locator("#action-list").get_by_role("combobox", name=re.compile("按违规次数累计"))
+        duration.click()
+        page.get_by_role("option", name="严格映射", exact=True).click()
+        expect(section).to_contain_text("选择按违规次数累计后可配置共享计数")
+        expect(section.get_by_role("button", name="编辑共享")).to_have_count(0)
+        page.locator("#action-list").get_by_role("combobox", name=re.compile("严格映射")).click()
+        page.get_by_role("option", name="按违规次数累计", exact=True).click()
+        expect(section.locator(".shared-count-summary")).to_have_text("单独计数")
+        page.locator("#text").fill("尚未保存的规则正文")
+        section.get_by_role("button", name="编辑共享").click()
+        editor = section.locator(".shared-count-editor")
+        expect(editor).to_contain_text("与当前规则成组")
+        search = editor.get_by_role("searchbox")
+        search.fill("Promotion")
+        expect(editor.get_by_role("checkbox")).to_have_count(1)
+        expect(editor.get_by_role("button", name="保存分组")).to_be_disabled()
+        editor.get_by_role("checkbox", name=re.compile("links")).press("Space")
+        editor.get_by_role("button", name="与当前规则成组", exact=True).press("Enter")
+        editor.get_by_role("button", name="新建组").click()
+        expect(editor.locator(".shared-count-destination")).to_have_text("移动目标: 新建共享组")
+        expect(editor.get_by_role("button", name="保存分组")).to_be_enabled()
+        search.clear()
+        editor.get_by_role("checkbox", name=re.compile("flood")).check()
+        expect(editor.get_by_role("button", name="用所选规则成组")).to_be_disabled()
+        search.fill("spam")
+        expect(editor.locator(".shared-count-selection")).to_contain_text("已选 1 条")
+        editor.get_by_role("checkbox", name=re.compile("spam")).check()
+        editor.get_by_role("button", name="用所选规则成组").click()
+        self.assertTrue(section.evaluate("node => node.scrollWidth <= node.clientWidth"))
+        editor.get_by_role("button", name="保存分组").click()
+        expect(editor).to_be_hidden()
+        self.assertEqual(page.evaluate("window.savedGroups"), [{"endpoint": "group-settings", "params": {
+            "platform_id": "p", "group_id": "g", "expected_groups": [], "shared_violation_groups": [
+                {"name": "", "rule_ids": ["advertising", "links"]},
+                {"name": "", "rule_ids": ["flood", "spam"]},
+            ],
+        }}])
+        expect(page.locator("#text")).to_have_value("尚未保存的规则正文")
+        expect(section.locator(".shared-count-summary")).to_contain_text("advertising (当前)")
+        expect(section.locator(".shared-count-summary")).to_contain_text("links")
+        expect(section.locator(".shared-count-summary strong")).to_have_count(0)
+
+        page.set_viewport_size({"width": 1250, "height": 1350})
+        page.emulate_media(color_scheme="light", reduced_motion="reduce")
+        section.get_by_role("button", name="编辑共享").click()
+        board = editor.locator(".shared-count-board")
+        first = board.locator(".shared-count-lane").filter(has_text="advertising (当前)")
+        second = board.locator(".shared-count-lane").filter(has_text="spam")
+        solo = board.locator(".shared-count-lane").filter(has_text="单独计数")
+        second.get_by_role("button").press("Enter")
+        expect(editor.locator(".shared-count-destination")).to_contain_text("flood / spam")
+        expect(second.get_by_role("button")).to_be_focused()
+        first.get_by_role("button").press("Enter")
+        expect(first.get_by_role("button")).to_have_attribute("aria-pressed", "true")
+        expect(editor.locator(".shared-count-destination")).to_contain_text("advertising / links")
+        editor.get_by_role("button", name="新建组").click()
+        first.get_by_text("links", exact=True).drag_to(board.get_by_role("button", name="移动目标: 新建共享组"))
+        expect(board.get_by_text("再添加一条规则", exact=True)).to_be_visible()
+        expect(editor.get_by_role("button", name="保存分组")).to_be_disabled()
+        editor.get_by_role("button", name="移除未完成组").click()
+        expect(first).to_contain_text("links")
+        expect(editor.locator(".shared-count-impact")).to_be_hidden()
+        editor.get_by_role("button", name="取消新组").click()
+        second.get_by_text("flood", exact=True).drag_to(first.get_by_role("button"))
+        expect(first).to_contain_text("flood")
+        expect(second).to_have_count(0)
+        expect(editor.get_by_role("status")).to_contain_text("已在草稿中解散")
+        expect(editor.locator(".shared-count-impact")).to_have_text("保存后将单独计数: spam.")
+        editor.get_by_role("button", name="撤回上一步").click()
+        expect(second).to_contain_text("flood")
+        expect(editor.locator(".shared-count-impact")).to_be_hidden()
+        expect(editor.get_by_role("button", name="保存分组")).to_be_disabled()
+        second.get_by_text("flood", exact=True).drag_to(first.get_by_role("button"))
+        first.get_by_text("flood", exact=True).drag_to(solo.get_by_text("单独计数", exact=True))
+        expect(first).not_to_contain_text("flood")
+        expect(editor.get_by_role("checkbox", name=re.compile("flood"))).to_have_accessible_name(re.compile("单独计数"))
+        editor.get_by_role("button", name="编辑组名").click()
+        editor.get_by_role("textbox", name="组名 (选填)").fill("未保存的名称")
+        editor.get_by_role("button", name="取消").click()
+        expect(section.get_by_role("button", name="编辑共享")).to_be_focused()
+        section.get_by_role("button", name="编辑共享").click()
+        expect(board.get_by_text("spam", exact=True)).to_be_visible()
+        expect(editor.get_by_role("textbox", name="组名 (选填)")).to_have_count(0)
+        editor.get_by_role("button", name="编辑组名").click()
+        expect(editor.get_by_role("textbox", name="组名 (选填)")).to_have_value("")
+        self.assertEqual(page.evaluate("window.savedGroups.length"), 1)
+        editor.get_by_role("textbox", name="组名 (选填)").fill("推广")
+        expect(first.get_by_text("推广", exact=True)).to_be_visible()
+        editor.get_by_role("button", name="保存分组").click()
+        expect(section.locator(".shared-count-summary strong")).to_have_text("推广")
+        self.assertEqual(page.evaluate("window.savedGroups.length"), 2)
+        page.locator("#tab-groups").click()
+        expect(page.locator("#panel-groups").get_by_text("共享计数", exact=True)).to_have_count(0)
+
     def select_group(self, group_id):
         self.page.evaluate("""groupId => {
           const select = document.querySelector('#group-select');
@@ -84,7 +266,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page = self.page
         card = page.locator(".rule-card").first
         edit = card.locator(".rule-edit")
-        history = card.get_by_role("button", name="历史版本", exact=True)
+        history = card.get_by_role("button", name="修改记录", exact=True)
         page.evaluate("""() => {
           const api = window.AstrBotPluginView.apiGet;
           window.AstrBotPluginView.apiGet = async (endpoint, params) => endpoint === 'rules/history'
@@ -122,12 +304,40 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         edit.click()
         expect(page.locator("#text")).to_have_value("original rule")
 
+    def test_history_cards_show_readable_configuration_across_themes_and_widths(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.evaluate("""() => {
+          const api = window.AstrBotPluginView.apiGet;
+          window.AstrBotPluginView.apiGet = async (endpoint, params) => endpoint === 'rules/history'
+            ? [{version: 1, text: 'A long rule\\nwith another line', enabled: true,
+                modified_by: 'admin', created_at: '2026-11-17T10:00:00Z', priority: 5,
+                actions: [{type: 'recall', mode: 'auto'}]}]
+            : api(endpoint, params);
+        }""")
+        card = page.locator(".rule-card").first
+        card.get_by_role("button", name="修改记录", exact=True).click()
+        entry = card.locator(".history-entry")
+        expect(entry.locator(".history-entry-header strong")).to_have_text("创建规则")
+        expect(entry.locator(".history-entry-meta")).to_contain_text("操作人: admin")
+        expect(entry.locator(".history-entry-text")).to_have_text("A long rule\nwith another line")
+        expect(entry.locator(".history-entry-actions li")).to_contain_text("撤回")
+        for width in (1100, 390, 320):
+            for theme in ("light", "dark"):
+                with self.subTest(width=width, theme=theme):
+                    page.set_viewport_size({"width": width, "height": 750})
+                    page.emulate_media(color_scheme=theme, reduced_motion="reduce")
+                    self.assertTrue(entry.evaluate("node => node.scrollWidth <= node.clientWidth"))
+                    self.assertNotEqual(entry.evaluate("node => getComputedStyle(node).backgroundColor"),
+                                        card.evaluate("node => getComputedStyle(node).backgroundColor"))
+
     def test_history_loading_and_fast_reversal_do_not_jump_or_restore_stale_content(self):
         from playwright.sync_api import expect
 
         page = self.page
         card = page.locator(".rule-card").first
-        history = card.get_by_role("button", name="历史版本", exact=True)
+        history = card.get_by_role("button", name="修改记录", exact=True)
         edit = card.locator(".rule-edit")
         page.evaluate("""() => {
           const api = window.AstrBotPluginView.apiGet;
@@ -209,7 +419,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         first, second = page.locator(".rule-card").all()
         first.get_by_role("button", name="编辑", exact=True).click()
         page.locator("#text").fill("draft in first rule")
-        second.get_by_role("button", name="历史版本", exact=True).click()
+        second.get_by_role("button", name="修改记录", exact=True).click()
         expect(page.locator("#rule-form")).to_be_hidden()
         expect(second.locator(".rule-history")).to_be_visible()
         expect(first.get_by_role("button", name="编辑", exact=True)).to_have_attribute("aria-expanded", "false")
@@ -289,7 +499,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
 
         page = self.page
         card = page.locator(".rule-card").first
-        self.assertEqual(card.locator(":scope > button").all_text_contents(), ["历史版本", "编辑"])
+        self.assertEqual(card.locator(":scope > button").all_text_contents(), ["修改记录", "编辑"])
         card.get_by_role("button", name="编辑", exact=True).click()
         expect(card.get_by_role("button", name="收起", exact=True)).to_be_visible()
         expect(page.locator("#rule")).to_be_hidden()
@@ -325,7 +535,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.locator("#text").evaluate("field => field.setSelectionRange(5, 13)")
         top_before = page.locator("#rule-form").evaluate("form => form.getBoundingClientRect().top")
         page.evaluate("window.quickStartMock.releaseRuleRead()")
-        expect(page.locator(".rule-version")).to_have_text("当前版本: 第 2 版")
+        expect(page.locator("#version")).to_have_value("2")
         expect(page.locator("#rule-form")).to_be_visible()
         expect(page.locator("#text")).to_have_value("next unsaved draft")
         expect(page.locator("#text")).to_be_focused()
@@ -355,13 +565,13 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.wait_for_function("window.quickStartMock.ruleConfirmStarted")
         page.locator("#text").fill("second unsaved edit")
         page.evaluate("window.quickStartMock.releaseRuleConfirm()")
-        expect(page.locator(".rule-version")).to_have_text("当前版本: 第 2 版")
+        expect(page.locator("#version")).to_have_value("2")
         expect(page.locator("#version")).to_have_value("2")
         expect(page.locator("#text")).to_have_value("second unsaved edit")
         expect(page.locator("#feedback-region")).to_contain_text("新修改尚未保存")
         expect(page.locator("#preview")).to_be_enabled()
         page.locator("#preview").click()
-        expect(page.locator(".rule-version")).to_have_text("当前版本: 第 3 版")
+        expect(page.locator("#version")).to_have_value("3")
         self.assertEqual(page.evaluate("window.quickStartMock.rules.find(rule => rule.rule_id === 'rule-a').text"), "second unsaved edit")
 
     def test_all_groups_refresh_and_switch_use_the_right_scope(self):
@@ -382,7 +592,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         self.assertTrue(page.evaluate("window.originalGroupRule.isConnected && window.originalGroupRule.contains(document.querySelector('#rule-form'))"))
         expect(page.locator(".rule-group")).to_have_count(2)
         page.evaluate("window.quickStartMock.releaseRuleRead()")
-        expect(other.locator(".rule-version")).to_have_text("当前版本: 第 2 版")
+        expect(other.locator("#version")).to_have_value("2")
         expect(other.locator("#rule-form")).to_be_visible()
         expect(page.locator("#text")).to_have_value("saved in other group")
 
@@ -412,7 +622,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.locator("#preview").click()
         page.wait_for_function("window.quickStartMock.ruleReadStarted")
         page.evaluate("window.quickStartMock.releaseRuleRead()")
-        expect(first.locator(".rule-version").first).to_have_text("当前版本: 第 2 版")
+        expect(first.locator("#version")).to_have_value("2")
         expect(first.locator(".rule-card").first.locator("#rule-form")).to_be_visible()
         expect(first.locator(".rule-card")).to_have_count(2)
         expect(page.locator("#text")).to_have_value("updated first group rule")
@@ -429,7 +639,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(page.locator(".rule-card #rule-form")).to_be_visible()
         expect(page.locator("#text")).to_have_value("unsaved draft")
         page.evaluate("window.quickStartMock.releaseRuleRead()")
-        expect(page.locator(".rule-version")).to_have_text("当前版本: 第 2 版")
+        expect(page.locator("#version")).to_have_value("2")
         expect(page.locator("#version")).to_have_value("2")
         expect(page.locator("#text")).to_have_value("unsaved draft")
 
@@ -469,7 +679,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
                     page.emulate_media(color_scheme=theme)
                     card = page.locator(".rule-card")
                     buttons = card.locator(":scope > button")
-                    self.assertEqual(buttons.all_text_contents(), ["历史版本", "编辑"])
+                    self.assertEqual(buttons.all_text_contents(), ["修改记录", "编辑"])
                     history, edit = [buttons.nth(index).bounding_box() for index in range(2)]
                     self.assertLess(history["x"], edit["x"])
                     self.assertLessEqual(edit["x"] + edit["width"], width)

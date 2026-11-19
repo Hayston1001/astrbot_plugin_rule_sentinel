@@ -129,6 +129,7 @@ class RuleSentinel(Star):
             ("rules/confirm", self.confirm_rule, ["POST"]),
             ("audit", self.list_audit, ["GET"]),
             ("messages", self.list_messages, ["GET"]),
+            ("revoke-violation-count", self.revoke_violation_count, ["POST"]),
             ("pending-confirmations", self.pending_confirmations, ["GET"]),
             ("message-content", self.message_content, ["GET"]),
             ("execute-mute", self.execute_mute, ["POST"]),
@@ -438,7 +439,17 @@ class RuleSentinel(Star):
         if self.management is None:
             return error_response("Service not initialized", status_code=503)
         return await self._run(self.management.message_content, request.username,
-                               request.query.get("platform_id"), request.query.get("group_id"), request.query.get("message_id"))
+                                request.query.get("platform_id"), request.query.get("group_id"), request.query.get("message_id"))
+
+    async def revoke_violation_count(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        data = await self._payload()
+        if data is None:
+            return error_response("Invalid JSON", status_code=400)
+        return await self._run(self.management.revoke_count, request.username, data)
 
     async def pending_confirmations(self):
         if self.management is None:
@@ -759,9 +770,14 @@ class RuleSentinel(Star):
                 raise RuntimeError("plugin is closing")
             candidate = dict(self.config)
             if group_settings:
-                from .sentinel.group_settings import GROUP_KEYS, validate_group_key
-                if (set(data) != {"platform_id", "group_id", "overrides"}
-                        or not isinstance(data["overrides"], dict) or set(data["overrides"]) - GROUP_KEYS):
+                from .sentinel.group_settings import (
+                    GROUP_KEYS, resolve_violation_groups, validate_group_key, validate_violation_group_members,
+                )
+                shared_keys = {"shared_violation_rules", "shared_violation_groups"}
+                shared_write = set(data) == {"platform_id", "group_id", "shared_violation_groups", "expected_groups"}
+                if (not shared_write and (set(data) != {"platform_id", "group_id", "overrides"}
+                        or not isinstance(data["overrides"], dict)
+                        or set(data["overrides"]) - (GROUP_KEYS - shared_keys))):
                     raise ValueError("invalid group settings")
                 platform, group = data["platform_id"], data["group_id"]
                 if not isinstance(platform, str) or not isinstance(group, str):
@@ -769,8 +785,20 @@ class RuleSentinel(Star):
                 key = f"{platform}/{group}"
                 validate_group_key(key)
                 overrides = dict(candidate["group_overrides"])
-                if data["overrides"]:
-                    overrides[key] = dict(data["overrides"])
+                previous = overrides.get(key, {})
+                if shared_write:
+                    expected = resolve_violation_groups({"shared_violation_groups": data["expected_groups"]})
+                    if expected != resolve_violation_groups(previous):
+                        raise VersionConflict("shared count groups changed")
+                    submitted = resolve_violation_groups({"shared_violation_groups": data["shared_violation_groups"]})
+                    updated = {k: v for k, v in previous.items() if k not in shared_keys}
+                    if submitted:
+                        updated["shared_violation_groups"] = submitted
+                else:
+                    updated = dict(data["overrides"])
+                    updated.update({k: v for k, v in previous.items() if k in shared_keys})
+                if updated:
+                    overrides[key] = updated
                 else:
                     overrides.pop(key, None)
                 candidate["group_overrides"] = overrides
@@ -793,6 +821,9 @@ class RuleSentinel(Star):
                     raise ValueError("invalid settings")
                 candidate.update(data)
             validate_settings(candidate)
+            if group_settings and shared_write and submitted:
+                rules = await asyncio.to_thread(self.management.list_rules, request.username, platform, group)
+                validate_violation_group_members(submitted, expected, rules)
             remember_group = f"{data['platform_id']}/{data['group_id']}" if group_change or group_settings else None
             changed = {key for key in candidate if candidate[key] != self.config.get(key)}
             if candidate != self.config or remember_group is not None:
@@ -826,6 +857,8 @@ class RuleSentinel(Star):
         task.add_done_callback(lambda finished: None if finished.cancelled() else finished.exception())
         try:
             return json_response(await asyncio.shield(task))
+        except VersionConflict:
+            return error_response("共享计数已被修改, 请重新打开后再保存.", status_code=409)
         except (ValueError, TypeError, KeyError):
             return error_response("Invalid settings", status_code=400)
         except Exception:

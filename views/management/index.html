@@ -60,7 +60,7 @@
             </div>
             <p id="records-status" class="notice" aria-live="polite"></p>
             <div class="table-wrap"><table id="records-table">
-              <thead><tr><th>时间</th><th>结果</th><th>理由摘要</th><th>规则 ID / 版本</th><th class="number">模型延迟</th></tr></thead>
+              <thead><tr><th>时间</th><th>结果</th><th>理由摘要</th><th>规则 ID</th><th class="number">模型延迟</th></tr></thead>
               <tbody id="records-body"></tbody>
             </table></div>
             <p id="records-empty" class="empty" hidden>该群还没有判定记录.</p>
@@ -69,7 +69,7 @@
         </section>
 
         <section id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
-          <p class="rule-version-help">每次保存都会生成新版本, 可在规则的历史版本中查看.</p>
+          <p class="rule-version-help">规则标识应始终代表同一种违规行为. 如需管理其他违规行为, 请新建规则.</p>
           <p id="rule-list-status" class="notice" aria-live="polite"></p>
           <div id="current-rules" class="rule-list" aria-live="polite"></div>
           <section id="rule-form" class="form-panel rule-editor item-editor" hidden>
@@ -201,7 +201,7 @@
             </div></section>
             <section class="settings-section"><div class="settings-intro"><h2>运行限制和通知</h2><p>控制判定容量, 超时和通知频率.</p></div><div class="settings-fields">
               <details class="settings-details"><summary>展开限制和通知设置</summary><div class="form-grid">
-                <label>禁言时长上限, 秒 <input id="setting-max_duration_seconds" type="number" min="1" max="2592000"><span class="field-help">所有群共用, 最长 2592000 秒 (30 天). 下调后, 超出新上限的规则禁言不会执行.</span></label>
+                 <label>禁言时长上限, 秒 <input id="setting-max_duration_seconds" type="number" min="1" max="2592000"><span class="field-help">限制每次禁言动作的时长, 所有群共用. 下调后, 超出新上限的禁言动作不会执行. 续接后剩余禁言最多 30 天.</span></label>
                 <label>模型并发上限 <input id="setting-model_concurrency" type="number" min="1"><span class="field-help">所有群同时进行的判定总数, 新安装默认 20.</span></label>
                 <label>单次判定超时, 秒 <input id="setting-model_timeout_seconds" type="number" min="1"><span class="field-help">超时后记录失败, 不执行该次判定的动作.</span></label>
                 <label>全局每分钟上限 <input id="setting-global_rate_per_minute" type="number" min="1"><span class="field-help">所有群每分钟允许进入判定的消息总数.</span></label>

@@ -36,6 +36,61 @@ class RuleStoreTests(unittest.TestCase):
             self.store.save(**self.args)
         self.assertEqual(len(self.store.history("qq", "g1", "r1")), 1)
 
+    def test_unchanged_save_keeps_revision_and_original_modifier(self):
+        first = self.store.save(**self.args)
+        saved = self.store.save(**{**self.args, "expected_version": first.version, "modified_by": "other"})
+        self.assertEqual(saved, first)
+        self.assertEqual(len(self.store.history("qq", "g1", "r1")), 1)
+
+    def test_stale_unchanged_save_still_conflicts(self):
+        self.store.save(**self.args)
+        self.store.save(**{**self.args, "expected_version": 1, "text": "Changed"})
+        with self.assertRaises(VersionConflict):
+            self.store.save(**{**self.args, "expected_version": 1, "text": "Changed"})
+
+    def test_each_config_change_creates_a_record(self):
+        cases = [
+            {"text": "Changed"},
+            {"enabled": False},
+            {"priority": 1},
+            {"severity_seconds": {"low": 120}},
+        ]
+        for index, changes in enumerate(cases):
+            with self.subTest(changes=changes):
+                args = {**self.args, "rule_id": f"case-{index}"}
+                self.store.save(**args)
+                saved = self.store.save(**{**args, **changes, "expected_version": 1})
+                self.assertEqual(saved.version, 2)
+                self.assertEqual(len(self.store.history("qq", "g1", args["rule_id"])), 2)
+
+    def test_duration_units_round_trip_and_legacy_actions_need_no_migration(self):
+        args = {key: value for key, value in self.args.items()
+                if key not in ("allowed_actions", "duration_mode", "severity_seconds")}
+        mute = {"type": "mute", "mode": "auto", "duration_mode": "cumulative",
+                "window_seconds": 3600, "tiers_seconds": [60, 60, 3600]}
+        old = self.store.save(**args, actions=[mute])
+        self.assertEqual(old.actions, [mute])
+        new_mute = {**mute, "window_unit": 60, "tier_units": [1, 60, 3600]}
+        saved = self.store.save(**{**args, "expected_version": 1}, actions=[new_mute])
+        same = self.store.save(**{**args, "expected_version": 2}, actions=[new_mute])
+        self.assertEqual(saved, same)
+        self.assertEqual([rule.actions for rule in RuleStore(self.path).history("qq", "g1", "r1")],
+                         [[mute], [new_mute]])
+
+    def test_invalid_display_units_are_not_saved(self):
+        args = {key: value for key, value in self.args.items()
+                if key not in ("allowed_actions", "duration_mode", "severity_seconds")}
+        cumulative = {"type": "mute", "mode": "auto", "duration_mode": "cumulative",
+                      "window_seconds": 3600, "tiers_seconds": [60, 90]}
+        strict = {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 90}}
+        for action in (cumulative | {"window_unit": True}, cumulative | {"tier_units": [60]},
+                       cumulative | {"tier_units": [60, 60]}, strict | {"severity_units": {"low": "60"}},
+                       strict | {"severity_units": {"extra": 1}}):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                self.store.save(**args, actions=[action])
+        valid = strict | {"severity_units": {"low": 1}}
+        self.assertEqual(self.store.save(**args, actions=[valid]).actions, [valid])
+
     def test_group_and_platform_are_isolated(self):
         self.store.save(**self.args)
         self.store.save(**{**self.args, "group_id": "g2"})

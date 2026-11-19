@@ -24,7 +24,7 @@ class MuteExecutor:
                     break
             if not task.cancelled() and task.exception() is None:
                 guard = task.result()
-                if guard is not None and guard != "recall_expired":
+                if guard is not None and not isinstance(guard, str):
                     await run_sync_safely(guard.close)
             raise
 
@@ -52,9 +52,14 @@ class MuteExecutor:
             if guard == "recall_expired":
                 await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"], outcome="blocked", reason_code="recall_expired")
                 return "blocked"
+            if guard == "earlier_mute_unresolved":
+                await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"],
+                                      outcome="review", reason_code=guard)
+                return "review"
             if guard is None:
                 await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"], outcome="review")
                 return "review"
+            retry_allowed = True
             try:
                 try:
                     if intent["action"] == "recall":
@@ -70,10 +75,26 @@ class MuteExecutor:
                             message_id=intent["message_id"] if passive else None,
                             msg_seq=(intent_id % 715827882) * 3 + intent["attempt"] if passive else None,
                             reference_id=intent["message_id"] if quoted else None, markdown=markdown)
+                    elif getattr(self.platform, "prepare_mute", None) is not None:
+                        target = (intent["platform_id"], intent["group_id"], intent["target_sender_id"])
+                        plan = await self.platform.prepare_mute(*target, intent["expires_at"],
+                                                               intent["duration_seconds"], retry=attempt > 1)
+                        operation = plan.get("operation")
+                        result = plan
+                        if operation == "update":
+                            retry_allowed = False
+                            valid = await run_sync_safely(self.store.persist_mute_extension, guard, intent_id,
+                                                         intent["attempt"], plan["expires_at"])
+                            if valid:
+                                result = await self.platform.mute(*target, plan["expires_at"], operation="update")
+                            else:
+                                result = {"outcome": "review"}
+                        elif operation == "add":
+                            result = await self.platform.mute(*target, plan["expires_at"])
                     else:
                         result = await self.platform.mute(intent["platform_id"], intent["group_id"],
                                                           intent["target_sender_id"], intent["expires_at"])
-                    if not isinstance(result, dict) or result.get("outcome") not in ("succeeded", "failed", "unknown", "blocked", "permission_denied"):
+                    if not isinstance(result, dict) or result.get("outcome") not in ("succeeded", "failed", "unknown", "blocked", "permission_denied", "review"):
                         result = {"outcome": "unknown"}
                 except asyncio.CancelledError:
                     result = {"outcome": "unknown"}
@@ -88,7 +109,8 @@ class MuteExecutor:
                 await run_sync_safely(guard.close)
             state = await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"],
                                           outcome=result["outcome"], platform_code=result.get("platform_code"),
-                                          trace_id=result.get("trace_id"), reason_code=result.get("reason_code"))
+                                          trace_id=result.get("trace_id"), reason_code=result.get("reason_code"),
+                                          retry_allowed=retry_allowed)
             if state == "blocked" and result.get("reason_code") == "protected_target":
                 await self._send_notice(intent_id)
             if state != "pending_retry":

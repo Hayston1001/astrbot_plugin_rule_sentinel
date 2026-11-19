@@ -772,21 +772,24 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1000})
         page.emulate_media(reduced_motion="no-preference")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
         page.locator("#overview-customize").click()
         for card in ("overall", "recent"):
             page.locator(f'[data-card="{card}"] .overview-width').click()
-        page.evaluate("""() => {
+        # This scenario tests following a dropped card, not interrupting a width transition.
+        page.wait_for_function("""() => !document.querySelector('.is-width-target, .overview-resize-spacer')""")
+        source_point, target_point = page.evaluate("""() => {
           for (const card of document.querySelectorAll('#overview-grid > [data-card]')) card.style.minHeight = '400px';
           const source = document.querySelector('[data-card="overall"]');
-          window.scrollTo(0, source.getBoundingClientRect().top + window.scrollY - 150);
+          window.scrollTo({top: source.getBoundingClientRect().top + window.scrollY - 150, behavior: 'instant'});
+          const handle = source.querySelector('.overview-drag-handle').getBoundingClientRect();
+          const target = document.querySelector('[data-card="recent"]').getBoundingClientRect();
+          return [[handle.x + 10, handle.y + 10], [target.x + 25, target.y + target.height * .72]];
         }""")
-        handle = page.locator('[data-card="overall"] .overview-drag-handle')
-        target = page.locator('[data-card="recent"]')
-        source_box, target_box = handle.bounding_box(), target.bounding_box()
-        page.mouse.move(source_box["x"] + 10, source_box["y"] + 10)
+        page.mouse.move(*source_point)
         page.mouse.down()
-        page.mouse.move(target_box["x"] + 25, target_box["y"] + target_box["height"] * .72, steps=6)
-        expect(page.locator(".overview-drop-placeholder")).to_be_visible()
+        page.mouse.move(*target_point, steps=6)
+        expect(page.locator(".overview-drop-placeholder:not(.is-original)")).to_be_visible()
         before = page.evaluate("""() => {
           window.dropScrollFrames = [];
           window.captureDropScroll = true;
@@ -1142,7 +1145,7 @@ class ManagementOverviewTests(unittest.TestCase):
         from playwright.sync_api import expect
         cases = (
             ({"status": "not_claimed", "reason_code": "intent_expired"}, "动作已到期, 禁言未执行."),
-            ({"status": "not_claimed", "reason_code": "rule_version_changed"}, "规则版本已变化, 禁言未执行."),
+            ({"status": "not_claimed", "reason_code": "rule_version_changed"}, "规则配置已变化, 禁言未执行."),
             ({"status": "failed"}, "禁言执行失败, 请查看判定记录."),
             ({"status": "unknown"}, "执行结果不明, 请人工核查."),
         )

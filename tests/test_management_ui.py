@@ -85,7 +85,7 @@ class ManagementUiTests(unittest.TestCase):
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         for identifier in ("refresh-group", "records-next", "records-status", "records-table", "records-body"):
             self.assertIn(f'id="{identifier}"', html)
-        for heading in ("时间", "结果", "规则 ID / 版本", "理由摘要", "模型延迟"):
+        for heading in ("时间", "结果", "规则 ID", "理由摘要", "模型延迟"):
             self.assertIn(heading, html)
         headers = html.split('<table id="records-table">', 1)[1].split('</thead>', 1)[0]
         for removed in ("执行状态", "动作 / 时长", "消息标识"):

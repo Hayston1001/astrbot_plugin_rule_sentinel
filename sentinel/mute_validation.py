@@ -11,7 +11,8 @@ class MuteCheck:
     reason: str
 
 
-def revalidate_mute(intent, *, rule, max_duration_seconds, default_action_mode=None):
+def revalidate_mute(intent, *, rule, max_duration_seconds, default_action_mode=None,
+                    cumulative_duration=None, awaiting_count=False):
     """Recheck a server-persisted intent against the current rule.
 
     This helper does not verify platform permissions or persist an audit intent.
@@ -44,9 +45,16 @@ def revalidate_mute(intent, *, rule, max_duration_seconds, default_action_mode=N
     if mode is None or intent.get("mode") != mode:
         return reject("action_not_allowed")
     duration = intent.get("duration_seconds")
+    if (action["duration_mode"] == "cumulative" and awaiting_count
+            and mode == "confirm" and duration is None and intent.get("expires_at") is None):
+        return MuteCheck(True, "awaiting_count")
     if (type(max_duration_seconds) is not int or not 0 < max_duration_seconds <= 2592000
             or type(duration) is not int or not 0 < duration <= max_duration_seconds):
         return reject("invalid_duration")
     if action["duration_mode"] == "strict" and duration not in action["severity_seconds"].values():
         return reject("duration_not_in_rule")
+    if action["duration_mode"] == "cumulative" and (
+        type(cumulative_duration) is not int or duration != cumulative_duration or duration not in action["tiers_seconds"]
+    ):
+        return reject("invalid_cumulative_count")
     return MuteCheck(True, "validated")

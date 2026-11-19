@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from sentinel.qq_mute_platform import QQMutePlatform
 
@@ -27,6 +28,8 @@ class FakeSession:
         self.mute_status = 200
         self.mute_data = None
         self.permission_status = 200
+        self.query_status = 200
+        self.query_data = {"members": []}
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -34,6 +37,8 @@ class FakeSession:
             return FakeResponse(200, {"access_token": "token", "expires_in": 7200})
         if url.endswith("bot_state"):
             return FakeResponse(self.permission_status, {"member_role": self.permission})
+        if method == "GET" and url.endswith("restrict_chat_setting"):
+            return FakeResponse(self.query_status, self.query_data)
         return FakeResponse(self.mute_status, self.mute_data or {"code": self.mute_status})
 
 
@@ -56,6 +61,32 @@ class QQMutePlatformTests(unittest.IsolatedAsyncioTestCase):
         platform = QQMutePlatform(session, lambda _: ("app", "secret"))
         self.assertFalse(await platform.verify_permission("p", "g"))
         self.assertEqual((await platform.mute("p", "g", "u", "expiry"))["outcome"], "unknown")
+
+    async def test_extension_caps_remaining_time_without_shortening_existing_mute(self):
+        session = FakeSession()
+        platform = QQMutePlatform(session, lambda _: ("app", "secret"))
+        now = datetime.now(timezone.utc)
+        current = now + timedelta(days=30, seconds=-30)
+        session.query_data = {"members": [{"member_openid": "u", "mute_expire_at": current.isoformat()}]}
+        proposed = (now + timedelta(minutes=2)).isoformat()
+        plan = await platform.prepare_mute("p", "g", "u", proposed, 120)
+        self.assertEqual(plan["operation"], "update")
+        deadline = datetime.fromisoformat(plan["expires_at"])
+        self.assertGreater(deadline, current)
+        self.assertLessEqual(deadline, datetime.now(timezone.utc) + timedelta(days=30))
+        self.assertLess(deadline, current + timedelta(seconds=120))
+        session.query_data["members"][0]["mute_expire_at"] = (now + timedelta(days=31)).isoformat()
+        self.assertEqual((await platform.prepare_mute("p", "g", "u", proposed, 120))["reason_code"], "mute_limit_reached")
+
+    async def test_malformed_existing_mute_and_changed_retry_are_not_written(self):
+        session = FakeSession()
+        platform = QQMutePlatform(session, lambda _: ("app", "secret"))
+        proposed = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+        session.query_data = {"members": [{"member_openid": "u", "mute_expire_at": "unavailable"}]}
+        self.assertEqual((await platform.prepare_mute("p", "g", "u", proposed, 120))["reason_code"], "mute_status_unavailable")
+        session.query_data["members"][0]["mute_expire_at"] = proposed
+        self.assertEqual((await platform.prepare_mute("p", "g", "u", proposed, 120, retry=True))["reason_code"], "mute_status_changed")
+        self.assertFalse(any(method == "POST" and url.endswith("restrict_chat_setting") for method, url, _ in session.calls))
 
     async def test_error_classification(self):
         session = FakeSession()

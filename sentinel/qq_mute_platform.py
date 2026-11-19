@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 
@@ -82,12 +83,58 @@ class QQMutePlatform:
     async def verify_reply_permission(self, platform_id, group_id):
         return await self._verify_group_role(platform_id, group_id, admin_required=False)
 
-    async def mute(self, platform_id, group_id, sender_id, expires_at):
+    async def prepare_mute(self, platform_id, group_id, sender_id, expires_at, duration_seconds, *, retry=False):
+        """Resolve the QQ operation without changing the member's mute."""
+        try:
+            token = await self._token(platform_id)
+            status, data, trace = await self._response(
+                "GET", f"{self.API_ROOT}/v2/groups/{quote(group_id, safe='')}/restrict_chat_setting",
+                headers={"Authorization": f"QQBot {token}"},
+            )
+            if status == 401:
+                self.tokens.pop(platform_id, None)
+            members = data.get("members")
+            if status != 200 or not isinstance(members, list) or any(
+                data.get(key) for key in ("has_more", "next_cursor", "next_page_token", "truncated")
+            ):
+                return {"outcome": "review", "reason_code": "mute_status_unavailable", "trace_id": trace}
+            if any(not isinstance(member, dict) or not isinstance(member.get("member_openid"), str)
+                   or not member["member_openid"].strip() for member in members):
+                return {"outcome": "review", "reason_code": "mute_status_unavailable", "trace_id": trace}
+            now = datetime.now(timezone.utc)
+            if datetime.fromisoformat(expires_at) <= now:
+                return {"outcome": "blocked", "reason_code": "intent_expired"}
+            matches = [member for member in members if member["member_openid"] == sender_id]
+            if not matches:
+                return {"operation": "add", "expires_at": expires_at}
+            if len(matches) != 1:
+                return {"outcome": "review", "reason_code": "mute_status_unavailable", "trace_id": trace}
+            previous = datetime.fromisoformat(matches[0]["mute_expire_at"])
+            if previous.utcoffset() is None:
+                raise ValueError("invalid member expiry")
+            if previous <= now or retry:
+                # Do not turn a failed add into an update or overwrite a
+                # member whose reported mute expired during the query.
+                return {"outcome": "review", "reason_code": "mute_status_changed", "trace_id": trace}
+            # The configured maximum limits this action's duration. QQ's
+            # 30-day maximum also bounds the final remaining mute.
+            deadline = min(previous + timedelta(seconds=duration_seconds), now + timedelta(days=30))
+            deadline = deadline.astimezone(timezone.utc)
+            new_expiry = deadline.isoformat(timespec="milliseconds")
+            if datetime.fromisoformat(new_expiry) <= previous:
+                return {"outcome": "blocked", "reason_code": "mute_limit_reached", "trace_id": trace}
+            return {"operation": "update", "expires_at": new_expiry}
+        except Exception:
+            return {"outcome": "review", "reason_code": "mute_status_unavailable"}
+
+    async def mute(self, platform_id, group_id, sender_id, expires_at, *, operation="add"):
+        if operation not in ("add", "update"):
+            raise ValueError("invalid QQ mute operation")
         try:
             token = await self._token(platform_id)
             status, data, trace = await self._response("POST", f"{self.API_ROOT}/v2/groups/{quote(group_id, safe='')}/restrict_chat_setting",
                 headers={"Authorization": f"QQBot {token}"},
-                json={"members": [{"op": "add", "member_openid": sender_id, "mute_expire_at": expires_at}]})
+                json={"members": [{"op": operation, "member_openid": sender_id, "mute_expire_at": expires_at}]})
         except Exception:
             return {"outcome": "unknown"}
         code = data.get("code")
@@ -95,7 +142,7 @@ class QQMutePlatform:
         reason = None
         if 200 <= status < 300:
             outcome = "succeeded"
-        elif status >= 500 or status == 408:
+        elif status >= 500 or status == 408 or status < 400:
             outcome = "unknown"
         elif code == "40103004":
             outcome, reason = "blocked", "protected_target"

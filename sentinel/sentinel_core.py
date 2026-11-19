@@ -90,9 +90,9 @@ def validate_plan_proposal(call, *, sender_id, rules, max_duration_seconds, deci
         elif mute.get("duration_mode") == "autonomous":
             fields.add("duration_seconds")
             duration = call.get("duration_seconds")
-        else:
+        elif mute.get("duration_mode") != "cumulative":
             return reject("invalid_duration_mode")
-        if type(duration) is not int or not 0 < duration <= max_duration_seconds:
+        if mute.get("duration_mode") != "cumulative" and (type(duration) is not int or not 0 < duration <= max_duration_seconds):
             return reject("invalid_duration")
     if set(call) != fields:
         return reject("invalid_parameters")

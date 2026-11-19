@@ -133,7 +133,7 @@ class LlmDecider:
         for rule in enabled:
             data = {"rule_id": rule.rule_id, "text": rule.text}
             mute = next((action for action in rule.actions if action["type"] == "mute"), None)
-            if mute:
+            if mute and mute["duration_mode"] != "cumulative":
                 data["duration_mode"] = mute["duration_mode"]
                 if mute["duration_mode"] == "strict":
                     data["severity_levels"] = list(mute["severity_seconds"])

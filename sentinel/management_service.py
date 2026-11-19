@@ -29,11 +29,16 @@ class ManagementService:
         if type(limit) is not int or not 0 < limit <= 2592000:
             raise ValueError("invalid global duration limit")
         actions = fields.get("actions")
-        mappings = ([action["severity_seconds"] for action in actions if action["type"] == "mute"]
-                    if isinstance(actions, list) else [fields.get("severity_seconds")])
+        mappings = ([action.get("severity_seconds", {}) for action in actions if action["type"] == "mute"]
+                     if isinstance(actions, list) else [fields.get("severity_seconds")])
         if any(not isinstance(mapping, dict) or any(type(seconds) is not int or not 0 < seconds <= limit
                    for seconds in mapping.values()) for mapping in mappings):
             raise ValueError("severity exceeds global duration limit")
+        if isinstance(actions, list) and any(
+            action["type"] == "mute" and action.get("duration_mode") == "cumulative"
+            and any(seconds > limit for seconds in action["tiers_seconds"]) for action in actions
+        ):
+            raise ValueError("violation tiers exceed global duration limit")
 
     def _authorized(self, actor, platform_id, group_id):
         # The AstrBot 4.29.3 extension route also accepts scoped API keys.
@@ -220,7 +225,19 @@ class ManagementService:
     def message_content(self, actor, platform_id, group_id, message_id):
         self._check(actor, platform_id, group_id)
         return {"content": self.queue.message_content(platform_id=platform_id, group_id=group_id, message_id=message_id),
-                "images": self.queue.message_images(platform_id=platform_id, group_id=group_id, message_id=message_id)}
+                 "images": self.queue.message_images(platform_id=platform_id, group_id=group_id, message_id=message_id)}
+
+    def revoke_count(self, actor, fields):
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        if not isinstance(fields, dict) or set(fields) != {"platform_id", "group_id", "message_id"}:
+            raise ValueError("invalid violation identity")
+        platform_id, group_id, message_id = (fields[key] for key in ("platform_id", "group_id", "message_id"))
+        self._check(actor, platform_id, group_id)
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 512
+               for value in (platform_id, group_id, message_id)):
+            raise ValueError("invalid violation identity")
+        return self.queue.revoke_violation_count(platform_id, group_id, message_id, actor)
 
     def summarize_group(self, actor, platform_id, group_id, all_groups=False):
         if not self.actor_allowed(actor):

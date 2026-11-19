@@ -137,7 +137,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
 const source = await readFile(process.argv[2], "utf8");
 const html = await readFile(process.argv[2].replace(/app\.js$/, "index.html"), "utf8");
 const headings = [...html.match(/<thead><tr>(.*?)<\/tr><\/thead>/s)[1].matchAll(/<th[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
-assert.deepEqual(headings, ["时间", "结果", "理由摘要", "规则 ID / 版本", "模型延迟"]);
+assert.deepEqual(headings, ["时间", "结果", "理由摘要", "规则 ID", "模型延迟"]);
 const options = (id) => [...html.match(new RegExp(`<select id="${id}">(.*?)</select>`, "s"))[1].matchAll(/<option[^>]*>(.*?)<\/option>/g)].map((match) => match[1]);
 assert.ok(!html.includes('id="setting-decision_backend"'));
 assert.ok(!html.toLowerCase().includes("jev"));
@@ -201,12 +201,12 @@ const recordId = (row) => row.attributes["aria-label"].slice("查看消息 ".len
 assert.equal(elements["records-body"].children[0].children.length, 5);
 assert.equal(recordId(elements["records-body"].children[0]), "m0");
 assert.equal(recordId(elements["records-body"].children[98]), "m49");
-assert.equal(elements["records-body"].children[0].children[3].textContent, "no-ads / 1");
+assert.equal(elements["records-body"].children[0].children[3].textContent, "no-ads");
 assert.equal(elements["records-body"].children[2].children[3].textContent, "-");
 assert.equal(elements["records-body"].children[6].children[3].textContent, "-");
 assert.equal(elements["records-body"].children[6].children[3].title, "");
 assert.equal(elements["records-body"].children[10].children[3].textContent, "-");
-assert.equal(elements["records-body"].children[52].children[3].title, `${longRuleId} / 3`);
+assert.equal(elements["records-body"].children[52].children[3].title, longRuleId);
 assert.ok(elements["records-body"].children[52].children[3].textContent.length < longRuleId.length);
 const resultBadge = (index) => elements["records-body"].children[index * 2].children[1].children[0];
 const badge = (index) => resultBadge(index).textContent;

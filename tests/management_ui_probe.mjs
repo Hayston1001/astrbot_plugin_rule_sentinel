@@ -379,7 +379,7 @@ const section = (row, title) => row.children[0].children[0].children.flatMap((it
 const actionItems = (row) => section(row, "处理动作").children[1].children;
 const actionButton = (item) => item.children.find((child) => child.tag === "button");
 assert.equal(record.children.length, 5);
-assert.equal(record.children[3].textContent, "r / 2");
+assert.equal(record.children[3].textContent, "r");
 assert.equal(record.children[1].children[0].textContent, "待确认");
 assert.equal(record.children[2].textContent, "<img src=x>");
 assert.equal(record.children[4].textContent, "12 ms");

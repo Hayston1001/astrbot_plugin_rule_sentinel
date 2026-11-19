@@ -8,6 +8,12 @@ CONCRETE_EXECUTION_MODES = frozenset({"auto", "confirm"})
 EXECUTION_MODES = CONCRETE_EXECUTION_MODES | {"inherit"}
 TEMPLATE_FIELDS = frozenset({"sender_id", "rule_id"})
 MAX_TEMPLATE_LENGTH = 2000
+DURATION_UNITS = frozenset({1, 60, 3600, 86400})
+
+
+def _validate_duration_unit(seconds, unit):
+    if type(unit) is not int or unit not in DURATION_UNITS or seconds % unit:
+        raise ValueError("invalid display unit for duration")
 
 
 def resolve_action_mode(mode, default_mode=None):
@@ -53,7 +59,31 @@ def validate_actions(actions):
                 raise ValueError("invalid reply template") from error
             result.append({"type": kind, "mode": mode, "template": template})
         elif kind == "mute":
-            if set(item) != {"type", "mode", "duration_mode", "severity_seconds"}:
+            if item.get("duration_mode") == "cumulative":
+                fields = {"type", "mode", "duration_mode", "window_seconds", "tiers_seconds"}
+                if not fields <= set(item) <= fields | {"window_unit", "tier_units"}:
+                    raise ValueError("invalid cumulative mute fields")
+                from .violation_store import validate_ladder
+                window, tiers = item["window_seconds"], item["tiers_seconds"]
+                if not isinstance(tiers, list):
+                    raise ValueError("invalid violation tiers")
+                validate_ladder(window, tuple(tiers))
+                action = {"type": kind, "mode": mode, "duration_mode": "cumulative",
+                          "window_seconds": window, "tiers_seconds": list(tiers)}
+                if "window_unit" in item:
+                    _validate_duration_unit(window, item["window_unit"])
+                    action["window_unit"] = item["window_unit"]
+                if "tier_units" in item:
+                    units = item["tier_units"]
+                    if not isinstance(units, list) or len(units) != len(tiers):
+                        raise ValueError("invalid tier display units")
+                    for seconds, unit in zip(tiers, units):
+                        _validate_duration_unit(seconds, unit)
+                    action["tier_units"] = list(units)
+                result.append(action)
+                continue
+            fields = {"type", "mode", "duration_mode", "severity_seconds"}
+            if not fields <= set(item) <= fields | {"severity_units"}:
                 raise ValueError("invalid mute fields")
             duration_mode, mapping = item["duration_mode"], item["severity_seconds"]
             if duration_mode not in ("strict", "autonomous") or not isinstance(mapping, dict):
@@ -63,8 +93,16 @@ def validate_actions(actions):
             if any(not isinstance(key, str) or not key.strip() or type(value) is not int or value <= 0
                    for key, value in mapping.items()):
                 raise ValueError("invalid severity mapping")
-            result.append({"type": kind, "mode": mode, "duration_mode": duration_mode,
-                           "severity_seconds": dict(mapping)})
+            action = {"type": kind, "mode": mode, "duration_mode": duration_mode,
+                      "severity_seconds": dict(mapping)}
+            if "severity_units" in item:
+                units = item["severity_units"]
+                if duration_mode != "strict" or not isinstance(units, dict) or set(units) != set(mapping):
+                    raise ValueError("invalid severity display units")
+                for level, seconds in mapping.items():
+                    _validate_duration_unit(seconds, units[level])
+                action["severity_units"] = dict(units)
+            result.append(action)
         else:
             if set(item) != {"type", "mode"}:
                 raise ValueError("invalid recall fields")
