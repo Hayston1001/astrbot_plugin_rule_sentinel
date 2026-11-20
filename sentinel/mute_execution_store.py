@@ -9,7 +9,7 @@ from .mute_validation import revalidate_mute
 from .recall_validation import revalidate_recall
 from .plugin_settings import read_settings
 from .rule_store import RuleStore
-from .action_config import resolve_action_mode, validate_actions
+from .action_config import resolve_action_mode, resolve_reply_options, validate_actions
 from .mute_validation import MuteCheck
 from .group_settings import execution_allowed, resolve_group_settings
 from .violation_store import count_cumulative_mute
@@ -133,6 +133,14 @@ class MuteExecutionStore:
                         check = self._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
                                                  cumulative_duration=count.duration_seconds)
                 reason = None if check.allowed else check.reason
+            if not reason and intent["action"] == "reply":
+                action = next(item for item in rule.actions if item["type"] == "reply")
+                try:
+                    intent["reply_options"] = resolve_reply_options(action, config)
+                except ValueError:
+                    reason = "invalid_reply_options"
+                else:
+                    intent["template"] = action["template"]
             if intent["action"] != "reply":
                 try:
                     expires = datetime.fromisoformat(intent["expires_at"])
@@ -165,7 +173,6 @@ class MuteExecutionStore:
             db.commit()
             self._notify(intent_id)
             if intent["action"] == "reply":
-                intent["template"] = next(action["template"] for action in rule.actions if action["type"] == "reply")
                 previous = db.execute("SELECT reason_code FROM execution_attempts WHERE intent_id=? AND attempt=1", (intent_id,)).fetchone()
                 intent["first_reason"] = previous["reason_code"] if previous else None
             return {**intent, "attempt": attempt}
@@ -242,7 +249,7 @@ class MuteExecutionStore:
             db.close()
 
     @staticmethod
-    def _recheck_in_transaction(db, intent_id, attempt):
+    def _recheck_in_transaction(db, intent_id, attempt, *, expected_reply_options=None):
         try:
             row = db.execute("SELECT * FROM execution_intents WHERE id=? AND status='executing' AND attempts=?",
                              (intent_id, attempt)).fetchone()
@@ -263,12 +270,19 @@ class MuteExecutionStore:
             rule_row = db.execute("SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? ORDER BY version DESC LIMIT 1",
                                   (*key, intent["rule_id"])).fetchone()
             rule = RuleStore._decode(rule_row) if rule_row else None
-            return MuteExecutionStore._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
-                                                   cumulative_duration=MuteExecutionStore._counted_duration(db, intent)).allowed
+            check = MuteExecutionStore._check_rule(intent, rule, settings.max_duration_seconds, config.get("default_action_mode"),
+                                                   cumulative_duration=MuteExecutionStore._counted_duration(db, intent))
+            if not check.allowed:
+                return False
+            if intent["action"] == "reply":
+                action = next(item for item in rule.actions if item["type"] == "reply")
+                options = resolve_reply_options(action, config)
+                return expected_reply_options is None or options == expected_reply_options
+            return True
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             return False
 
-    def acquire_send_guard(self, intent_id, attempt):
+    def acquire_send_guard(self, intent_id, attempt, *, expected_reply_options=None):
         """Keep settings and rules stable until the outbound request completes.
 
         A reserved SQLite write lock protects against concurrent processes too.
@@ -278,7 +292,7 @@ class MuteExecutionStore:
         db.row_factory = sqlite3.Row
         try:
             db.execute("BEGIN IMMEDIATE")
-            if not self._recheck_in_transaction(db, intent_id, attempt):
+            if not self._recheck_in_transaction(db, intent_id, attempt, expected_reply_options=expected_reply_options):
                 row = db.execute("SELECT * FROM execution_intents WHERE id=? AND status='executing' AND attempts=?", (intent_id, attempt)).fetchone()
                 if row and row["action"] == "recall" and self._recall_expired(dict(row)):
                     db.close()

@@ -124,3 +124,18 @@ class QQMutePlatformTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await platform.send_group_message("p", "g", "text"))["outcome"], expected)
         session.mute_status, session.mute_data = 400, {"code": 40034005}
         self.assertEqual((await platform.send_group_message("p", "g", "text", message_id="m", msg_seq=1))["reason_code"], "quote_expired")
+
+    async def test_auto_mention_is_added_to_markdown_only_for_a_valid_member(self):
+        session = FakeSession()
+        platform = QQMutePlatform(session, lambda _: ("app", "secret"))
+        for member, body, markdown, expected in (
+            ("sender", "notice", True, "<@sender> notice"),
+            ("sender", "<@sender> notice", True, "<@sender> notice"),
+            ("sender", "notice", False, "notice"),
+            ("all", "notice", True, "notice"),
+            ("sender><@all", "notice", True, "notice"),
+        ):
+            with self.subTest(member=member, markdown=markdown):
+                await platform.send_group_message("p", "g", body, markdown=markdown, mention_id=member)
+                payload = session.calls[-1][2]["json"]
+                self.assertEqual(payload["markdown"]["content"] if markdown else payload["content"], expected)

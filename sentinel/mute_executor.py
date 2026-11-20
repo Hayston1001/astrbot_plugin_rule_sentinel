@@ -9,9 +9,10 @@ class MuteExecutor:
     def __init__(self, store, platform, *, sleep=asyncio.sleep):
         self.store, self.platform, self.sleep = store, platform, sleep
 
-    async def _acquire_guard(self, intent_id, attempt, *, notice=False):
+    async def _acquire_guard(self, intent_id, attempt, *, notice=False, reply_options=None):
         acquire = self.store.acquire_notice_guard if notice else self.store.acquire_send_guard
-        task = asyncio.create_task(asyncio.to_thread(acquire, intent_id, attempt))
+        kwargs = {"expected_reply_options": reply_options} if reply_options is not None else {}
+        task = asyncio.create_task(asyncio.to_thread(acquire, intent_id, attempt, **kwargs))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -48,7 +49,7 @@ class MuteExecutor:
                 await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"], outcome=outcome,
                                       reason_code="permission_denied" if allowed is False else None)
                 return outcome
-            guard = await self._acquire_guard(intent_id, intent["attempt"])
+            guard = await self._acquire_guard(intent_id, intent["attempt"], reply_options=intent.get("reply_options"))
             if guard == "recall_expired":
                 await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"], outcome="blocked", reason_code="recall_expired")
                 return "blocked"
@@ -67,14 +68,19 @@ class MuteExecutor:
                     elif intent["action"] == "reply":
                         first_expired = intent["first_reason"] == "quote_expired"
                         passive = intent["attempt"] == 1 or (intent["attempt"] == 2 and not first_expired)
-                        quoted = intent["attempt"] < 3
-                        markdown = intent["attempt"] != 2 or first_expired
+                        options = intent["reply_options"]
+                        quoted = options["quote"] and intent["attempt"] < 3
+                        # After an expired passive reply, use the last attempt to
+                        # drop the reference, or fall back to text if already off.
+                        markdown = (intent["attempt"] == 1
+                                    or (first_expired and (intent["attempt"] == 2 or options["quote"])))
                         content = intent["template"].format(sender_id=intent["target_sender_id"], rule_id=intent["rule_id"])
+                        kwargs = {"mention_id": intent["target_sender_id"]} if markdown and options["mention_sender"] else {}
                         result = await self.platform.send_group_message(intent["platform_id"], intent["group_id"],
                             " ".join(content.splitlines()) if markdown else content,
                             message_id=intent["message_id"] if passive else None,
                             msg_seq=(intent_id % 715827882) * 3 + intent["attempt"] if passive else None,
-                            reference_id=intent["message_id"] if quoted else None, markdown=markdown)
+                            reference_id=intent["message_id"] if quoted else None, markdown=markdown, **kwargs)
                     elif getattr(self.platform, "prepare_mute", None) is not None:
                         target = (intent["platform_id"], intent["group_id"], intent["target_sender_id"])
                         plan = await self.platform.prepare_mute(*target, intent["expires_at"],

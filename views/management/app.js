@@ -675,6 +675,7 @@ function executionFailureReason(execution) {
     recall_expired: "消息已超过可撤回时间", invalid_message: "消息标识无效", quote_expired: "引用消息已过期",
     group_not_monitored: "本群监控未开启", rule_disabled: "规则已停用", rule_version_changed: "规则配置已变化",
     rule_scope_mismatch: "规则与当前群不匹配", action_not_allowed: "规则不再允许此动作", invalid_duration: "禁言时长无效或超过上限",
+    invalid_reply_options: "发言的引用或自动 @ 设置无效, 未发送",
      duration_not_in_rule: "禁言时长不在规则设置中", intent_expired: "动作已过期", invalid_expiry: "动作到期时间无效",
      cumulative_mute_held: "已计入违规, 未执行 QQ 禁言", cumulative_not_counted: "该消息不在本次累计范围内",
      invalid_cumulative_count: "计数已撤销或与执行记录不符", already_muted: "成员已被禁言, 未更改现有禁言",
@@ -1555,6 +1556,15 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
   }
 });
+const replyOptions = [
+  {key: "quote", label: "引用触发消息", on: "引用", off: "不引用"},
+  {key: "mention_sender", label: "@ 发言人", on: "自动 @", off: "不自动 @"},
+];
+function replyOptionLabel(option, value) {
+  if (typeof value === "boolean") return value ? option.on : option.off;
+  const globalValue = currentSettings?.[`reply_${option.key}`];
+  return `全局(${typeof globalValue === "boolean" ? replyOptionLabel(option, globalValue) : "不可用"})`;
+}
 function addAction(initial = {}) {
   const row = document.createElement("div");
   row.className = "form-panel";
@@ -1575,7 +1585,31 @@ function addAction(initial = {}) {
   templateLabel.textContent = "发言模板";
   const template = document.createElement("textarea");
   template.value = initial.template || "";
+  template.maxLength = 2000;
+  const templateHelp = document.createElement("span");
+  templateHelp.className = "field-help";
+  templateHelp.id = `action-template-help-${actionId}`;
+  templateHelp.textContent = "填写机器人要发到群里的正文. {rule_id} 表示规则标识, {sender_id} 表示发言人的标识. 自动 @ 无需写入模板.";
+  template.setAttribute("aria-describedby", templateHelp.id);
   templateLabel.appendChild(template);
+  templateLabel.appendChild(templateHelp);
+  const replyFields = document.createElement("div");
+  replyFields.className = "reply-options";
+  const replyControls = replyOptions.map((option) => {
+    const label = document.createElement("label");
+    const select = document.createElement("select");
+    select.id = `action-reply-${option.key}-${actionId}`;
+    label.setAttribute("for", select.id);
+    label.textContent = option.label;
+    const inherited = addOption(select, "", replyOptionLabel(option));
+    addOption(select, "true", option.on);
+    addOption(select, "false", option.off);
+    select.value = typeof initial[option.key] === "boolean" ? String(initial[option.key]) : "";
+    select.addEventListener("change", clearPreview);
+    label.appendChild(select);
+    replyFields.appendChild(label);
+    return {option, select, inherited};
+  });
   const durationLabel = document.createElement("label");
   durationLabel.textContent = "禁言时长模式";
   const duration = document.createElement("select");
@@ -1729,6 +1763,7 @@ function addAction(initial = {}) {
   remove.type = "button"; remove.textContent = "删除动作";
   const updateVisibility = (animate = true) => {
     setPanelVisibility(templateLabel, type.value === "reply", {animate});
+    setPanelVisibility(replyFields, type.value === "reply", {animate});
     setPanelVisibility(durationLabel, type.value === "mute", {animate});
     setPanelVisibility(mappingLabel, type.value === "mute" && duration.value === "strict", {animate});
     setPanelVisibility(cumulative, type.value === "mute" && duration.value === "cumulative", {animate});
@@ -1761,7 +1796,7 @@ function addAction(initial = {}) {
   order.appendChild(number);
   header.appendChild(order);
   header.appendChild(handle);
-  const item = {row, type, mode, inheritOption, template, duration, mappingRows, windowDays, windowUnit, tierRows,
+  const item = {row, type, mode, inheritOption, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows,
     initial, number, handle, up, down, updateVisibility};
   remove.addEventListener("click", () => { stopActionFollow(); cancelActionDrag(); actionRows = actionRows.filter((entry) => entry !== item); row.remove(); updateActionOrder(); clearPreview(); });
   up.addEventListener("click", () => { cancelActionDrag(); moveAction(item, actionRows.indexOf(item) - 1, up, true); });
@@ -1774,7 +1809,7 @@ function addAction(initial = {}) {
     moveAction(item, actionRows.indexOf(item) + (event.key === "ArrowUp" ? -1 : 1), handle, true);
   });
   row.appendChild(header);
-   for (const child of [type, mode, templateLabel, durationLabel, mappingLabel, remove, up, down]) row.appendChild(child);
+  for (const child of [type, mode, templateLabel, durationLabel, mappingLabel, replyFields, remove, up, down]) row.appendChild(child);
   const typeLabel = document.createElement("label");
   typeLabel.className = "action-type-label";
   typeLabel.setAttribute("for", type.id);
@@ -1803,10 +1838,15 @@ function setActions(actions) {
   for (const action of actions) addAction(action);
 }
 function readActions() {
-  return actionRows.map(({type, mode, template, duration, mappingRows, windowDays, windowUnit, tierRows, initial}) => {
+  return actionRows.map(({type, mode, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows, initial}) => {
     if (!["reply", "mute", "recall"].includes(type.value)) { type.focus?.(); throw new Error("请选择动作类型"); }
     const result = {type: type.value, mode: mode.value};
-    if (type.value === "reply") result.template = template.value;
+    if (type.value === "reply") {
+      result.template = template.value;
+      for (const {option, select} of replyControls) {
+        if (select.value) result[option.key] = select.value === "true";
+      }
+    }
     if (type.value === "mute") {
        result.duration_mode = duration.value;
        if (duration.value === "cumulative") {
@@ -2274,7 +2314,10 @@ function describeRuleAction(action) {
        const tiers = (action.tiers_seconds || []).map((seconds, index) => formatConfiguredDuration(seconds, action.tier_units?.[index]));
        extra = ` (${formatConfiguredDuration(action.window_seconds, action.window_unit)}内累计: ${tiers.join(" / ")})`;
      } else extra = action.duration_mode === "autonomous" ? " (模型提出时长)" : " (时长模式未知)";
-  } else if (action.type === "reply") extra = ` (${action.template ?? ""})`;
+   } else if (action.type === "reply") {
+     const options = replyOptions.map((option) => replyOptionLabel(option, action[option.key]));
+     extra = ` / ${options.join(" / ")} (${action.template ?? ""})`;
+   }
   return `${name} / ${mode}${extra}`;
 }
 function detachedRuleDraft() {
@@ -2939,7 +2982,7 @@ el("rule-group").addEventListener("change", () => {
   clearPreview();
 });
 const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "llm_no_action_reason_enabled",
-  "protected_target_policy", "protected_target_template", "protected_target_quote",
+  "reply_quote", "reply_mention_sender", "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
@@ -2950,7 +2993,7 @@ const numericSettings = new Set(["message_retention_days", "max_duration_seconds
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"]);
 const booleanSettings = new Set(["action_execution_enabled", "protected_target_quote", "llm_no_action_reason_enabled",
-  "image_judging_enabled"]);
+  "reply_quote", "reply_mention_sender", "image_judging_enabled"]);
 const byteSettings = new Set(["image_max_bytes_per_image", "image_max_total_bytes"]);
 const MIB = 1048576;
 let modelChoiceEdited = false;
@@ -3893,7 +3936,10 @@ function showSettings(settings, submitted = null) {
     clearPreview();
     el("save-status").textContent = "全局动作执行方式已更改, 请重新确认.";
   }
-  for (const item of actionRows) item.inheritOption.textContent = actionModeLabel("inherit");
+  for (const item of actionRows) {
+    item.inheritOption.textContent = actionModeLabel("inherit");
+    for (const {option, inherited} of item.replyControls) inherited.textContent = replyOptionLabel(option);
+  }
   for (const update of ruleDescriptions) update();
   for (const key of settingKeys) {
     if (!Object.hasOwn(settings, key)) continue;

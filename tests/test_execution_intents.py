@@ -171,6 +171,63 @@ class ExecutionIntentTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in row["executions"]], ["failed", "succeeded"])
         self.assertEqual(row["execution_summary"], "partial_failed")
 
+    def prepare_reply(self, *, mode="auto", options=None):
+        self.enable_execution()
+        self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
+                        text="rule", enabled=True, actions=[
+                            {"type": "reply", "mode": mode, "template": "rule {rule_id}\nthanks", **(options or {})},
+                        ], modified_by="admin")
+        detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2, "target_sender_id": "sender"}})
+        self.assertTrue(self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),)))
+
+    def test_pending_reply_uses_latest_globals_with_independent_override(self):
+        self.prepare_reply(mode="confirm", options={"quote": False})
+        settings = SettingsStore(self.path, self.path.parent / "backup.json")
+        settings.save({**settings.load_or_migrate({}), "reply_mention_sender": True})
+        session = FakeSession()
+        platform = QQMutePlatform(session, lambda _: ("app", "secret"))
+        executor = MuteExecutor(MuteExecutionStore(self.path), platform)
+        self.assertEqual(asyncio.run(executor.execute(1, mode="confirm")), "succeeded")
+        body = next(kwargs["json"] for _, url, kwargs in session.calls if url.endswith("/messages"))
+        self.assertEqual(body["markdown"]["content"], "<@sender> rule r thanks")
+        self.assertNotIn("message_reference", body)
+        self.assertEqual(body["msg_id"], "m")
+
+    def test_reply_override_persists_except_auto_mention_on_text_retry(self):
+        self.prepare_reply(options={"quote": True, "mention_sender": True})
+        settings = SettingsStore(self.path, self.path.parent / "backup.json")
+        settings.save({**settings.load_or_migrate({}), "reply_quote": False})
+        session = FakeSession()
+        request = session.request
+        def request_with_markdown_rejection(method, url, **kwargs):
+            response = request(method, url, **kwargs)
+            return FakeResponse(400, {"code": 304036}) if url.endswith("/messages") and kwargs["json"]["msg_type"] == 2 else response
+        session.request = request_with_markdown_rejection
+        async def no_sleep(_):
+            pass
+        platform = QQMutePlatform(session, lambda _: ("app", "secret"))
+        executor = MuteExecutor(MuteExecutionStore(self.path), platform, sleep=no_sleep)
+        self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "succeeded")
+        bodies = [kwargs["json"] for _, url, kwargs in session.calls if url.endswith("/messages")]
+        self.assertEqual([b["message_reference"] for b in bodies], [{"message_id": "m"}] * 2)
+        self.assertEqual(bodies[0]["markdown"]["content"], "<@sender> rule r thanks")
+        self.assertEqual(bodies[1]["content"], "rule r\nthanks")
+
+    def test_inherited_reply_options_changing_during_permission_check_prevents_stale_send(self):
+        self.prepare_reply()
+        settings = SettingsStore(self.path, self.path.parent / "backup.json")
+        class Platform:
+            async def verify_permission(self, *args):
+                config = settings.load_or_migrate({})
+                settings.save({**config, "reply_quote": False})
+                return True
+
+            async def send_group_message(self, *args, **kwargs):
+                raise AssertionError("unexpected send")
+
+        executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
+        self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "review")
+
     def test_confirm_action_waits_while_later_auto_action_runs(self):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()

@@ -329,6 +329,19 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
         self.assertFalse(self.plugin.config["llm_no_action_reason_enabled"])
 
+    async def test_reply_defaults_are_saved_without_restarting_monitoring(self):
+        defaults = (await self.plugin.get_settings())["data"]
+        self.assertIs(defaults["reply_quote"], True)
+        self.assertIs(defaults["reply_mention_sender"], False)
+        self.raw_body = b'{"reply_quote":false,"reply_mention_sender":true}'
+        with (patch.object(self.plugin, "_stop_monitoring", side_effect=AssertionError("unexpected stop")),
+              patch.object(self.plugin, "_start_monitoring", side_effect=AssertionError("unexpected start"))):
+            result = await self.plugin.save_settings()
+        self.assertIs(result["data"]["settings"]["reply_quote"], False)
+        self.assertIs(result["data"]["settings"]["reply_mention_sender"], True)
+        self.raw_body = b'{"reply_mention_sender":"false"}'
+        self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
+
     async def test_shared_count_groups_require_disjoint_rules_from_the_same_group(self):
         for rule_id in ("a", "b", "c", "d", "strict", "other"):
             self.plugin.management.rules.save(

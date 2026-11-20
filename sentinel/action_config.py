@@ -7,6 +7,8 @@ ACTION_TYPES = frozenset({"reply", "mute", "recall"})
 CONCRETE_EXECUTION_MODES = frozenset({"auto", "confirm"})
 EXECUTION_MODES = CONCRETE_EXECUTION_MODES | {"inherit"}
 TEMPLATE_FIELDS = frozenset({"sender_id", "rule_id"})
+REPLY_OPTION_KEYS = ("quote", "mention_sender")
+REPLY_DEFAULTS = {"reply_quote": True, "reply_mention_sender": False}
 MAX_TEMPLATE_LENGTH = 2000
 DURATION_UNITS = frozenset({1, 60, 3600, 86400})
 
@@ -23,6 +25,14 @@ def resolve_action_mode(mode, default_mode=None):
     if mode == "inherit" and isinstance(default_mode, str) and default_mode in CONCRETE_EXECUTION_MODES:
         return default_mode
     raise ValueError("invalid action mode")
+
+
+def resolve_reply_options(action, config):
+    defaults = {key: config.get(f"reply_{key}") for key in REPLY_OPTION_KEYS}
+    options = {key: action.get(key, defaults[key]) for key in REPLY_OPTION_KEYS}
+    if any(type(value) is not bool for value in (*defaults.values(), *options.values())):
+        raise ValueError("invalid reply options")
+    return options
 
 
 def validate_actions(actions):
@@ -46,7 +56,8 @@ def validate_actions(actions):
             raise ValueError("invalid action mode")
         seen.add(kind)
         if kind == "reply":
-            if set(item) != {"type", "mode", "template"}:
+            fields = {"type", "mode", "template"}
+            if not fields <= set(item) <= fields | set(REPLY_OPTION_KEYS):
                 raise ValueError("invalid reply fields")
             template = item["template"]
             if not isinstance(template, str) or not template.strip() or len(template) > MAX_TEMPLATE_LENGTH:
@@ -57,7 +68,10 @@ def validate_actions(actions):
                         raise ValueError("invalid reply placeholder")
             except (ValueError, TypeError) as error:
                 raise ValueError("invalid reply template") from error
-            result.append({"type": kind, "mode": mode, "template": template})
+            options = {key: item[key] for key in REPLY_OPTION_KEYS if key in item}
+            if any(type(value) is not bool for value in options.values()):
+                raise ValueError("invalid reply options")
+            result.append({"type": kind, "mode": mode, "template": template, **options})
         elif kind == "mute":
             if item.get("duration_mode") == "cumulative":
                 fields = {"type", "mode", "duration_mode", "window_seconds", "tiers_seconds"}

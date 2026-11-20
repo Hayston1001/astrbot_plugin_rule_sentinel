@@ -43,6 +43,54 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         self.page.close()
         self.assertEqual(self.errors, [])
 
+    def test_reply_options_follow_saved_globals_and_keep_independent_overrides(self):
+        from playwright.sync_api import expect
+
+        page = self.page
+        page.emulate_media(reduced_motion="reduce")
+        page.evaluate("""() => {
+          const api = window.AstrBotPluginView;
+          const get = api.apiGet, post = api.apiPost;
+          api.apiPost = async (endpoint, body) => {
+            if (endpoint === 'rules/preview') window.previewedReply = body.actions[0];
+            return post(endpoint, body);
+          };
+          api.apiGet = async (endpoint, params) => {
+            const data = await get(endpoint, params);
+            return endpoint === 'rules' && params.group_id === 'g'
+              ? data.map(rule => ({...rule, actions: [{
+                type: 'reply', mode: 'auto', template: 'please follow the rules',
+              }, {type: 'recall', mode: 'auto'}]})) : data;
+          };
+        }""")
+        page.locator("#tab-settings").click()
+        quote = page.locator("#setting-reply_quote")
+        mention = page.locator("#setting-reply_mention_sender")
+        expect(quote).to_be_checked()
+        expect(mention).not_to_be_checked()
+        quote.uncheck()
+        mention.check()
+        page.locator("#settings-save").click()
+        page.wait_for_function("window.quickStartMock.settings.reply_mention_sender")
+        page.locator("#tab-rules").click()
+        self.select_group("other")
+        self.select_group("g")
+        card = page.locator(".rule-card").filter(has_text="please follow the rules")
+        card.get_by_role("button", name="编辑", exact=True).click()
+        controls = page.locator(".reply-options:visible")
+        expect(controls).to_have_count(1)
+        expect(controls.get_by_role("combobox", name=re.compile("全局\\(不引用\\)"))).to_be_visible()
+        expect(controls.get_by_role("combobox", name=re.compile("全局\\(自动 @\\)"))).to_be_visible()
+        for width in (1440, 768, 390):
+            page.set_viewport_size({"width": width, "height": 750})
+            self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
+        controls.get_by_role("combobox", name=re.compile("全局\\(不引用\\)")).click()
+        page.get_by_role("option", name="引用", exact=True).click()
+        controls.get_by_role("combobox", name=re.compile("全局\\(自动 @\\)")).click()
+        page.get_by_role("option", name="不自动 @", exact=True).click()
+        page.locator("#preview").click()
+        page.wait_for_function("window.previewedReply?.quote === true && window.previewedReply.mention_sender === false")
+
     def test_cumulative_rule_config(self):
         from playwright.sync_api import expect
 

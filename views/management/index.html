@@ -196,6 +196,8 @@
               <label>群名单模式 <select id="setting-monitoring_mode" aria-describedby="monitoring-mode-help"><option value="allowlist">白名单</option><option value="blocklist">黑名单</option></select><span id="monitoring-mode-help" class="field-help">白名单只监控名单中的群; 黑名单监控名单以外的群. 切换模式会改变现有名单的含义, 请检查群管理中的开关.</span></label>
                <label>默认执行方式 <select id="setting-default_execution_mode"><option value="record">只记录</option><option value="execute">允许执行</option></select><span class="field-help">各群可以单独选择只记录或允许执行. 允许执行仍需开启上方的真实执行总开关.</span></label>
                <label>默认动作执行方式 <select id="setting-default_action_mode"><option value="auto">自动</option><option value="confirm">人工确认</option></select><span class="field-help">规则动作选择全局时使用此设置. 实际执行仍受真实执行总开关和本群执行方式控制.</span></label>
+               <label class="setting-switch"><span><strong>规则发言默认引用触发消息</strong><small>发言时附上触发规则的那条消息. 各规则的发言动作可单独覆盖, 不影响群提示.</small></span><input id="setting-reply_quote" type="checkbox" checked></label>
+               <label class="setting-switch"><span><strong>规则发言默认 @ 发言人</strong><small>发言时 @ 触发规则的成员. 各规则的发言动作可单独覆盖</small></span><input id="setting-reply_mention_sender" type="checkbox"></label>
             </div></section>
             <section class="settings-section" aria-labelledby="settings-decision-title"><div class="settings-intro"><h2 id="settings-decision-title" tabindex="-1">文字判定</h2><p>设置默认模型, 规则选择方式和判定理由.</p></div><div class="settings-fields">
                <label>默认判定模型 <input id="setting-llm_provider_id" list="provider-options" autocomplete="off"><datalist id="provider-options"></datalist><span class="field-help">填写 AstrBot 中已配置的模型提供商标识. 配置默认模型后才能开始监控, 各群可以单独选择.</span></label>

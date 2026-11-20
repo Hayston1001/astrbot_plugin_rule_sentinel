@@ -651,6 +651,7 @@ tr.record + tr td { background: var(--raised); }
 #action-list .form-panel > button { flex: none; }
 #action-list .form-panel:has(> .shared-count-config:not([hidden])) > button { order: 1; }
 #action-list .form-panel > .shared-count-config { flex: 0 0 100%; }
+#action-list .form-panel > .reply-options { flex: 0 0 100%; min-width: 0; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); }
 .severity-editor { display: grid; gap: 10px; }
 .cumulative-window-field { display: grid; gap: 5px; }
 .cumulative-window-row { display: grid; grid-template-columns: minmax(0, 1fr) 4.5rem; gap: 8px; }

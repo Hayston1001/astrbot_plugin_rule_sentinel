@@ -58,6 +58,25 @@ class SettingsStoreTests(unittest.TestCase):
                         persisted = json.loads(db.execute("SELECT payload FROM dashboard_settings").fetchone()[0])
                     self.assertNotIn("monitoring_enabled", persisted)
 
+    def test_reply_defaults_migrate_without_changing_protected_notice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SettingsStore(root / "state.sqlite", root / "backup.json")
+            previous = {**store.load_or_migrate({}), "protected_target_quote": False}
+            old = {k: v for k, v in previous.items() if k not in ("reply_quote", "reply_mention_sender")}
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(old),))
+                db.commit()
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated, {**old, "reply_quote": True, "reply_mention_sender": False})
+            updated = {**migrated, "reply_quote": False, "reply_mention_sender": True}
+            store.save(updated)
+            self.assertEqual(store.load_or_migrate({}), updated)
+            with self.assertRaises(ValueError):
+                store.save({**updated, "reply_quote": 1})
+            with self.assertRaises(ValueError):
+                store.save({**updated, "reply_mention_sender": None})
+
     def test_removing_disabled_switch_retires_only_pending_work(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:

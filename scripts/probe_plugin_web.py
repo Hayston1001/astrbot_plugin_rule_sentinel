@@ -53,11 +53,20 @@ def main():
             plugin = plugin_class(context, {"dashboard_admins": ["admin"]})
             await plugin.initialize()
             try:
-                assert plugin.intake is None and len(context.registered_web_apis) == 34
-                assert any(route[0].endswith("/quick-start/complete") and route[2] == ["POST"]
-                           for route in context.registered_web_apis)
+                assert plugin.intake is None
+                routes = [(path.split("/", 2)[-1], method)
+                          for path, _, methods, _ in context.registered_web_apis for method in methods]
+                assert len(set(routes)) == len(routes)
+                assert {("quick-start/complete", "POST"), ("settings", "GET"), ("settings", "POST"),
+                        ("rules/preview", "POST"), ("rules/confirm", "POST"), ("rules", "GET"),
+                        ("events", "GET")} <= set(routes)
                 status, settings = await call(plugin.get_settings, "admin")
                 assert status == 200 and settings["quick_start_completed"] is False
+                assert settings["reply_quote"] is True and settings["reply_mention_sender"] is False
+                status, saved_settings = await call(plugin.save_settings, "admin",
+                                                    b'{"reply_quote":false,"reply_mention_sender":true}')
+                assert status == 200 and saved_settings["settings"]["reply_quote"] is False
+                assert saved_settings["settings"]["reply_mention_sender"] is True
                 status, completion = await call(plugin.complete_quick_start, "admin", b"{}")
                 assert status == 200 and completion == {"completed": False}
                 status, _ = await call(plugin.complete_quick_start, "api_key:synthetic", b"{}", forbid_read=True)

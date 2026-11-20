@@ -159,7 +159,13 @@ class QQMutePlatform:
             result["reason_code"] = reason
         return result
 
-    async def send_group_message(self, platform_id, group_id, content, *, message_id=None, msg_seq=None, reference_id=None, markdown=True):
+    async def send_group_message(self, platform_id, group_id, content, *, message_id=None, msg_seq=None,
+                                 reference_id=None, markdown=True, mention_id=None):
+        if (markdown and isinstance(mention_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", mention_id)
+                and mention_id.lower() != "all"):
+            mention = f"<@{mention_id}>"
+            if mention not in content:
+                content = f"{mention} {content}"
         body = {"msg_type": 2, "markdown": {"content": content}} if markdown else {"content": content, "msg_type": 0}
         if reference_id is not None:
             body["message_reference"] = {"message_id": reference_id}

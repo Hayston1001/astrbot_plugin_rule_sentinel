@@ -47,6 +47,7 @@ let discovery = {groups: [], history_available: true, truncated: false};
 const savedRules = new Map();
 const settings = {quick_start_completed: true, action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
   monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {},
+  reply_quote: true, reply_mention_sender: false,
   decision_backend: "llm", llm_provider_id: "default-model", rule_selection_strategy: "priority",
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,
   max_duration_seconds: 2592000, model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60,
@@ -181,7 +182,7 @@ assert.equal(currentConfig.children[0].children[0].textContent, "当前配置");
 assert.equal(currentConfig.children[0].children[1].textContent, "优先级: 8");
 assert.deepEqual(currentConfig.children[1].children.map((item) => [item.children[0].textContent, item.children[1].textContent]), [
   ["1", "禁言 / 自动 (low: 1分钟, custom level: 1分钟 30秒, __proto__: 2分钟)"],
-  ["2", "发言 / 人工确认 (<img src=x>)"], ["3", "撤回 / 自动"]]);
+  ["2", "发言 / 人工确认 / 全局(引用) / 全局(不自动 @) (<img src=x>)"], ["3", "撤回 / 自动"]]);
 await ruleCard.children[1].trigger("click");
 assert.deepEqual(requests.at(-1), {endpoint: "rules/history", params: {platform_id: "p1", group_id: "long-group-12345678", rule_id: "r"}});
 const history = ruleCard.children[3];
@@ -277,8 +278,8 @@ assert.equal(elements["save-status"].textContent, "");
 assert.equal(elements.preview.disabled, false);
 assert.equal(elements.enabled.checked, true);
 assert.equal(ruleCard.scrolled, true);
-assert.equal(elements["action-list"].children[0].children[9].textContent, "动作类型");
-assert.equal(elements["action-list"].children[0].children[10].textContent, "执行方式");
+assert.equal(elements["action-list"].children[0].children.find(node => node.className === "action-type-label").textContent, "动作类型");
+assert.equal(elements["action-list"].children[0].children.find(node => node.className === "action-mode-label").textContent, "执行方式");
 const cells = elements["records-body"].children[0].children;
 assert.equal(cells.length, 5);
 assert.equal(elements["records-body"].children[0].attributes["aria-label"], "查看消息 ROBOT1.0_12345678901234567890abcdef 的详情");

@@ -1,6 +1,6 @@
 import unittest
 
-from sentinel.action_config import migrate_legacy_actions, validate_actions
+from sentinel.action_config import REPLY_DEFAULTS, migrate_legacy_actions, resolve_reply_options, validate_actions
 
 
 class ActionConfigTests(unittest.TestCase):
@@ -16,6 +16,15 @@ class ActionConfigTests(unittest.TestCase):
         self.assertEqual(validate_actions(actions), actions)
         self.assertIsNot(validate_actions(actions)[1]["severity_seconds"], actions[1]["severity_seconds"])
 
+    def test_reply_options_inherit_independently_without_rewriting_old_actions(self):
+        action = {"type": "reply", "mode": "confirm", "template": "notice"}
+        self.assertEqual(validate_actions([action]), [action])
+        self.assertEqual(resolve_reply_options(action, REPLY_DEFAULTS), {"quote": True, "mention_sender": False})
+        override = {**action, "quote": False}
+        self.assertEqual(validate_actions([override]), [override])
+        self.assertEqual(resolve_reply_options(override, {**REPLY_DEFAULTS, "reply_mention_sender": True}),
+                         {"quote": False, "mention_sender": True})
+
     def test_reject_invalid_actions(self):
         bad = [[{"type": "kick", "mode": "auto"}],
                [{"type": "recall", "mode": "auto"}, {"type": "recall", "mode": "confirm"}],
@@ -23,6 +32,9 @@ class ActionConfigTests(unittest.TestCase):
                [{"type": "reply", "mode": "auto"}],
                [{"type": "reply", "mode": "auto", "template": "{sender_id.__class__}"}],
                [{"type": "reply", "mode": "auto", "template": "{rule_id!r}"}],
+               [{"type": "reply", "mode": "auto", "template": "ok", "quote": 1}],
+               [{"type": "reply", "mode": "auto", "template": "ok", "mention_sender": "false"}],
+               [{"type": "recall", "mode": "auto", "quote": True}],
                [{"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {}}],
                [{"type": "mute", "mode": "auto", "duration_mode": "autonomous", "severity_seconds": {"low": 10}}]]
         for value in bad:

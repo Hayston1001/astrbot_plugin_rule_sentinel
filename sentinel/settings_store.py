@@ -8,12 +8,13 @@ import tempfile
 from pathlib import Path
 from string import Formatter
 
+from .action_config import REPLY_DEFAULTS, resolve_reply_options
 from .group_settings import DEFAULT_CHAT_QUERY_ITEMS, validate_chat_query_items
 from .notifications import validate_notification_targets
 from .plugin_settings import read_settings
 
 
-LIVE_SETTING_KEYS = frozenset({"llm_no_action_reason_enabled", "chat_query_items"})
+LIVE_SETTING_KEYS = frozenset({"llm_no_action_reason_enabled", "chat_query_items", *REPLY_DEFAULTS})
 
 DEFAULTS = {
     "queue_capacity_per_group": 100, "ingress_capacity": 256,
@@ -25,6 +26,7 @@ DEFAULTS = {
     "protected_target_policy": "exempt", "protected_target_template": "有消息触发了规则 {rule_id}, 但目标是管理员/机器人, {action} 无法执行",
     "protected_target_quote": False,
     "default_execution_mode": "execute", "default_action_mode": "auto", "group_overrides": {},
+    **REPLY_DEFAULTS,
     "message_retention_days": 30, "llm_reason_language": "", "llm_no_action_reason_enabled": True,
     "chat_query_items": list(DEFAULT_CHAT_QUERY_ITEMS),
     "image_judging_enabled": False, "image_understanding_mode": "direct", "image_provider_id": "",
@@ -94,6 +96,7 @@ def validate_settings(config):
         raise ValueError("invalid action execution setting")
     validate_chat_query_items(config["chat_query_items"])
     validate_protected_target_settings(config)
+    resolve_reply_options({}, config)
     if not isinstance(config["llm_provider_id"], str):
         raise ValueError("invalid settings text")
     if not isinstance(config["notification_targets"], list):
