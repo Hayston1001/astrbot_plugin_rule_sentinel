@@ -93,7 +93,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_incomplete_notification_config_rejected_before_lock(self):
         path = self.directory / "lock"
-        config = {**self.config, "notification_target": "p:FriendMessage:u"}
+        config = {**self.config, "notification_targets": ["p:FriendMessage:u"]}
         host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue, lock_path=path, session_gate=self.session_gate)
         with self.assertRaises(ValueError):
             await host.start()

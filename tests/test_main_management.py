@@ -35,7 +35,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         event = types.ModuleType("astrbot.api.event")
         event.AstrMessageEvent = object
         event.filter = types.SimpleNamespace(EventMessageType=types.SimpleNamespace(GROUP_MESSAGE="group"),
-                                             event_message_type=lambda *_args, **_kwargs: lambda handler: handler)
+                                              event_message_type=lambda *_args, **_kwargs: lambda handler: handler,
+                                              on_llm_request=lambda: lambda handler: handler)
         components = types.ModuleType("astrbot.api.message_components")
         components.At = type("At", (), {})
         components.Plain = type("Plain", (), {})
@@ -78,7 +79,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 34)
+        self.assertEqual(len(self.context.routes), 36)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -92,6 +93,43 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len((await self.plugin.list_rules())["data"]), 1)
         self.request.query["rule_id"] = "r"
         self.assertEqual((await self.plugin.rule_history())["data"][0]["version"], 1)
+
+    async def test_notification_recipient_lookup_is_authorized_and_read_only(self):
+        from sentinel_test_plugin.sentinel import notification_recipients as recipients
+
+        self.context.get_db = lambda: "db"
+        response = {"recipients": [], "selected": None, "has_more": False}
+        with patch.object(recipients, "find_notification_recipients", new=AsyncMock(return_value=response)) as lookup:
+            for actor in ("", "api_key:synthetic"):
+                self.request.username = actor
+                self.assertEqual((await self.plugin.list_notification_recipients())["status_code"], 403)
+                self.assertEqual((await self.plugin.get_notification_recipient_labels())["status_code"], 403)
+            self.request.username = "admin"
+            for query in ({"page": "0"}, {"page": "401"}, {"page": "1" * 500}, {"search": "x" * 256},
+                          {"selected": "line\nbreak"}):
+                self.request.query = query
+                self.assertEqual((await self.plugin.list_notification_recipients())["status_code"], 400)
+            lookup.assert_not_awaited()
+            self.request.query = {"search": "  昵称 ", "page": "2", "selected": "tg:FriendMessage:u"}
+            self.assertEqual((await self.plugin.list_notification_recipients())["data"], response)
+            lookup.assert_awaited_once_with("db", {"qq1": "qq_official", "tg": "telegram"},
+                                           search="昵称", page=2, selected="tg:FriendMessage:u")
+            self.assertFalse(self.plugin.config["notification_targets"])
+            self.raw_body = b'{"targets":["tg:GroupMessage:g"]}'
+            self.assertEqual((await self.plugin.get_notification_recipient_labels())["status_code"], 400)
+            self.raw_body = b'{"targets":["tg:FriendMessage:u","qq1:FriendMessage:u"]}'
+            lookup.return_value = []
+            self.assertEqual((await self.plugin.get_notification_recipient_labels())["data"], {"recipients": []})
+            self.assertEqual(lookup.await_args.kwargs, {"page": None, "targets": ("tg:FriendMessage:u", "qq1:FriendMessage:u")})
+
+    async def test_save_notification_recipients_roundtrip(self):
+        targets = ["qq1:FriendMessage:admin", "tg:FriendMessage:admin"]
+        self.raw_body = json.dumps({"notification_targets": targets, "notification_interval_seconds": 90}).encode()
+        self.assertEqual((await self.plugin.save_settings())["data"]["settings"]["notification_targets"], targets)
+        self.assertEqual(self.plugin.settings_store.load_or_migrate({})["notification_targets"], targets)
+        self.raw_body = b'{"notification_targets":["qq1:GroupMessage:group"]}'
+        self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
+        self.assertEqual((await self.plugin.get_settings())["data"]["notification_targets"], targets)
 
     async def test_action_rules_and_execution_status(self):
         fields = {"platform_id": "p", "group_id": "g", "rule_id": "reply", "expected_version": 0,
@@ -265,6 +303,20 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
         self.raw_body = json.dumps({"platform_id": "__rule_sentinel_system__", "group_id": "g"}).encode()
         self.assertEqual((await self.plugin.register_group())["status_code"], 400)
+
+    async def test_group_chat_disclosure_roundtrip(self):
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_inherit":false,"chat_show_rules":true,"chat_show_mute_target":true}}'
+        result = await self.plugin.save_group_settings()
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"],
+                         {"chat_query_inherit": False, "chat_show_rules": True, "chat_show_mute_target": True})
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_show_rules":1}}'
+        self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_items":[]}}'
+        result = await self.plugin.save_group_settings()
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"],
+                         {"chat_query_inherit": False, "chat_query_items": []})
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_items":["mute_target"]}}'
+        self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
 
     async def test_no_action_reason_setting_roundtrip_and_invalid_input(self):
         self.assertTrue((await self.plugin.get_settings())["data"]["llm_no_action_reason_enabled"])
@@ -836,6 +888,62 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             second.close.assert_awaited_once()
             self.assertIsNone(self.plugin.intake)
 
+    async def test_global_chat_scope_changes_apply_to_already_attached_tools(self):
+        from test_group_chat_help import FakeTool, FakeToolSet, group_event
+
+        self.raw_body = b'{"chat_query_items":["rules","recall"]}'
+        self.assertIn("data", await self.plugin.save_settings())
+        self.raw_body = b'{"platform_id":"p","group_id":"local","overrides":{"chat_query_inherit":false,"chat_query_items":["rules"]}}'
+        self.assertIn("data", await self.plugin.save_group_settings())
+        event = group_event()
+        sdk = types.SimpleNamespace(FunctionTool=FakeTool, ToolSet=FakeToolSet)
+        context = types.SimpleNamespace(context=types.SimpleNamespace(event=event))
+
+        async def attach(event):
+            req = types.SimpleNamespace(func_tool=None, system_prompt="")
+            await self.plugin.provide_group_chat_info(event, req)
+            return req.func_tool.get_tool("rule_sentinel_group_info") if req.func_tool else None
+
+        with patch.dict(sys.modules, {"astrbot.core.agent.tool": sdk}), \
+                patch.object(self.plugin, "_stop_monitoring", new=AsyncMock()) as stop, \
+                patch.object(self.plugin, "_start_monitoring", new=AsyncMock()) as start:
+            old_tool = await attach(event)
+            self.assertEqual(json.loads(await old_tool.call(context, topic="rules"))["status"], "ok")
+            self.raw_body = b'{"chat_query_items":["recall"]}'
+            self.request.username = "api_key:synthetic"
+            self.assertEqual((await self.plugin.save_settings())["status_code"], 403)
+            self.request.username = "admin"
+            self.assertEqual((await self.plugin.save_settings())["data"]["settings"]["chat_query_items"], ["recall"])
+            self.assertEqual(json.loads(await old_tool.call(context, topic="rules")), {"status": "not_public"})
+            for current_event in (event, group_event(platform="other"), group_event(group="other")):
+                tool = await attach(current_event)
+                self.assertEqual(tool.parameters["properties"]["topic"]["enum"], ["recall", "actions"])
+            self.raw_body = b'{"chat_query_items":[]}'
+            self.assertEqual((await self.plugin.save_settings())["data"]["settings"]["chat_query_items"], [])
+            self.assertIsNone(await attach(event))
+            self.assertEqual(json.loads(await old_tool.call(context, topic="actions")), {"status": "not_public"})
+            local = await attach(group_event(group="local"))
+            self.assertEqual(local.parameters["properties"]["topic"]["enum"], ["rules"])
+            stop.assert_not_awaited()
+            start.assert_not_awaited()
+        self.assertEqual((await self.plugin.get_settings())["data"]["chat_query_items"], [])
+
+    async def test_chat_query_lock_preserves_local_settings_and_rejects_api_edits(self):
+        self.raw_body = b'{"chat_query_items":["rules"]}'
+        self.assertIn("data", await self.plugin.save_settings())
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_inherit":false,"chat_query_items":[]}}'
+        self.assertIn("data", await self.plugin.save_group_settings())
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_inherit":true,"context_messages":4}}'
+        data = (await self.plugin.save_group_settings())["data"]
+        self.assertEqual(data["settings"]["group_overrides"]["p/g"], {"context_messages": 4, "chat_query_items": []})
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"chat_query_items":["rules"]}}'
+        self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"context_messages":5}}'
+        data = (await self.plugin.save_group_settings())["data"]
+        self.assertEqual(data["settings"]["group_overrides"]["p/g"], {"context_messages": 5, "chat_query_items": []})
+        self.raw_body = b'{"chat_query_items":["mute_target"]}'
+        self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
+
     async def test_reason_only_setting_keeps_monitor_running(self):
         first = types.SimpleNamespace(intake=object(), start=AsyncMock(), close=AsyncMock())
         second = types.SimpleNamespace(intake=object(), start=AsyncMock(), close=AsyncMock())
@@ -1103,6 +1211,33 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules, {name: None for name in command_modules()}):
                 await self.plugin.capture_group_message(event)
                 self.assertEqual(offered[-1].text, "加微信拉群")
+        finally:
+            self.plugin.intake = None
+
+    async def test_nickname_capture_obeys_effective_chat_query_source(self):
+        admission = types.SimpleNamespace(policy=types.SimpleNamespace(mode="blocklist", groups=set()), settings_match=None)
+        offered = []
+        self.plugin.intake = types.SimpleNamespace(runtime=types.SimpleNamespace(admission=admission), offer=offered.append)
+        self.plugin.group_index = types.SimpleNamespace(is_enabled=lambda *_: True)
+        self.context.get_config = lambda *, umo: {"wake_prefix": []}
+        plain = sys.modules["astrbot.api.message_components"].Plain()
+        raw = types.SimpleNamespace(group_openid="g", raw_data={"author": {"member_openid": "sender", "bot": False}, "message_type": 0})
+        obj = types.SimpleNamespace(raw_message=raw, group_id="g", message_id="message", message=[plain],
+                                    message_str="test", sender=types.SimpleNamespace(nickname="群昵称"))
+        event = types.SimpleNamespace(message_obj=obj, get_platform_name=lambda: "qq_official", get_platform_id=lambda: "p",
+                                      get_sender_id=lambda: "sender", unified_msg_origin="p:GroupMessage:g")
+        try:
+            self.plugin.config["group_overrides"] = {"p/g": {"chat_query_inherit": False, "chat_show_mute_target": True}}
+            await self.plugin.capture_group_message(event)
+            self.plugin.config["group_overrides"]["p/g"].pop("chat_query_inherit")
+            self.plugin.config["chat_query_items"] = ["mute"]
+            await self.plugin.capture_group_message(event)
+            self.plugin.config.update(chat_query_items=["mute", "mute_target"],
+                                      group_overrides={"p/g": {"chat_query_items": []}})
+            await self.plugin.capture_group_message(event)
+            self.plugin.config["group_overrides"]["p/g"]["chat_query_inherit"] = False
+            await self.plugin.capture_group_message(event)
+            self.assertEqual([msg.sender_display_name for msg in offered], ["群昵称", None, "群昵称", None])
         finally:
             self.plugin.intake = None
 

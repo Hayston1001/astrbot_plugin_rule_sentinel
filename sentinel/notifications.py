@@ -1,6 +1,6 @@
 """Bounded, privacy-preserving administrator fault notifications.
 
-The host supplies an explicitly configured private recipient, send function,
+The host supplies explicitly configured private recipients, a send function,
 and audit callback. No recipient is selected automatically. Notifications are
 informational and never authorize, retry, or execute moderation actions.
 """
@@ -21,21 +21,38 @@ MESSAGES = {
     "storage_failed": "规则监控存储失败. 请查看插件日志.",
     "circuit_open": "规则监控模型熔断, 有消息未处理. 请查看插件审计.",
 }
+MAX_NOTIFICATION_TARGETS = 20
+MAX_NOTIFICATION_TARGET_LENGTH = 512
+
+
+def validate_notification_targets(targets):
+    if not isinstance(targets, (list, tuple)) or len(targets) > MAX_NOTIFICATION_TARGETS:
+        raise ValueError("invalid notification recipient list")
+    seen = set()
+    for target in targets:
+        if (not isinstance(target, str) or not target or len(target) > MAX_NOTIFICATION_TARGET_LENGTH
+                or target != target.strip() or any(ord(char) < 32 or ord(char) == 127 for char in target)):
+            raise ValueError("invalid notification recipient")
+        parts = target.split(":", 2)
+        if (len(parts) != 3 or not parts[0] or any(char.isspace() for char in parts[0])
+                or parts[1] != "FriendMessage" or not parts[2] or parts[2] != parts[2].strip()):
+            raise ValueError("recipient must be a private AstrBot session")
+        if target in seen:
+            raise ValueError("duplicate notification recipient")
+        seen.add(target)
+    return tuple(targets)
 
 
 class NotificationService:
-    def __init__(self, *, recipient: str, interval_seconds: float, send, audit, clock=time.monotonic,
+    def __init__(self, *, recipients, interval_seconds: float, send, audit, clock=time.monotonic,
                  send_timeout_seconds: float = 10):
-        if not isinstance(recipient, str) or not recipient.strip():
+        self.recipients = validate_notification_targets(recipients)
+        if not self.recipients:
             raise ValueError("explicit private notification recipient required")
-        parts = recipient.split(":", 2)
-        if len(parts) != 3 or not parts[0].strip() or parts[1] != "FriendMessage" or not parts[2].strip():
-            raise ValueError("recipient must be a private AstrBot session")
         if type(interval_seconds) not in (int, float) or not math.isfinite(interval_seconds) or interval_seconds <= 0:
             raise ValueError("invalid notification interval")
         if type(send_timeout_seconds) not in (int, float) or not math.isfinite(send_timeout_seconds) or send_timeout_seconds <= 0:
             raise ValueError("invalid notification timeout")
-        self.recipient = recipient
         self.interval = interval_seconds
         self.send = send
         self.audit = audit
@@ -54,8 +71,18 @@ class NotificationService:
             # Reserve before the network call to prevent concurrent bursts and
             # repeated sends after ambiguous failures.
             self.next_allowed[code] = now + self.interval
+        statuses = set()
+        for offset in range(0, len(self.recipients), 4):
+            batch = self.recipients[offset:offset + 4]
+            results = await asyncio.gather(*(self._send_one(target, code) for target in batch))
+            statuses.update(results)
+        if "audit_failed" in statuses:
+            return "audit_failed"
+        return next(iter(statuses)) if len(statuses) == 1 else "partial"
+
+    async def _send_one(self, target, code):
         try:
-            accepted = await asyncio.wait_for(self.send(self.recipient, MESSAGES[code]), timeout=self.send_timeout)
+            accepted = await asyncio.wait_for(self.send(target, MESSAGES[code]), timeout=self.send_timeout)
             # AstrBot's boolean only indicates that a platform was found. It is
             # not a receipt proving the administrator received the message.
             result = "submitted" if accepted is True else "failed" if accepted is False else "unknown"
@@ -152,7 +179,7 @@ class NotificationDispatcher:
                 self.dropped += 1
 
 
-def build_notification_dispatcher(*, context, queue, recipient: str, interval_seconds: int,
+def build_notification_dispatcher(*, context, queue, recipients, interval_seconds: int,
                                   message_chain_factory=None, is_authorized=lambda: True, on_failure=None):
     """Build but do not start a dispatcher using AstrBot's proactive API."""
     if message_chain_factory is None:
@@ -168,6 +195,6 @@ def build_notification_dispatcher(*, context, queue, recipient: str, interval_se
     async def audit(code, status):
         await run_sync_safely(queue.record_notification, code, status)
 
-    service = NotificationService(recipient=recipient, interval_seconds=interval_seconds,
+    service = NotificationService(recipients=recipients, interval_seconds=interval_seconds,
                                   send=send, audit=audit)
     return NotificationDispatcher(service, capacity=64, on_failure=on_failure)

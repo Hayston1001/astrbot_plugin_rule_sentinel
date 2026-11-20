@@ -51,7 +51,7 @@ const settings = {quick_start_completed: true, action_execution_enabled: true, m
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,
   max_duration_seconds: 2592000, model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60,
   group_rate_per_minute: 30, model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
-  ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
+  ingress_capacity: 256, notification_targets: [], notification_interval_seconds: 0,
   image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
   image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
   image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10};

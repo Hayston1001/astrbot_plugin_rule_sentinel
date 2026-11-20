@@ -21,13 +21,15 @@ from .sentinel.dry_run_queue import DryRunQueue
 from .sentinel.event_intake import Skip
 from .sentinel.event_stream import EventHub
 from .sentinel.group_discovery import discover_groups
+from .sentinel.group_chat_help import attach_group_tool, display_name, event_scope, group_info
+from .sentinel.group_settings import GROUP_CHAT_KEYS, effective_chat_query_items, merge_group_chat_settings
 from .sentinel.management_service import ManagementService
 from .sentinel.plugin_settings import decision_model_unconfigured, read_settings
 from .sentinel.provider_capabilities import declared_modalities, image_capability, tool_capability
 from .sentinel.qq_official_snapshot import extract
 from .sentinel.message_entry import is_activated_command, strip_wake_prefix
 from .sentinel.rule_store import RuleStore, VersionConflict
-from .sentinel.settings_store import DEFAULTS, SettingsStore, capture_legacy_config, validate_settings
+from .sentinel.settings_store import DEFAULTS, LIVE_SETTING_KEYS, SettingsStore, capture_legacy_config, validate_settings
 
 
 PLUGIN_NAME = "astrbot_plugin_rule_sentinel"
@@ -137,6 +139,8 @@ class RuleSentinel(Star):
             ("confirm-pending-mute", self.confirm_pending_mute, ["POST"]),
             ("events", self.stream_events, ["GET"]),
             ("notifications", self.list_notifications, ["GET"]),
+            ("notification-recipients", self.list_notification_recipients, ["GET"]),
+            ("notification-recipient-labels", self.get_notification_recipient_labels, ["POST"]),
             ("status", self.status, ["GET"]),
             ("platforms", self.list_platforms, ["GET"]),
             ("groups", self.list_groups, ["GET"]),
@@ -227,6 +231,37 @@ class RuleSentinel(Star):
             await host.close()
             self.host = None
 
+    @filter.on_llm_request()
+    async def provide_group_chat_info(self, event: AstrMessageEvent, req):
+        """Expose a group-scoped read tool to the ordinary reply agent only."""
+        scope = event_scope(event)
+        if scope is None or self._closing or self.management is None:
+            return
+        try:
+            items = effective_chat_query_items(self.config, *scope)
+        except (AttributeError, TypeError, ValueError):
+            return
+        from astrbot.core.agent.tool import FunctionTool, ToolSet
+        attach_group_tool(req, event, scope, self._lookup_group_chat_info,
+                          tool_type=FunctionTool, tool_set_type=ToolSet, items=items)
+
+    async def _lookup_group_chat_info(self, scope, topic):
+        async with self._settings_lock:
+            if self._closing or self.management is None:
+                return {"status": "unavailable"}
+            try:
+                return await asyncio.to_thread(
+                    group_info, rules=self._rules, queue=self._queue, config=self.config, scope=scope,
+                    running=self.intake is not None, platform_ready=self._chat_platform_ready(scope[0]), topic=topic,
+                )
+            except Exception:
+                return {"status": "unavailable"}
+
+    def _chat_platform_ready(self, platform_id):
+        executor = getattr(self.host, "mute_executor", None)
+        return executor is not None and any(item.meta().id == platform_id for item in
+                                            self.context.platform_manager.get_insts())
+
     async def terminate(self):
         self._closing = True
         if self._retention_task is not None:
@@ -295,7 +330,10 @@ class RuleSentinel(Star):
                              image_segment_types=(Image,))
             if result.message is not None:
                 from dataclasses import replace
-                result_message = replace(result.message, text=strip_wake_prefix(event, self.context, result.message.text, At))
+                nickname = (display_name(getattr(getattr(obj, "sender", None), "nickname", None), result.message.sender_id)
+                             if "mute_target" in effective_chat_query_items(self.config, *key) else None)
+                result_message = replace(result.message, text=strip_wake_prefix(event, self.context, result.message.text, At),
+                                         sender_display_name=nickname)
                 if len(result_message.text) > MAX_MESSAGE_CHARS or len(result.message.text) > MAX_MESSAGE_CHARS:
                     status = intake.offer(Skip(result_message.platform_id, result_message.group_id,
                                       result_message.message_id, "message_too_long", result_message.session_origin))
@@ -572,6 +610,53 @@ class RuleSentinel(Star):
             return error_response("Invalid pagination", status_code=400)
         return await self._run(self.management.list_notifications, request.username, after_id, limit)
 
+    async def list_notification_recipients(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        from .sentinel.notification_recipients import MAX_PAGE, find_notification_recipients, recipient_platforms
+        search = request.query.get("search", "")
+        selected = request.query.get("selected", "")
+        raw_page = request.query.get("page", "1")
+        if (not isinstance(search, str) or len(search) > 255 or not isinstance(selected, str)
+                or len(selected) > 512 or not isinstance(raw_page, str) or not raw_page.isascii()
+                or not raw_page.isdecimal() or len(raw_page) > len(str(MAX_PAGE))
+                or not 1 <= int(raw_page) <= MAX_PAGE
+                or any(ord(char) < 32 or ord(char) == 127 for char in search + selected)):
+            return error_response("Invalid recipient search", status_code=400)
+        try:
+            return json_response(await find_notification_recipients(
+                self.context.get_db(), recipient_platforms(self.context), search=search.strip(),
+                page=int(raw_page), selected=selected.strip(),
+            ))
+        except Exception:
+            logger.error("Rule Sentinel could not list notification recipients")
+            return error_response("Could not load private sessions", status_code=503)
+
+    async def get_notification_recipient_labels(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        from .sentinel.notification_recipients import find_notification_recipients, recipient_platforms
+        from .sentinel.notifications import validate_notification_targets
+        data = await self._payload()
+        if not isinstance(data, dict) or set(data) != {"targets"} or not isinstance(data["targets"], list):
+            return error_response("Invalid notification recipients", status_code=400)
+        try:
+            targets = validate_notification_targets(data["targets"])
+        except ValueError:
+            return error_response("Invalid notification recipients", status_code=400)
+        try:
+            recipients = await find_notification_recipients(
+                self.context.get_db(), recipient_platforms(self.context), page=None, targets=targets,
+            )
+            return json_response({"recipients": recipients})
+        except Exception:
+            logger.error("Rule Sentinel could not resolve notification recipients")
+            return error_response("Could not load private sessions", status_code=503)
+
     async def list_platforms(self):
         if self.management is None:
             return error_response("Service not initialized", status_code=503)
@@ -795,8 +880,9 @@ class RuleSentinel(Star):
                     if submitted:
                         updated["shared_violation_groups"] = submitted
                 else:
-                    updated = dict(data["overrides"])
+                    updated = {k: v for k, v in data["overrides"].items() if k not in GROUP_CHAT_KEYS}
                     updated.update({k: v for k, v in previous.items() if k in shared_keys})
+                    updated.update(merge_group_chat_settings(previous, data["overrides"]))
                 if updated:
                     overrides[key] = updated
                 else:
@@ -828,8 +914,8 @@ class RuleSentinel(Star):
             changed = {key for key in candidate if candidate[key] != self.config.get(key)}
             if candidate != self.config or remember_group is not None:
                 await asyncio.to_thread(self.settings_store.save, candidate, remember_group=remember_group)
-            if changed == {"llm_no_action_reason_enabled"}:
-                self.config["llm_no_action_reason_enabled"] = candidate["llm_no_action_reason_enabled"]
+            if changed and changed <= LIVE_SETTING_KEYS:
+                self.config.update({key: candidate[key] for key in changed})
             elif candidate != self.config:
                 self.config.clear()
                 self.config.update(candidate)

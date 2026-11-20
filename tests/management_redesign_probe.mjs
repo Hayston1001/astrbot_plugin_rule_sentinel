@@ -110,7 +110,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       decision_backend: "", rule_selection_strategy: "model", llm_provider_id: "old-provider", max_duration_seconds: 30,
       model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60, group_rate_per_minute: 30,
       model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
-      ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
+      ingress_capacity: 256, notification_targets: [], notification_interval_seconds: 0,
       default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "", llm_no_action_reason_enabled: true,
       protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true,
       image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
@@ -180,7 +180,7 @@ for (const [enabled, available] of [[true, true], [true, false], [false, false]]
 }
 statusResult = {monitoring: "disabled", backend: "llm"};
 await refreshStatusForTest();
-assert.match(elements["status-detail"].textContent, /监控设置/);
+assert.match(elements["status-detail"].textContent, /请检查设置/);
 statusFails = true;
 await refreshStatusForTest();
 assert.equal(elements.status.textContent, "状态不可用");

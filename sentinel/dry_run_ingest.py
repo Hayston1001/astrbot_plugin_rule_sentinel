@@ -27,6 +27,7 @@ class IncomingMessage:
     original_text: str | None = None
     image_urls: tuple[str, ...] = ()
     received_at: float = field(default_factory=time.monotonic)
+    sender_display_name: str | None = None
 
 
 class DryRunAdmission:
@@ -104,6 +105,8 @@ class DryRunAdmission:
             payload["original_text"] = message.original_text
         if message.message_time is not None:
             payload["message_time"] = message.message_time
+        if message.sender_display_name is not None:
+            payload["sender_display_name"] = message.sender_display_name
         context_limit = self.context_policy(message.platform_id, message.group_id) if self.context_policy else 0
         token = None
         result = None

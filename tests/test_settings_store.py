@@ -188,6 +188,61 @@ class SettingsStoreTests(unittest.TestCase):
                 store.save({**changed, "message_retention_days": 10})
                 purge.assert_called_once()
 
+    def test_legacy_notification_target_becomes_a_recipient_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            store = SettingsStore(path / "state.sqlite", path / "backup")
+            target = "qq1:FriendMessage:admin"
+            migrated = store.load_or_migrate({"notification_target": target, "notification_interval_seconds": 90})
+            self.assertNotIn("notification_target", migrated)
+            self.assertEqual(migrated["notification_targets"], [target])
+            self.assertEqual(migrated["notification_interval_seconds"], 90)
+            old = {key: value for key, value in migrated.items() if key != "notification_targets"}
+            with closing(sqlite3.connect(store.path)) as db, db:
+                db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1",
+                           (json.dumps({**old, "notification_target": target}),))
+            self.assertEqual(store.load_or_migrate({}), migrated)
+            self.assertEqual(store.load_or_migrate({}), migrated)
+            updated = {**migrated, "notification_targets": [target, "qq2:FriendMessage:admin"]}
+            store.save(updated)
+            self.assertEqual(store.load_or_migrate({}), updated)
+            for invalid in ([], [target, target], ["qq1:GroupMessage:g"], ["qq1:FriendMessage: "],
+                            target, [f"qq1:FriendMessage:{index}" for index in range(21)]):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    store.save({**migrated, "notification_targets": invalid})
+
+    def test_retired_chat_switch_migration_preserves_effective_disclosure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            previous = store.load_or_migrate({})
+            previous["chat_query_use_global"] = True
+            previous["chat_query_items"] = ["status", "reply"]
+            previous["group_overrides"] = {"p/g": {"chat_query_inherit": False, "chat_query_items": ["rules"]}}
+            for allowed in (True, False):
+                with closing(sqlite3.connect(store.path)) as db, db:
+                    db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1",
+                               (json.dumps({**previous, "chat_query_allow_group_overrides": allowed}),))
+                migrated = store.load_or_migrate({})
+                self.assertNotIn("chat_query_use_global", migrated)
+                self.assertNotIn("chat_query_allow_group_overrides", migrated)
+                self.assertEqual(migrated["chat_query_items"], ["status", "reply"])
+                local = migrated["group_overrides"]["p/g"]
+                self.assertEqual(local["chat_query_items"], ["rules"])
+                self.assertIs(local.get("chat_query_inherit", True), not allowed)
+                self.assertEqual(store.load_or_migrate({}), migrated)
+            for invalid in ({"chat_query_allow_group_overrides": True}, {"chat_query_items": ["mute_target"]},
+                            {"chat_query_items": ["actions"]}, {"chat_query_items": None},
+                            {"chat_query_items": ["rules", "rules"]},
+                            {"group_overrides": {"p/g": {"chat_query_items": ["mute_target"]}}},
+                            {"group_overrides": {"p/g": {"chat_query_inherit": 0}}}):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    store.save({**migrated, **invalid})
+            with patch("sentinel.message_retention.purge_expired_contents") as purge:
+                changed = {**migrated, "chat_query_items": []}
+                store.save(changed)
+                purge.assert_not_called()
+                self.assertEqual(store.load_or_migrate({}), changed)
+
     def test_no_action_reason_switch_migrates_on_and_requires_boolean(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")

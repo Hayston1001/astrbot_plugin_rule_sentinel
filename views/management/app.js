@@ -351,7 +351,7 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
     rules: ["群规则", "管理所选群的规则和处理动作."],
     groups: ["群管理", "管理各群的监控, 名称和处理方式."],
     status: ["总览", "查看待确认动作, 服务状态和群情况."],
-    settings: ["监控设置", "设置全局默认和运行限制."],
+    settings: ["设置", "管理监控, 判定和群规守卫问答."],
   };
   el("page-title").textContent = titles[name][0];
   el("page-description").textContent = titles[name][1];
@@ -486,7 +486,7 @@ async function refreshStatus() {
   runtimeStatus = status;
   const startErrors = {
     model_not_configured: "监控未启动: 请先选择默认判定模型.",
-    invalid_configuration: "监控未启动: 插件配置不合法, 请检查监控设置.",
+    invalid_configuration: "监控未启动: 插件配置不合法, 请检查设置.",
     lock_in_use: "监控未启动: 队列锁已被占用, 请检查是否有另一个实例运行.",
     start_failed: "监控未启动: 启动失败, 请查看 AstrBot 日志."
   };
@@ -502,7 +502,7 @@ async function refreshStatus() {
      ? "消息处理服务已启动, 不代表模型或平台可用. 真实动作仍受各群和规则设置约束."
      : status.start_error || status.monitoring === "invalid_configuration"
        ? startErrors[status.start_error || "invalid_configuration"] || "消息处理服务未启动, 请查看 AstrBot 日志."
-       : "消息处理服务未启动, 请检查监控设置.";
+       : "消息处理服务未启动, 请检查设置.";
   } catch (error) { runtimeStatus = null; showError(el("status-detail"), error); el("status").setAttribute("data-tone", "warning"); el("status").textContent = "状态不可用"; el("status-label").textContent = "状态不可用"; el("status-main").setAttribute("data-tone", "warning"); el("status-backend").textContent = "-"; el("status-execution").textContent = "-"; }
   renderGroupList();
   renderAllGroupStatus();
@@ -2942,7 +2942,7 @@ const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_select
   "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
-  "queue_capacity_per_group", "ingress_capacity", "notification_target", "notification_interval_seconds",
+  "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_judging_enabled", "image_understanding_mode", "image_provider_id", "image_caption_prompt",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"];
 const numericSettings = new Set(["message_retention_days", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
@@ -2954,15 +2954,65 @@ const booleanSettings = new Set(["action_execution_enabled", "protected_target_q
 const byteSettings = new Set(["image_max_bytes_per_image", "image_max_total_bytes"]);
 const MIB = 1048576;
 let modelChoiceEdited = false;
+const chatQueryKeys = ["status", "rules", "mute", "mute_target", "recall", "reply"];
+const chatQueryField = (scope, item) => el(`${scope}-chat-query-${item.replace("_", "-")}`);
+const defaultGroupChatItems = ["status", "mute", "recall", "reply"];
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
   "group-protected-policy", "group-protected-quote", "group-protected-template",
   "group-image-enabled", "group-image-model", "group-context-messages"];
-function rememberGroupDraft() {
+function readChatQueryItems(scope) {
+  return chatQueryKeys.filter(item => chatQueryField(scope, item).checked);
+}
+function sameChatQueryItems(first, second) {
+  return first.length === second.length && first.every(item => second.includes(item));
+}
+function updateChatQueryDependency(scope, readOnly = false) {
+  const mute = chatQueryField(scope, "mute").checked;
+  const target = chatQueryField(scope, "mute_target");
+  target.disabled = readOnly || !mute;
+  if (!mute) target.checked = false;
+}
+function showChatQueryItems(scope, items, readOnly = false) {
+  for (const item of chatQueryKeys) {
+    const input = chatQueryField(scope, item);
+    input.checked = items.includes(item);
+    input.disabled = readOnly;
+  }
+  updateChatQueryDependency(scope, readOnly);
+}
+function savedGroupChatItems(scope) {
+  const overrides = currentSettings?.group_overrides?.[`${scope.platform_id}/${scope.group_id}`] || {};
+  return overrides.chat_query_items ?? [
+    ...defaultGroupChatItems, ...(overrides.chat_show_rules === true ? ["rules"] : []),
+    ...(overrides.chat_show_mute_target === true ? ["mute_target"] : []),
+  ];
+}
+function groupChatInherits(scope) {
+  return currentSettings?.group_overrides?.[`${scope.platform_id}/${scope.group_id}`]?.chat_query_inherit !== false;
+}
+function showGroupChatQuery(scope, draft) {
+  const ready = Array.isArray(currentSettings?.chat_query_items);
+  const savedInherit = groupChatInherits(scope);
+  const inherit = draft?.chatQueryInherit ?? savedInherit;
+  const toggle = el("group-chat-inherit");
+  toggle.disabled = !ready;
+  toggle.checked = !ready || inherit;
+  showChatQueryItems("group", draft?.chatQueryItems ?? savedGroupChatItems(scope), toggle.checked);
+  const source = `当前按${savedInherit ? "全局" : "本群"}清单回答.`;
+  const pending = inherit !== savedInherit ? ` 保存后改用${inherit ? "全局" : "本群"}清单.` : "";
+  const local = inherit ? " 下方保留本群勾选项, 关闭开关后可编辑."
+    : pending ? "" : " 修改后请保存群配置.";
+  el("group-chat-source").textContent = ready ? source + pending + local : "问答设置暂不可用.";
+  el("group-chat-open-global").hidden = !ready || !toggle.checked;
+}
+function rememberGroupDraft(chatChanges = {}) {
   const scope = group();
   if (!currentSettings || !scope.platform_id || !scope.group_id) return;
   const values = Object.fromEntries(groupDraftFields.map((id) => [id, el(id).value]));
-  groupDrafts.set(groupKey(scope), {...values, customTemplate: el("group-template-override").checked,
-    templateInitialized: groupTemplateDraftInitialized, reasonInitialized: groupReasonDraftInitialized});
+  const key = groupKey(scope);
+  groupDrafts.set(key, {...groupDrafts.get(key), ...values, customTemplate: el("group-template-override").checked,
+    templateInitialized: groupTemplateDraftInitialized, reasonInitialized: groupReasonDraftInitialized,
+    ...chatChanges});
   el("group-settings-status").textContent = "有尚未保存的修改.";
 }
 function postSettings(endpoint, data) {
@@ -3106,7 +3156,7 @@ function updateGroupSettingsHints(animate = false) {
   setPanelVisibility(el("group-template-label"), el("group-template-override").checked, {animate});
   el("group-template-source").textContent = el("group-template-override").checked
     ? "群提示使用下方本群内容, 不改变全局默认."
-    : "群提示使用监控设置中的全局默认内容.";
+    : "群提示使用设置中的全局默认内容.";
   renderNoticeExample("group-template-preview", template || "");
 }
 function showGroupOverrides() {
@@ -3123,6 +3173,7 @@ function showGroupOverrides() {
   el("group-model").value = overrides.model?.model || "";
   el("group-strategy").value = overrides.strategy || "";
   el("group-context-messages").value = String(overrides.context_messages ?? 0);
+  showGroupChatQuery(scope, draft);
   el("group-image-enabled").value = Object.hasOwn(overrides, "image_enabled") ? String(overrides.image_enabled) : "";
   el("group-image-model").value = overrides.image_model?.model || "";
   groupReasonDraftInitialized = Object.hasOwn(overrides, "llm_reason_language");
@@ -3134,13 +3185,16 @@ function showGroupOverrides() {
   groupTemplateDraftInitialized = Object.hasOwn(overrides, "protected_template");
   el("group-template-override").checked = groupTemplateDraftInitialized;
   el("group-protected-template").value = overrides.protected_template || "";
-  if (draft) {
+  if (draft && Object.hasOwn(draft, "customTemplate")) {
     for (const id of groupDraftFields) el(id).value = draft[id];
     el("group-template-override").checked = draft.customTemplate;
     groupTemplateDraftInitialized = draft.templateInitialized;
     groupReasonDraftInitialized = draft.reasonInitialized;
   }
-  el("group-settings-status").textContent = draft ? "有尚未保存的修改." : "";
+  el("group-settings-status").textContent = draft
+    ? el("group-chat-inherit").checked && !Object.hasOwn(draft, "customTemplate") ? "本群问答草稿已保留."
+      : "有尚未保存的修改."
+    : "";
   updateGroupModelFields();
   updateGroupSettingsHints();
 }
@@ -3595,6 +3649,15 @@ function sharedCountControl() {
 }
 function readGroupOverrides() {
   const overrides = {};
+  const scope = group();
+  const toggle = el("group-chat-inherit");
+  if (!toggle.disabled) {
+    if (toggle.checked !== groupChatInherits(scope)) overrides.chat_query_inherit = toggle.checked;
+    if (!toggle.checked) {
+      const chatItems = readChatQueryItems("group");
+      if (!sameChatQueryItems(chatItems, savedGroupChatItems(scope))) overrides.chat_query_items = chatItems;
+    }
+  }
   const context = el("group-context-messages").value;
   if (!/^\d+$/.test(context) || Number(context) > 20) {
     el("group-context-messages").focus?.();
@@ -3761,9 +3824,29 @@ el("group-template-override").addEventListener("change", () => {
 });
 el("group-protected-template").addEventListener("input", () => { groupTemplateDraftInitialized = true; updateGroupSettingsHints(); });
 for (const id of [...groupDraftFields, "group-template-override"]) {
-  el(id).addEventListener("input", rememberGroupDraft);
-  el(id).addEventListener("change", rememberGroupDraft);
+  el(id).addEventListener("input", () => rememberGroupDraft());
+  el(id).addEventListener("change", () => rememberGroupDraft());
 }
+for (const item of chatQueryKeys) chatQueryField("group", item).addEventListener("change", () => {
+  updateChatQueryDependency("group");
+  rememberGroupDraft({chatQueryItems: readChatQueryItems("group")});
+});
+el("group-chat-inherit").addEventListener("change", (event) => {
+  rememberGroupDraft({chatQueryInherit: event.target.checked});
+  showGroupChatQuery(group(), groupDrafts.get(groupKey(group())));
+});
+el("group-chat-open-global").addEventListener("click", () => {
+  selectTab("settings");
+  const reveal = () => {
+    if (activeTab !== "settings") return;
+    const heading = el("global-chat-title");
+    heading.scrollIntoView({block: "start"});
+    heading.focus({preventScroll: true});
+  };
+  if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(reveal);
+  else reveal();
+});
+chatQueryField("global", "mute").addEventListener("change", () => updateChatQueryDependency("global"));
 el("group-settings-save").addEventListener("click", async () => {
   const scope = group();
   const button = el("group-settings-save");
@@ -3777,7 +3860,17 @@ el("group-settings-save").addEventListener("click", async () => {
     const result = await postSettings("group-settings", {...scope, overrides});
     currentSettings = result.settings;
     const changedSinceSubmit = groupDrafts.get(key) !== submittedDraft;
-    if (!changedSinceSubmit) groupDrafts.delete(key);
+    if (!changedSinceSubmit) {
+      const remaining = {};
+      if (submittedDraft?.chatQueryItems && !sameChatQueryItems(submittedDraft.chatQueryItems, savedGroupChatItems(scope))) {
+        remaining.chatQueryItems = submittedDraft.chatQueryItems;
+      }
+      if (typeof submittedDraft?.chatQueryInherit === "boolean" && submittedDraft.chatQueryInherit !== groupChatInherits(scope)) {
+        remaining.chatQueryInherit = submittedDraft.chatQueryInherit;
+      }
+      if (Object.keys(remaining).length) groupDrafts.set(key, remaining);
+      else groupDrafts.delete(key);
+    }
     renderGroupList(); renderAllGroupStatus();
     if (key === groupKey(group()) && !changedSinceSubmit) showGroupOverrides();
     const message = result.start_error === "model_not_configured"
@@ -3815,6 +3908,18 @@ function showSettings(settings, submitted = null) {
       field.value = key === "llm_provider_id" && settings.decision_backend === "" ? "" : String(settings[key] ?? "");
     }
   }
+  const supportsGlobalChat = Array.isArray(settings.chat_query_items);
+  el("global-chat-settings").hidden = !supportsGlobalChat;
+  el("settings-jump-chat").hidden = !supportsGlobalChat;
+  if (supportsGlobalChat && (!submitted || (submitted.chat_query_items &&
+      sameChatQueryItems(readChatQueryItems("global"), submitted.chat_query_items)))) {
+    showChatQueryItems("global", settings.chat_query_items);
+  }
+  const targets = Array.isArray(settings.notification_targets) ? settings.notification_targets : [];
+  if (!submitted || sameChatQueryItems(currentRecipientTargets(), submitted.notification_targets)) {
+    notificationTarget.value = targets.join("\n");
+  }
+  void resolveNotificationRecipients();
   renderNoticeExample("setting-template-preview", el("setting-protected_target_template").value);
   updateImageProviderHints();
   updateGroupMonitoring();
@@ -3856,6 +3961,169 @@ async function loadSettings() {
     updateGroupImageFields();
   }
 }
+const maxNotificationTargets = 20;
+let notificationRecipientDetails = new Map();
+let recipientDraft = new Map();
+let recipientPage = 1;
+let recipientLookup = 0;
+let recipientSearchTimer = null;
+const notificationTarget = el("setting-notification_targets");
+const recipientDialog = el("notification-recipient-dialog");
+const recipientSearch = el("recipient-search");
+const currentRecipientTargets = () => [...new Set((notificationTarget.value ?? "").split(/\r?\n/).map(value => value.trim()).filter(Boolean))];
+const validRecipientTarget = target => [...target].length <= 512 && /^[^:\s]+:FriendMessage:\S.*$/u.test(target)
+  && !/[\u0000-\u001f\u007f]/u.test(target);
+function recipientLabel(item) {
+  return item.alias || item.nickname || item.session_id;
+}
+function recipientDetail(item) {
+  return [item.alias && item.nickname, item.platform, item.session_id].filter(Boolean).join(" / ");
+}
+function renderNotificationRecipients() {
+  const targets = currentRecipientTargets();
+  const names = targets.slice(0, 3).map(target => {
+    const known = notificationRecipientDetails.get(target);
+    return known ? `${recipientLabel(known)} (${known.platform})` : target;
+  });
+  el("notification-recipient-summary").textContent = !targets.length ? "未设置接收人" :
+    `${names.join(", ")}${targets.length > names.length ? ` 等 ${targets.length} 位` : ""}`;
+}
+async function resolveNotificationRecipients() {
+  const targets = currentRecipientTargets();
+  notificationRecipientDetails = new Map(targets.filter(target => notificationRecipientDetails.has(target))
+    .map(target => [target, notificationRecipientDetails.get(target)]));
+  renderNotificationRecipients();
+  const unresolved = targets.filter(target => validRecipientTarget(target) && !notificationRecipientDetails.has(target));
+  if (!unresolved.length || unresolved.length > maxNotificationTargets) return;
+  try {
+    const data = await bridge.apiPost("notification-recipient-labels", {targets: unresolved});
+    if (!Array.isArray(data.recipients)) return;
+    const current = currentRecipientTargets();
+    for (const item of data.recipients) {
+      if (current.includes(item.target)) notificationRecipientDetails.set(item.target, item);
+      if (recipientDraft.has(item.target)) recipientDraft.set(item.target, item);
+    }
+    renderNotificationRecipients();
+    if (recipientDialog.open) renderRecipientDraft();
+  } catch { /* An existing target remains usable when its nickname cannot be read. */ }
+}
+function renderRecipientDraft(focusIndex = null) {
+  const list = el("recipient-selected-list");
+  list.replaceChildren();
+  for (const [target, item] of recipientDraft) {
+    const name = recipientLabel(item) || target;
+    const row = recordElement("div", "recipient-selected-card", "");
+    const detail = document.createElement("div");
+    detail.append(recordElement("strong", "", name));
+    if (item.platform) detail.append(recordElement("p", "field-help", recipientDetail(item)));
+    const remove = recordElement("button", "secondary", "移除");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `移除 ${name}${item.platform ? ` (${item.platform} / ${item.session_id})` : ""}`);
+    remove.addEventListener("click", () => {
+      const index = [...recipientDraft.keys()].indexOf(target);
+      recipientDraft.delete(target);
+      renderRecipientDraft(index);
+    });
+    row.append(detail, remove);
+    list.append(row);
+  }
+  if (!recipientDraft.size) list.append(recordElement("p", "field-help", "未选择接收人"));
+  el("recipient-selected-title").textContent = `已选择 (${recipientDraft.size})`;
+  el("recipient-clear").hidden = !recipientDraft.size;
+  el("recipient-confirm").disabled = recipientDraft.size > maxNotificationTargets ||
+    sameChatQueryItems([...recipientDraft.keys()], currentRecipientTargets());
+  syncRecipientChecks();
+  if (focusIndex !== null) {
+    const buttons = list.querySelectorAll("button");
+    (buttons[Math.min(focusIndex, buttons.length - 1)] || recipientSearch).focus();
+  }
+}
+function syncRecipientChecks() {
+  for (const box of el("recipient-results").querySelectorAll('input[type="checkbox"]')) {
+    box.checked = recipientDraft.has(box.value);
+    box.disabled = !box.checked && recipientDraft.size >= maxNotificationTargets;
+  }
+}
+async function loadRecipientPage(page) {
+  clearTimeout(recipientSearchTimer);
+  const ticket = ++recipientLookup;
+  const search = recipientSearch.value.trim();
+  const list = el("recipient-results");
+  const status = el("recipient-search-status");
+  const pager = el("recipient-pagination");
+  list.replaceChildren();
+  pager.hidden = true;
+  status.textContent = "正在读取私聊会话...";
+  try {
+    const result = await bridge.apiGet("notification-recipients", {search, page: String(page)});
+    if (ticket !== recipientLookup || !recipientDialog.open) return;
+    if (!Array.isArray(result.recipients)) throw new Error("Invalid recipients");
+    recipientPage = page;
+    for (const item of result.recipients) {
+      if (recipientDraft.has(item.target)) recipientDraft.set(item.target, item);
+      const row = recordElement("label", "recipient-choice", "");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "notification-recipient-choice";
+      input.value = item.target;
+      const text = document.createElement("span");
+      text.append(recordElement("strong", "", recipientLabel(item)), recordElement("small", "", recipientDetail(item)));
+      row.append(input, text);
+      list.append(row);
+      input.addEventListener("change", () => {
+        if (input.checked && recipientDraft.size < maxNotificationTargets) recipientDraft.set(item.target, item);
+        else if (!input.checked) recipientDraft.delete(item.target);
+        renderRecipientDraft();
+      });
+    }
+    renderRecipientDraft();
+    list.scrollTop = 0;
+    status.textContent = result.recipients.length ? "" : search ? "没有匹配的私聊会话." : "还没有已记录的私聊会话.";
+    pager.hidden = page === 1 && !result.has_more;
+    el("recipient-prev").disabled = page === 1;
+    el("recipient-next").disabled = !result.has_more;
+  } catch {
+    if (ticket === recipientLookup && recipientDialog.open) status.textContent = "无法读取私聊会话, 请刷新重试.";
+  }
+}
+notificationTarget.addEventListener("input", renderNotificationRecipients);
+el("notification-recipient-open").addEventListener("click", () => {
+  recipientDraft = new Map(currentRecipientTargets().map(target => [target, notificationRecipientDetails.get(target) || {target}]));
+  recipientSearch.value = "";
+  renderRecipientDraft();
+  recipientDialog.showModal();
+  void loadRecipientPage(1);
+  void resolveNotificationRecipients();
+});
+recipientSearch.addEventListener("input", () => {
+  ++recipientLookup;
+  clearTimeout(recipientSearchTimer);
+  el("recipient-results").replaceChildren();
+  el("recipient-pagination").hidden = true;
+  el("recipient-search-status").textContent = "正在搜索...";
+  recipientSearchTimer = setTimeout(() => void loadRecipientPage(1), 200);
+});
+el("recipient-refresh").addEventListener("click", () => void loadRecipientPage(1));
+el("recipient-prev").addEventListener("click", () => void loadRecipientPage(recipientPage - 1));
+el("recipient-next").addEventListener("click", () => void loadRecipientPage(recipientPage + 1));
+el("recipient-clear").addEventListener("click", () => {
+  recipientDraft.clear();
+  renderRecipientDraft();
+  recipientSearch.focus();
+});
+el("recipient-cancel").addEventListener("click", () => recipientDialog.close());
+el("recipient-confirm").addEventListener("click", () => {
+  notificationTarget.value = [...recipientDraft.keys()].join("\n");
+  notificationRecipientDetails = new Map([...recipientDraft].filter(([, item]) => item.platform));
+  if (!notificationTarget.value) el("setting-notification_interval_seconds").value = "0";
+  renderNotificationRecipients();
+  recipientDialog.close();
+});
+recipientDialog.addEventListener("close", () => {
+  ++recipientLookup;
+  clearTimeout(recipientSearchTimer);
+  recipientDraft.clear();
+});
 el("settings-save").addEventListener("click", async () => {
   el("settings-save").disabled = true;
   try {
@@ -3880,6 +4148,20 @@ el("settings-save").addEventListener("click", async () => {
     if (data.image_max_total_bytes < data.image_max_bytes_per_image) {
       el("setting-image_max_total_bytes").focus?.();
       throw new Error("单条图片总量上限不能小于单张图片上限");
+    }
+    if (!el("global-chat-settings").hidden) {
+      data.chat_query_items = readChatQueryItems("global");
+    }
+    data.notification_targets = currentRecipientTargets();
+    if (data.notification_targets.length > maxNotificationTargets || !data.notification_targets.every(validRecipientTarget)) {
+      const details = notificationTarget.closest?.("details");
+      if (details) setDetailsOpen(details, true);
+      notificationTarget.focus?.();
+      throw new Error("最多可填写 20 个有效的私聊会话标识");
+    }
+    if (data.notification_interval_seconds < 0 || Boolean(data.notification_targets.length) !== (data.notification_interval_seconds > 0)) {
+      el("setting-notification_interval_seconds").focus?.();
+      throw new Error(data.notification_targets.length ? "请填写大于 0 秒的故障通知间隔" : "未设置接收人时, 通知间隔须为 0");
     }
     const displayData = {...data};
     for (const key of byteSettings) displayData[key] = data[key] / MIB;
@@ -3908,7 +4190,9 @@ el("settings-save").addEventListener("click", async () => {
       ? el(`setting-${key}`).checked !== data[key]
       : byteSettings.has(key)
         ? Number(el(`setting-${key}`).value) !== Number(displayData[key])
-        : el(`setting-${key}`).value !== String(data[key] ?? ""));
+        : el(`setting-${key}`).value !== String(data[key] ?? "")) ||
+      !sameChatQueryItems(currentRecipientTargets(), data.notification_targets) ||
+      (data.chat_query_items && !sameChatQueryItems(readChatQueryItems("global"), data.chat_query_items));
     showSettings(result.settings, displayData);
     if (el("setting-llm_provider_id").value === data.llm_provider_id) modelChoiceEdited = false;
     const message = result.start_error === "model_not_configured"

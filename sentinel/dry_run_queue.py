@@ -113,7 +113,7 @@ class DryRunQueue:
                 );
                 CREATE TABLE IF NOT EXISTS message_contents (
                     platform_id TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
+                    content TEXT NOT NULL, sender_display_name TEXT,
                     stored_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                     PRIMARY KEY(platform_id, group_id, message_id)
                 );
@@ -132,6 +132,9 @@ class DryRunQueue:
             """)
             # Serialize schema migrations across processes.
             db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(message_contents)")}
+            if "sender_display_name" not in columns:
+                db.execute("ALTER TABLE message_contents ADD COLUMN sender_display_name TEXT")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dry_run_queue)")}
             if "admitted_at_us" not in columns:
                 # Do not assign new admission times to pre-upgrade messages.
@@ -171,6 +174,8 @@ class DryRunQueue:
                 db.execute("ALTER TABLE execution_intents_plan RENAME TO execution_intents")
             db.execute("CREATE INDEX IF NOT EXISTS execution_intents_pending_group "
                        "ON execution_intents(status, action, platform_id, group_id, id)")
+            db.execute("CREATE INDEX IF NOT EXISTS execution_intents_chat_scope "
+                       "ON execution_intents(platform_id, group_id, updated_at DESC, id DESC)")
             # Older pending cumulative actions promised that confirmation would only count.
             db.execute("""UPDATE execution_intents SET status='inactive', reason_code='cumulative_mute_held',
                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -186,7 +191,8 @@ class DryRunQueue:
             raise ValueError("missing message identity")
         if type(capacity) is not int or capacity <= 0 or not isinstance(payload, dict):
             raise ValueError("invalid capacity or payload")
-        queued_payload = {key: value for key, value in payload.items() if key != "original_text"}
+        queued_payload = {key: value for key, value in payload.items()
+                          if key not in ("original_text", "sender_display_name")}
         encoded = json.dumps(queued_payload, ensure_ascii=False, allow_nan=False)
         db = self._connect()
         try:
@@ -214,7 +220,10 @@ class DryRunQueue:
                 # image itself and any description are never stored.
                 text = f"[图片 x{len(images)}]"
             if days and isinstance(text, str) and len(text) <= 65536:
-                db.execute("INSERT INTO message_contents (platform_id, group_id, message_id, content) VALUES (?, ?, ?, ?)", (*key, text))
+                display_name = payload.get("sender_display_name")
+                db.execute("""INSERT INTO message_contents
+                    (platform_id, group_id, message_id, content, sender_display_name) VALUES (?, ?, ?, ?, ?)""",
+                    (*key, text, display_name))
             db.commit()
             return "queued"
         except BaseException:

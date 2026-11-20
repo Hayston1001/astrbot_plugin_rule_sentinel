@@ -919,6 +919,26 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
 .group-detail-heading .check { flex: none; }
 .group-override-fields { display: grid; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .group-override-fields .form-grid { margin: 4px 0; }
+.group-chat-options { display: grid; gap: 4px; }
+.group-chat-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.group-chat-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 12px; margin-inline-start: auto; }
+.group-chat-heading .check { flex: 0 0 auto; min-height: 36px; }
+.group-chat-heading .check input { flex: none; }
+.group-chat-heading .check:has(input:disabled) { color: var(--muted); }
+.group-chat-options label {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start;
+  border-radius: var(--radius-sm); padding: 8px 10px; cursor: pointer;
+}
+.group-chat-options label:has(input:enabled):hover { background: var(--raised); }
+.group-chat-options label:has(input:disabled) { cursor: default; color: var(--muted); }
+.group-chat-options input[type="checkbox"] {
+  appearance: auto; width: 17px; height: 17px; margin: 2px 0 0; accent-color: var(--primary);
+}
+.group-chat-options input[type="checkbox"]::after { content: none; }
+.group-chat-options small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
+.group-chat-options .group-chat-dependent { margin-inline-start: 20px; }
+#global-chat-options { display: grid; gap: 12px; padding: 12px; border-radius: var(--radius); background: var(--surface); }
+@media (max-width: 700px) { .group-chat-options label { min-height: 44px; } }
 .group-settings-save { width: 100%; min-height: 56px; }
 .config-subsection { display: grid; gap: 12px; padding: 16px 0 4px; border-top: 1px solid var(--border); }
 .config-subsection h4 { font-size: 13px; letter-spacing: .02em; }
@@ -932,6 +952,12 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
 .template-example span { color: var(--muted); }
 
 /* Settings */
+.settings-jump { display: flex; flex-wrap: wrap; gap: 0 18px; margin-bottom: 14px; }
+.settings-jump a { display: inline-flex; align-items: center; min-height: 36px; color: var(--text); font-weight: 600; text-underline-offset: 4px; }
+.settings-section h2[tabindex] { scroll-margin-top: 16px; }
+@media (max-width: 700px) {
+  .settings-jump a, .group-chat-heading .check { min-height: 44px; }
+}
 .settings-stack { display: grid; gap: 14px; }
 .settings-section {
   display: grid; grid-template-columns: minmax(190px, .8fr) minmax(0, 2fr);
@@ -947,12 +973,49 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
 .setting-switch small { margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .settings-details { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); }
 .settings-details .form-grid { margin: 16px 0; }
-.settings-subsection { display: grid; gap: 16px; padding-top: 20px; border-top: 1px solid var(--border); }
-.settings-subsection > h3 { font-size: 14px; font-weight: var(--weight-section); letter-spacing: .02em; }
 .image-size-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 16px; grid-column: 1 / -1; }
 .settings-footer { display: grid; gap: 10px; }
 .settings-footer > button { width: 100%; min-height: 56px; }
 .settings-footer .notice { margin: 0; }
+.notification-recipient-field, .recipient-selected-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border-radius: var(--radius); background: var(--surface);
+}
+.notification-recipient-field > div, .recipient-selected-card > div, .recipient-choice > span {
+  min-width: 0; overflow-wrap: anywhere;
+}
+.notification-recipient-field button, .recipient-selected-card button { flex: none; }
+.notification-recipient-field p, .recipient-selected-card p { margin: 4px 0 0; }
+.recipient-selected-card p:empty { display: none; }
+.notification-recipient-dialog {
+  width: min(790px, calc(100% - 24px)); max-height: calc(100dvh - 24px);
+  padding: clamp(16px, 3vw, 24px); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); background: var(--raised); overflow-y: auto;
+}
+.notification-recipient-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.notification-recipient-dialog header p { margin-top: 6px; }
+.recipient-picker-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 18px; margin-top: 18px; }
+.recipient-selected-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+#recipient-selected-list { display: grid; gap: 6px; max-height: min(320px, 42dvh); overflow-y: auto; overscroll-behavior: contain; }
+.recipient-search-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; }
+.recipient-search-bar label { grid-column: 1 / -1; }
+.recipient-search-bar input { min-width: 0; }
+#recipient-search-status { margin: 8px 0; }
+#recipient-search-status:empty { display: none; }
+#recipient-results { display: grid; gap: 4px; max-height: min(320px, 42dvh); overflow-y: auto; overscroll-behavior: contain; }
+.recipient-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; border-radius: var(--radius); padding: 8px 10px; cursor: pointer; }
+.recipient-choice:hover, .recipient-choice:has(:checked) { background: var(--active); }
+.recipient-choice small { display: block; color: var(--muted); font-weight: 400; }
+.recipient-choice input[type="checkbox"] { appearance: auto; width: 16px; height: 16px; accent-color: var(--primary); }
+.recipient-choice input[type="checkbox"]::after { content: none; }
+.recipient-choice input[type="checkbox"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.recipient-pagination, .recipient-picker-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.recipient-picker-footer { margin-top: 18px; }
+@media (max-width: 700px) {
+  .recipient-picker-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  #recipient-selected-list { max-height: 180px; }
+  .recipient-choice { min-height: 44px; }
+}
 
 /* Motion */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

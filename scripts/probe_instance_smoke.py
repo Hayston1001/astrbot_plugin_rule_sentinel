@@ -1,6 +1,7 @@
 """Exercise an isolated AstrBot core and the installed plugin without network access."""
 
 import asyncio
+import importlib
 import io
 import json
 import os
@@ -43,12 +44,15 @@ async def run(root):
                duration_mode="strict", severity_seconds={"low": 60}, modified_by="admin")
 
     from astrbot.core import LogBroker, db_helper
+    from astrbot.core.agent.run_context import ContextWrapper
+    from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
     import astrbot.core.core_lifecycle as lifecycle_module
     from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
     from astrbot.core.platform.message_type import MessageType
     from astrbot.core.platform.platform_metadata import PlatformMetadata
     from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import QQOfficialMessageEvent
     from astrbot.core.platform.sources.qqofficial.qqofficial_platform_adapter import PatchedGroupMessage, QQOfficialPlatformAdapter
+    from astrbot.core.provider.entities import ProviderRequest
 
     async def no_update():
         pass
@@ -71,6 +75,17 @@ async def run(root):
         instance = metadata.star_cls
         core._load()
         try:
+            package = type(instance).__module__.rsplit(".", 1)[0]
+            recipients = importlib.import_module(f"{package}.sentinel.notification_recipients")
+
+            private = "synthetic-platform:FriendMessage:synthetic-user"
+            await db_helper.upsert_umo_auto_name(umo=private, creator_sender_id="synthetic-user", auto_name="值班员")
+            await db_helper.upsert_umo_auto_name(umo="synthetic-platform:GroupMessage:synthetic-user",
+                                                 creator_sender_id="synthetic-user", auto_name="值班群")
+            contacts = await recipients.find_notification_recipients(
+                instance.context.get_db(), {"synthetic-platform": "qq_official"}, search="值班", page=1, selected="",
+            )
+            assert [row["target"] for row in contacts["recipients"]] == [private]
             sent = []
             completed = {}
             for scheduler in core.pipeline_scheduler_mapping.values():
@@ -101,6 +116,17 @@ async def run(root):
                 return event
 
             event = await make_event("synthetic-message")
+            reply_request = ProviderRequest()
+            await instance.provide_group_chat_info(event, reply_request)
+            tool = reply_request.func_tool.get_tool("rule_sentinel_group_info")
+            assert tool is not None and "群规守卫" in reply_request.system_prompt
+            context = ContextWrapper(context=SimpleNamespace(event=event), tool_call_timeout=5)
+            results = [result async for result in FunctionToolExecutor.execute(tool, context, topic="status")]
+            assert not results[0].isError, results
+            assert json.loads(results[0].content[0].text)["enabled_rules"] == 1
+            foreign = ContextWrapper(context=SimpleNamespace(event=await make_event("foreign")), tool_call_timeout=5)
+            results = [result async for result in FunctionToolExecutor.execute(tool, foreign, topic="status")]
+            assert json.loads(results[0].content[0].text) == {"status": "unavailable"}
             await core.event_queue.put(event)
             await asyncio.wait_for(completed.setdefault("synthetic-message", asyncio.Event()).wait(), 20)
             for _ in range(200):

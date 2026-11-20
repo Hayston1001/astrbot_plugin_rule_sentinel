@@ -5,7 +5,7 @@ import asyncio
 from .async_io import run_sync_safely
 from .event_intake import EventIntake
 from .instance_lock import InstanceLock
-from .notifications import build_notification_dispatcher
+from .notifications import build_notification_dispatcher, validate_notification_targets
 from .plugin_settings import read_settings
 from .runtime_factory import build_runtime
 
@@ -74,11 +74,11 @@ class DryRunHost:
         # The message listener runs after the framework's whitelist, session and
         # plugin checks, so a separate gate is optional. A host fed by a source
         # outside that pipeline must still pass one explicitly.
-        target = self.config.get("notification_target", "")
+        targets = validate_notification_targets(self.config.get("notification_targets", []))
         interval = self.config.get("notification_interval_seconds", 0)
-        if not isinstance(target, str) or type(interval) is not int or interval < 0:
+        if type(interval) is not int or interval < 0:
             raise ValueError("invalid notification settings")
-        if bool(target.strip()) != (interval > 0):
+        if bool(targets) != (interval > 0):
             raise ValueError("notification target and positive interval must be configured together")
         acquire = asyncio.create_task(asyncio.to_thread(self.lock.acquire))
         try:
@@ -129,8 +129,8 @@ class DryRunHost:
                     wait_seconds=settings.image_fetch_timeout_seconds)
             if interval > 0:
                 self.notifications = build_notification_dispatcher(context=self.context, queue=self.queue,
-                    recipient=target, interval_seconds=interval,
-                    is_authorized=lambda: (self.config.get("notification_target", "") == target
+                    recipients=targets, interval_seconds=interval,
+                    is_authorized=lambda: (self.config.get("notification_targets", []) == list(targets)
                         and self.config.get("notification_interval_seconds", 0) == interval), on_failure=self._report_failure)
                 self.notifications.start()
             self.runtime = build_runtime(context=self.context, config=self.config, rules=self.rules,

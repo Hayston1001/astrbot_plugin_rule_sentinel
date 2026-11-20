@@ -17,7 +17,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("private error")
         async def record(code, status):
             audit.append((code, status))
-        service = NotificationService(recipient="platform:FriendMessage:user", interval_seconds=30,
+        service = NotificationService(recipients=["platform:FriendMessage:user"], interval_seconds=30,
                                       send=send, audit=record, clock=lambda: 10)
         result = await asyncio.gather(service.notify("model_failed"), service.notify("model_failed"))
         self.assertCountEqual(result, ["unknown", "rate_limited"])
@@ -27,10 +27,10 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_configuration_and_unknown_code(self):
         with self.assertRaises(ValueError):
-            NotificationService(recipient="", interval_seconds=1, send=None, audit=None)
+            NotificationService(recipients=[], interval_seconds=1, send=None, audit=None)
         with self.assertRaises(ValueError):
-            NotificationService(recipient="platform:GroupMessage:group", interval_seconds=1, send=None, audit=None)
-        service = NotificationService(recipient="platform:FriendMessage:user", interval_seconds=1, send=None, audit=None)
+            NotificationService(recipients=["platform:GroupMessage:group"], interval_seconds=1, send=None, audit=None)
+        service = NotificationService(recipients=["platform:FriendMessage:user"], interval_seconds=1, send=None, audit=None)
         with self.assertRaises(ValueError):
             await service.notify("unknown")
 
@@ -40,9 +40,29 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
             return True
         async def audit(code, status):
             results.append(status)
-        service = NotificationService(recipient="p:FriendMessage:u", interval_seconds=1, send=send, audit=audit)
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send, audit=audit)
         self.assertEqual(await service.notify("model_failed"), "submitted")
         self.assertEqual(results, ["submitted"])
+
+    async def test_fans_out_once_per_recipient_and_isolates_failures(self):
+        targets = [f"bot{i}:FriendMessage:same-user" for i in range(5)]
+        calls, results = [], []
+        async def send(target, text):
+            calls.append(target)
+            if target == targets[0]:
+                raise RuntimeError("private error")
+            return target != targets[1]
+        async def record(code, status):
+            results.append((code, status))
+        service = NotificationService(recipients=targets, interval_seconds=60,
+                                      send=send, audit=record, clock=lambda: 10)
+        self.assertCountEqual(
+            await asyncio.gather(service.notify("model_failed"), service.notify("model_failed")),
+            ["rate_limited", "partial"],
+        )
+        self.assertCountEqual(calls, targets)
+        self.assertCountEqual(results, [("model_failed", "unknown"), ("model_failed", "failed")] +
+                              [("model_failed", "submitted")] * 3)
 
     async def test_dispatcher_records_result_without_sending_to_group(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -54,7 +74,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
                     return False
             context = Context()
             dispatcher = build_notification_dispatcher(context=context, queue=queue,
-                recipient="p:FriendMessage:admin", interval_seconds=60, message_chain_factory=lambda text: text)
+                recipients=["p:FriendMessage:admin"], interval_seconds=60, message_chain_factory=lambda text: text)
             dispatcher.start()
             self.assertTrue(dispatcher.offer("model_failed"))
             await dispatcher.close()
@@ -71,13 +91,38 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
                 async def send_message(self, target, message):
                     raise AssertionError("revoked notification was sent")
             dispatcher = build_notification_dispatcher(context=Context(), queue=queue,
-                recipient="p:FriendMessage:admin", interval_seconds=60,
+                recipients=["p:FriendMessage:admin"], interval_seconds=60,
                 message_chain_factory=lambda text: text, is_authorized=lambda: False)
             dispatcher.start()
             dispatcher.offer("model_failed")
             await dispatcher.close()
             with closing(queue._connect()) as db:
                 self.assertEqual(db.execute("SELECT status FROM notification_events").fetchone()[0], "failed")
+
+    async def test_revocation_prevents_later_batches(self):
+        authorized = True
+        sent = []
+        class Context:
+            async def send_message(self, target, message):
+                nonlocal authorized
+                sent.append(target)
+                authorized = False
+                return True
+        with tempfile.TemporaryDirectory() as temp:
+            queue = DryRunQueue(Path(temp) / "state.sqlite")
+            queue.initialize()
+            targets = [f"p:FriendMessage:{index}" for index in range(5)]
+            dispatcher = build_notification_dispatcher(context=Context(), queue=queue, recipients=targets,
+                interval_seconds=60, message_chain_factory=lambda text: text, is_authorized=lambda: authorized)
+            dispatcher.start()
+            dispatcher.offer("queue_full")
+            await dispatcher.close()
+            self.assertEqual(sent, targets[:1])
+            with closing(queue._connect()) as db:
+                self.assertCountEqual(
+                    [row[0] for row in db.execute("SELECT status FROM notification_events")],
+                    ["submitted"] + ["failed"] * 4,
+                )
 
     async def test_failed_consumer_rejects_new_items_and_closes_with_full_queue(self):
         entered = asyncio.Event()
@@ -113,7 +158,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
             async def send_message(self, target, message):
                 return True
         dispatcher = build_notification_dispatcher(context=Context(), queue=Queue(),
-            recipient="p:FriendMessage:admin", interval_seconds=60, message_chain_factory=lambda text: text)
+            recipients=["p:FriendMessage:admin"], interval_seconds=60, message_chain_factory=lambda text: text)
         dispatcher.start()
         dispatcher.offer("model_failed")
         try:

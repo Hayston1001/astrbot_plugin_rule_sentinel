@@ -5,11 +5,12 @@ const settings = {
   decision_backend: "llm", llm_provider_id: "", rule_selection_strategy: "model",
   default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30,
   llm_reason_language: "", llm_no_action_reason_enabled: true, group_overrides: {},
+  chat_query_items: ["status", "mute", "recall", "reply"],
   protected_target_policy: "exempt", protected_target_template: "hello {rule_id}", protected_target_quote: false,
   quick_start_completed: sessionStorage.getItem(`fixture-${scenario}`) === "true", max_duration_seconds: 2592000,
   model_concurrency: 20, model_timeout_seconds: 35, global_rate_per_minute: 100,
   group_rate_per_minute: 60, model_failure_threshold: 5, model_cooldown_seconds: 120,
-  queue_capacity_per_group: 100, ingress_capacity: 256, notification_target: "", notification_interval_seconds: 0,
+  queue_capacity_per_group: 100, ingress_capacity: 256, notification_targets: [], notification_interval_seconds: 0,
   image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
   image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
   image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10,
@@ -91,11 +92,24 @@ window.quickStartMock.releaseState = () => releaseState?.();
 let releaseStatus = null;
 const statusReady = scenario === "status-held" ? new Promise((resolve) => { releaseStatus = resolve; }) : Promise.resolve();
 window.quickStartMock.releaseStatus = () => releaseStatus?.();
+const notificationRecipients = [
+  {target: "bot-a:FriendMessage:100", nickname: "小林", alias: "", platform: "bot-a", session_id: "100"},
+  {target: "bot-b:FriendMessage:100", nickname: "小林", alias: "值班管理员", platform: "bot-b", session_id: "100"},
+  {target: "bot-a:FriendMessage:101", nickname: "小张", alias: "", platform: "bot-a", session_id: "101"},
+];
 window.AstrBotPluginView = {
   async ready() { await ready; },
   async apiGet(endpoint, params) {
     window.quickStartMock.requests.push(endpoint);
     if (endpoint === "settings" && scenario === "settings-error") throw new Error("unavailable");
+    if (endpoint === "notification-recipients") {
+      if (window.quickStartMock.failRecipientLookup) throw new Error("unavailable");
+      const search = params.search || "";
+      const matches = notificationRecipients.filter(row => [row.nickname, row.alias, row.target].some(value => value.includes(search)));
+      const page = Number(params.page || 1);
+      return {recipients: matches.slice((page - 1) * 2, page * 2), has_more: matches.length > page * 2,
+        selected: notificationRecipients.find(row => row.target === params.selected) || null};
+    }
     if (endpoint === "groups" && scenario === "groups-error") throw new Error("unavailable");
     if (endpoint === "ui-state" && scenario === "ui-state-error") throw new Error("unavailable");
     if (endpoint === "overview-layout") {
@@ -157,6 +171,9 @@ window.AstrBotPluginView = {
   },
   async apiPost(endpoint, body) {
     window.quickStartMock.requests.push(endpoint);
+    if (endpoint === "notification-recipient-labels") {
+      return {recipients: notificationRecipients.filter(row => body.targets.includes(row.target))};
+    }
     if (endpoint === "ui-state") {
       window.quickStartMock.uiStateWrites.push(structuredClone(body));
       if (scenario === "slow-tab-save" && body.active_tab === "rules") {
@@ -198,9 +215,13 @@ window.AstrBotPluginView = {
       const previous = settings.group_overrides[key] || {};
       const overrides = body.overrides ? {...previous, ...body.overrides} : {...previous};
       if (body.overrides) {
+        const chatFields = ["chat_query_items", "chat_show_rules", "chat_show_mute_target"];
+        const replacesList = chatFields.some(field => field in body.overrides);
         for (const property of Object.keys(previous)) {
-          if (!property.startsWith("shared_violation_") && !(property in body.overrides)) delete overrides[property];
+          const preserveChat = property === "chat_query_inherit" || (!replacesList && chatFields.includes(property));
+          if (!preserveChat && !property.startsWith("shared_violation_") && !(property in body.overrides)) delete overrides[property];
         }
+        if (overrides.chat_query_inherit === true) delete overrides.chat_query_inherit;
       } else {
         delete overrides.shared_violation_rules;
         delete overrides.shared_violation_groups;

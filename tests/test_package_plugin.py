@@ -48,7 +48,7 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue({"main.py", "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md", "LICENSE", "logo.png", "sentinel/__init__.py",
                              "views/management/index.html", "views/management/app.js", "views/management/style.css",
                              "views/management/motion.js", "views/management/select.js",
-                             "scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py"} <= names)
+                             "skills/rule-sentinel-help/SKILL.md", "scripts/evaluate_dry_run.py", "scripts/compare_dry_run.py"} <= names)
             self.assertFalse(any(name.startswith(("tests/", "local-docs/", ".git/", "dist/")) for name in names))
             self.assertEqual(archive.read("README.md"), (package_plugin.ROOT / "README.md").read_bytes())
             self.assertEqual(archive.read("logo.png"), (package_plugin.ROOT / "logo.png").read_bytes())

@@ -6,10 +6,72 @@ import json
 from .chat_context import validate_context_messages
 
 
-GROUP_KEYS = frozenset({"model", "strategy", "execution_mode", "protected_policy",
-                        "protected_template", "protected_quote", "llm_reason_language",
-                        "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups",
-                        "context_messages"})
+CHAT_ACTIONS = ("mute", "recall", "reply")
+CHAT_QUERY_ITEMS = ("status", "rules", *CHAT_ACTIONS, "mute_target")
+DEFAULT_CHAT_QUERY_ITEMS = ("status", *CHAT_ACTIONS)
+LEGACY_CHAT_FLAGS = ("chat_show_rules", "chat_show_mute_target")
+GROUP_CHAT_ITEM_KEYS = frozenset((*LEGACY_CHAT_FLAGS, "chat_query_items"))
+GROUP_CHAT_KEYS = GROUP_CHAT_ITEM_KEYS | {"chat_query_inherit"}
+GROUP_KEYS = GROUP_CHAT_KEYS | {"model", "strategy", "execution_mode", "protected_policy",
+                                "protected_template", "protected_quote", "llm_reason_language",
+                                "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups",
+                                "context_messages"}
+
+
+def validate_chat_query_items(items):
+    if (not isinstance(items, list) or len(items) > len(CHAT_QUERY_ITEMS)
+            or any(not isinstance(item, str) or item not in CHAT_QUERY_ITEMS for item in items)
+            or len(set(items)) != len(items) or ("mute_target" in items and "mute" not in items)):
+        raise ValueError("invalid chat query items")
+    return tuple(item for item in CHAT_QUERY_ITEMS if item in items)
+
+
+def chat_query_items(overrides):
+    if "chat_query_items" in overrides:
+        if any(flag in overrides for flag in LEGACY_CHAT_FLAGS):
+            raise ValueError("invalid group chat query items")
+        return validate_chat_query_items(overrides["chat_query_items"])
+    if any(type(overrides.get(flag, False)) is not bool for flag in LEGACY_CHAT_FLAGS):
+        raise ValueError("invalid group chat disclosure")
+    return (*DEFAULT_CHAT_QUERY_ITEMS,
+            *(("rules",) if overrides.get("chat_show_rules") else ()),
+            *(("mute_target",) if overrides.get("chat_show_mute_target") else ()))
+
+
+def effective_chat_query_items(config, platform_id, group_id):
+    """Select one disclosure policy; never merge global and group allowlists."""
+    key = f"{platform_id}/{group_id}"
+    validate_group_key(key)
+    group = config.get("group_overrides", {}).get(key, {})
+    if not chat_query_inherits(group):
+        return chat_query_items(group)
+    return validate_chat_query_items(config.get("chat_query_items", list(DEFAULT_CHAT_QUERY_ITEMS)))
+
+
+def chat_query_inherits(group):
+    value = group.get("chat_query_inherit", True)
+    if type(value) is not bool:
+        raise ValueError("invalid group chat query source")
+    return value
+
+
+def merge_group_chat_settings(previous, submitted):
+    """Keep the dormant local choice when the dashboard saves unrelated fields."""
+    old_chat = {key: value for key, value in previous.items() if key in GROUP_CHAT_KEYS}
+    new_chat = {key: value for key, value in submitted.items() if key in GROUP_CHAT_KEYS}
+    if not new_chat:
+        return old_chat
+    updated = {**old_chat, **new_chat}
+    item_fields = GROUP_CHAT_ITEM_KEYS & new_chat.keys()
+    if item_fields:
+        if chat_query_inherits(updated):
+            raise ValueError("group inherits global chat queries")
+        # The submitted list replaces the old representation (including legacy flags).
+        updated = {**{key: value for key, value in updated.items() if key not in GROUP_CHAT_ITEM_KEYS},
+                   **{key: new_chat[key] for key in item_fields}}
+    if chat_query_inherits(updated):
+        updated.pop("chat_query_inherit", None)
+    return updated
 
 
 def resolve_violation_groups(group):
@@ -89,6 +151,8 @@ def resolve_group_settings(config, platform_id, group_id):
     if not isinstance(group, dict) or set(group) - GROUP_KEYS:
         raise ValueError("invalid group settings")
     shared = resolve_violation_groups(group)
+    chat_query_inherits(group)
+    query_items = chat_query_items(group)
     selected = group.get("model")
     if "model" in group and (not isinstance(selected, dict) or set(selected) != {"backend", "model"}
                                  or selected["backend"] != "llm"
@@ -131,7 +195,8 @@ def resolve_group_settings(config, platform_id, group_id):
             "llm_reason_language": reason_language, "image_enabled": image_enabled,
              "image_model": image_model, "image_understanding_mode": image_mode,
                "shared_violation_groups": shared,
-               "context_messages": validate_context_messages(group.get("context_messages", 0))}
+                "context_messages": validate_context_messages(group.get("context_messages", 0)),
+                "chat_query_items": query_items}
 
 
 def execution_allowed(config, platform_id, group_id):
@@ -143,6 +208,7 @@ def decision_fingerprint(config, platform_id, group_id):
     group = resolve_group_settings(config, platform_id, group_id)
     # Names and order do not change the rules contributing to a count.
     group["shared_violation_groups"] = sorted(item["rule_ids"] for item in group["shared_violation_groups"])
+    del group["chat_query_items"]
     if not group["context_messages"]:
         del group["context_messages"]  # Keep existing fingerprints when context is off.
     if group["backend"] != "llm":

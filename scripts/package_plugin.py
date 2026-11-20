@@ -37,7 +37,7 @@ def archive_files(root: Path) -> list[Path]:
     for name in required:
         _safe_file(root, name)
     files = set(required)
-    for directory, suffixes in (("sentinel", {".py"}), ("views/management", VIEW_SUFFIXES)):
+    for directory, suffixes in (("sentinel", {".py"}), ("views/management", VIEW_SUFFIXES), ("skills", {".md"})):
         base = root / directory
         for source in base.rglob("*"):
             relative = source.relative_to(root)
