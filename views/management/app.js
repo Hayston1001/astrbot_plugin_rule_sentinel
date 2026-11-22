@@ -1028,7 +1028,7 @@ function renderRecords(rows, append = false, update = false) {
         const parts = [noticeLabels[notice.status] || "提示状态未知"];
         if (notice.sent_quoted != null) parts.push(notice.sent_quoted ? "已引用触发消息" : "未引用触发消息");
         if (notice.downgrade_reason) parts.push(downgradeLabels[notice.downgrade_reason] || "已降级");
-        item.appendChild(recordElement("p", "record-action-note", `群提示: ${parts.join(" / ")}`));
+        item.appendChild(recordElement("p", "record-action-note", `失败提示: ${parts.join(" / ")}`));
       }
       if (action.mode === "confirm" && state === "pending_confirm") {
          const cumulative = action.execution.reason_code === "cumulative_mute_on_confirmation";
@@ -3145,7 +3145,7 @@ function settingsFieldIssues() {
   if (formatNoticeExample(template.value) === null) {
     note(template, "变量只支持 {rule_id}, {sender_id} 和 {action}");
   } else if (el("setting-protected_target_policy").value === "group_message" && !String(template.value ?? "").trim()) {
-    note(template, "发送群提示时请填写默认群提示内容");
+    note(template, "在群里发言时请填写默认发言内容");
   }
   return issues;
 }
@@ -3195,9 +3195,9 @@ function groupFieldIssues() {
     const template = el("group-protected-template");
     const policy = el("group-protected-policy").value || currentSettings?.protected_target_policy || "exempt";
     if (formatNoticeExample(template.value) === null) {
-      note(template, "提示内容的花括号或变量名称无效, 请使用列出的变量");
+      note(template, "发言内容的花括号或变量名称无效, 请使用列出的变量");
     } else if (policy === "group_message" && !String(template.value ?? "").trim()) {
-      note(template, "发送群提示时请填写本群提示内容");
+      note(template, "在群里发言时请填写本群发言内容");
     }
   }
   return issues;
@@ -3399,13 +3399,13 @@ function formatNoticeExample(template) {
 }
 function renderNoticeExample(target, template) {
   const example = formatNoticeExample(template);
-  el(target).textContent = !template?.trim() ? "尚未填写提示内容." : example === null
+  el(target).textContent = !template?.trim() ? "尚未填写发言内容." : example === null
     ? "无法生成示例, 请检查花括号和变量名称." : example;
 }
 function updateGroupSettingsHints(animate = false) {
   const settings = currentSettings;
   if (!settings) return;
-  const inheritedPolicy = settings.protected_target_policy === "group_message" ? "发送群提示" : "只记录";
+  const inheritedPolicy = settings.protected_target_policy === "group_message" ? "在群里发言" : "不发言";
   const inheritedQuote = settings.protected_target_quote === true ? "引用" : "不引用";
   const model = settings.decision_backend === "llm" ? settings.llm_provider_id || "未选择模型" : "未选择模型";
   const strategy = settings.rule_selection_strategy === "priority" ? "按规则优先级" : settings.rule_selection_strategy === "model" ? "模型选择" : "不可用";
@@ -3435,13 +3435,13 @@ function updateGroupSettingsHints(animate = false) {
   el("group-execution-state").textContent = reason || "允许执行时, 每项动作按规则中的自动或人工确认设置处理.";
   const policy = el("group-protected-policy").value || settings.protected_target_policy || "exempt";
   el("group-protected-state").textContent = policy === "group_message"
-    ? `满足上方条件时, 使用下方的提示内容和引用设置.${reason ? ` ${reason}` : ""}`
-    : "选择只记录时不会发送群提示. 下方内容和引用设置只在选择发送群提示时使用.";
+    ? `满足上方条件时, 使用下方的发言内容和引用设置.${reason ? ` ${reason}` : ""}`
+    : "选择不发言时不会在群里发言. 下方内容和引用设置只在选择在群里发言时使用.";
   const template = el("group-template-override").checked ? el("group-protected-template").value : settings.protected_target_template;
   setPanelVisibility(el("group-template-label"), el("group-template-override").checked, {animate});
   el("group-template-source").textContent = el("group-template-override").checked
-    ? "群提示使用下方本群内容, 不改变全局默认."
-    : "群提示使用设置中的全局默认内容.";
+    ? "群里发言使用下方本群内容, 不改变全局默认."
+    : "群里发言使用设置中的全局默认内容.";
   renderNoticeExample("group-template-preview", template || "");
 }
 function showGroupOverrides() {
@@ -3974,12 +3974,12 @@ function readGroupOverrides() {
   const template = customTemplate ? el("group-protected-template").value : currentSettings.protected_target_template || "";
   if (customTemplate && formatNoticeExample(template) === null) {
     el("group-protected-template").focus?.();
-    throw new Error("提示内容的花括号或变量名称无效, 请使用列出的变量");
+    throw new Error("发言内容的花括号或变量名称无效, 请使用列出的变量");
   }
   const policy = el("group-protected-policy").value || currentSettings.protected_target_policy || "exempt";
   if (policy === "group_message" && !template.trim()) {
     if (customTemplate) el("group-protected-template").focus?.();
-    throw new Error(customTemplate ? "发送群提示时请填写本群提示内容" : "全局提示内容为空, 请为本群设置提示内容或修改全局默认");
+    throw new Error(customTemplate ? "在群里发言时请填写本群发言内容" : "全局发言内容为空, 请为本群设置发言内容或修改全局默认");
   }
   if (customTemplate) overrides.protected_template = template;
   return overrides;
@@ -4529,16 +4529,16 @@ el("settings-save").addEventListener("click", async () => {
       markFieldInvalid(el("setting-notification_interval_seconds"), true,
         data.notification_targets.length ? "已选择接收人时须大于 0" : "未设置接收人时须为 0");
       el("setting-notification_interval_seconds").focus?.();
-      throw new Error(data.notification_targets.length ? "请填写大于 0 秒的故障通知间隔" : "未设置接收人时, 通知间隔须为 0");
+      throw new Error(data.notification_targets.length ? "请填写大于 0 秒的失败通知间隔" : "未设置接收人时, 通知间隔须为 0");
     }
     const displayData = {...data};
     for (const key of byteSettings) displayData[key] = data[key] / MIB;
     const template = data.protected_target_template;
     if (formatNoticeExample(template) === null || (data.protected_target_policy === "group_message" && !template.trim())) {
       markFieldInvalid(el("setting-protected_target_template"), true,
-        formatNoticeExample(template) === null ? "变量只支持 {rule_id}, {sender_id} 和 {action}" : "选择发送群提示时须填写默认群提示内容");
+        formatNoticeExample(template) === null ? "变量只支持 {rule_id}, {sender_id} 和 {action}" : "选择在群里发言时须填写默认发言内容");
       el("setting-protected_target_template").focus?.();
-      throw new Error("请填写有效的默认群提示内容, 变量只支持 {rule_id}, {sender_id} 和 {action}");
+      throw new Error("请填写有效的默认发言内容, 变量只支持 {rule_id}, {sender_id} 和 {action}");
     }
     for (const [key, overrides] of Object.entries(currentSettings?.group_overrides || {})) {
       const policy = overrides.protected_policy || data.protected_target_policy;
@@ -4547,10 +4547,10 @@ el("settings-save").addEventListener("click", async () => {
       if (policy !== "group_message" || groupTemplate.trim()) continue;
       if (!custom) {
         el("setting-protected_target_template").focus?.();
-        throw new Error("有群选择发送提示并使用全局内容, 请填写默认群提示内容");
+        throw new Error("有群选择在群里发言并使用全局内容, 请填写默认发言内容");
       }
       const item = knownGroups.find((entry) => `${entry.platform_id}/${entry.group_id}` === key);
-      throw new Error(`${item ? groupName(item) : "某个群"} 的单独提示内容为空, 请在群管理中填写或调整处理方式`);
+      throw new Error(`${item ? groupName(item) : "某个群"} 的单独发言内容为空, 请在群管理中填写或调整处理方式`);
     }
     const preserveUnselectedModel = currentSettings?.decision_backend === "" && !modelChoiceEdited;
     const requestData = {...data, decision_backend: preserveUnselectedModel ? "" : "llm"};

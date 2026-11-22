@@ -1098,7 +1098,7 @@ class DryRunQueue:
             db.close()
 
     def record_notification(self, code: str, status: str) -> None:
-        if code not in {"model_failed", "model_timeout", "context_limit", "rule_snapshot_too_large", "queue_full", "storage_failed", "circuit_open", "test"}:
+        if code not in {"model_failed", "model_timeout", "context_limit", "rule_snapshot_too_large", "queue_full", "storage_failed", "circuit_open", "action_rejected", "test"}:
             raise ValueError("invalid notification code")
         if status not in {"submitted", "failed", "unknown"}:
             raise ValueError("invalid notification status")

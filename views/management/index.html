@@ -149,16 +149,16 @@
                     <label>本群执行方式 <select id="group-execution" aria-describedby="group-execution-help group-execution-state"><option id="group-execution-inherit" value="">全局(读取中)</option><option value="record">只记录</option><option value="execute">允许执行</option></select><span id="group-execution-help" class="field-help">只记录: 不执行规则动作. 允许执行: 按规则中每项动作的自动或人工确认设置处理.</span></label>
                     <p id="group-execution-state" class="config-state" aria-live="polite"></p>
                   </section>
-                  <section class="config-subsection"><h4>管理员或机器人触发规则</h4><p class="field-help">平台因目标是管理员或机器人而拒绝禁言或撤回时, 可以只记录, 也可以在群内发送提示.</p>
-                    <label>动作被拒绝后的处理 <select id="group-protected-policy" aria-describedby="group-protected-state"><option id="group-policy-inherit" value="">全局(读取中)</option><option value="exempt">只记录</option><option value="group_message">发送群提示</option></select></label>
+                  <section class="config-subsection"><h4>失败提示</h4><p class="field-help">平台因目标是管理员或机器人而拒绝禁言或撤回时, 可以不发言, 也可以在本群发言. 私聊通知管理员在设置中统一配置.</p>
+                    <label>动作被拒绝后的处理 <select id="group-protected-policy" aria-describedby="group-protected-state"><option id="group-policy-inherit" value="">全局(读取中)</option><option value="exempt">不发言</option><option value="group_message">在群里发言</option></select></label>
                     <p id="group-protected-state" class="config-state" aria-live="polite"></p>
-                    <div id="group-notice-controls" class="notice-settings"><strong>群提示设置</strong>
-                      <label>群提示引用触发消息 <select id="group-protected-quote" aria-describedby="group-quote-help"><option id="group-quote-inherit" value="">全局(读取中)</option><option value="true">引用</option><option value="false">不引用</option></select><span id="group-quote-help" class="field-help">引用导致这次规则判定的群消息. 只影响群提示.</span></label>
-                      <label class="check"><input id="group-template-override" type="checkbox" aria-describedby="group-template-source"><span>为本群单独设置提示内容</span></label>
-                      <p id="group-template-source" class="field-help">不开启时使用全局默认的群提示内容.</p>
-                      <label id="group-template-label" hidden>本群提示内容 <textarea id="group-protected-template" maxlength="500" aria-describedby="group-template-help"></textarea></label>
+                    <div id="group-notice-controls" class="notice-settings"><strong>群里发言设置</strong>
+                      <label>发言时引用触发消息 <select id="group-protected-quote" aria-describedby="group-quote-help"><option id="group-quote-inherit" value="">全局(读取中)</option><option value="true">引用</option><option value="false">不引用</option></select><span id="group-quote-help" class="field-help">引用导致这次规则判定的群消息.</span></label>
+                      <label class="check"><input id="group-template-override" type="checkbox" aria-describedby="group-template-source"><span>为本群单独设置发言内容</span></label>
+                      <p id="group-template-source" class="field-help">不开启时使用全局默认的发言内容.</p>
+                      <label id="group-template-label" hidden>本群发言内容 <textarea id="group-protected-template" maxlength="500" aria-describedby="group-template-help"></textarea></label>
                       <p id="group-template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回).</p>
-                      <div class="template-example"><strong>提示内容示例</strong><p id="group-template-preview"></p><span>规则和成员标识为示例值.</span></div>
+                      <div class="template-example"><strong>发言内容示例</strong><p id="group-template-preview"></p><span>规则和成员标识为示例值.</span></div>
                     </div>
                   </section>
                 </div>
@@ -199,10 +199,9 @@
             <a href="#settings-decision-title">文字判定</a>
             <a href="#settings-image-title">图片判定</a>
             <a id="settings-jump-chat" href="#global-chat-title" hidden>群规守卫问答</a>
-            <a href="#settings-notice-title">群提示</a>
+            <a href="#settings-alerts-title">失败提示</a>
             <a href="#settings-records-title">消息记录</a>
             <a href="#settings-limits-title">运行限制</a>
-            <a href="#settings-alerts-title">故障通知</a>
           </nav>
           <div class="settings-stack">
             <section class="settings-section" aria-labelledby="settings-monitor-title"><div class="settings-intro"><h2 id="settings-monitor-title" tabindex="-1">监控与执行</h2><p>设置监控范围和规则动作的默认执行方式.</p></div><div class="settings-fields">
@@ -210,7 +209,7 @@
               <label>群名单模式 <select id="setting-monitoring_mode" aria-describedby="monitoring-mode-help"><option value="allowlist">白名单</option><option value="blocklist">黑名单</option></select><span id="monitoring-mode-help" class="field-help">白名单只监控名单中的群; 黑名单监控名单以外的群. 切换模式会改变现有名单的含义, 请检查群管理中的开关.</span></label>
                <label>默认执行方式 <select id="setting-default_execution_mode"><option value="record">只记录</option><option value="execute">允许执行</option></select><span class="field-help">各群可以单独选择只记录或允许执行. 允许执行仍需开启上方的真实执行总开关.</span></label>
                <label>默认动作执行方式 <select id="setting-default_action_mode"><option value="auto">自动</option><option value="confirm">人工确认</option></select><span class="field-help">规则动作选择全局时使用此设置. 实际执行仍受真实执行总开关和本群执行方式控制.</span></label>
-               <label class="setting-switch"><span><strong>规则发言默认引用触发消息</strong><small>发言时附上触发规则的那条消息. 各规则的发言动作可单独覆盖, 不影响群提示.</small></span><input id="setting-reply_quote" type="checkbox" checked></label>
+               <label class="setting-switch"><span><strong>规则发言默认引用触发消息</strong><small>发言时附上触发规则的那条消息. 各规则的发言动作可单独覆盖, 不影响失败提示.</small></span><input id="setting-reply_quote" type="checkbox" checked></label>
                <label class="setting-switch"><span><strong>规则发言默认 @ 发言人</strong><small>发言时 @ 触发规则的成员. 各规则的发言动作可单独覆盖</small></span><input id="setting-reply_mention_sender" type="checkbox"></label>
             </div></section>
             <section class="settings-section" aria-labelledby="settings-decision-title"><div class="settings-intro"><h2 id="settings-decision-title" tabindex="-1">文字判定</h2><p>设置默认模型, 规则选择方式和判定理由.</p></div><div class="settings-fields">
@@ -253,13 +252,30 @@
                 </div>
               </div>
             </section>
-            <section class="settings-section" aria-labelledby="settings-notice-title"><div class="settings-intro"><h2 id="settings-notice-title" tabindex="-1">群提示</h2><p>平台因目标是管理员或机器人而拒绝禁言或撤回时, 使用以下默认设置. 各群可以覆盖.</p></div><div class="settings-fields">
-               <label>默认处理方式 <select id="setting-protected_target_policy"><option value="exempt">只记录</option><option value="group_message">发送群提示</option></select><span class="field-help">选择发送群提示时, 会使用下方内容和引用设置. 真实执行关闭时不会发送.</span></label>
-               <div class="notice-settings"><label>默认群提示内容 <textarea id="setting-protected_target_template" maxlength="500" aria-describedby="template-help"></textarea></label>
-                 <p id="template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回). 单群发送提示时可继承或自定义.</p>
-                 <div class="template-example"><strong>提示内容示例</strong><p id="setting-template-preview"></p><span>规则和成员标识为示例值.</span></div>
-                 <label class="check"><input id="setting-protected_target_quote" type="checkbox"><span>群提示引用触发消息</span></label><p class="field-help">引用导致这次规则判定的群消息. 只影响群提示.</p>
-               </div>
+            <section class="settings-section" aria-labelledby="settings-alerts-title"><div class="settings-intro"><h2 id="settings-alerts-title" tabindex="-1">失败提示</h2><p>判定失败或规则动作被拒绝时, 可以私聊通知管理员, 也可以在群里发言. 两种方式可以同时使用, 都不设置时只记录.</p></div><div class="settings-fields">
+              <section class="config-subsection"><h4>私聊通知管理员</h4><p class="field-help">判定模型失败, 超时, 熔断, 队列已满, 存储失败, 以及规则动作因目标是管理员或机器人被拒绝时, 私聊通知接收人. 不选接收人则不发送.</p>
+                <div class="notification-recipient-field">
+                  <div><strong>通知接收人</strong><p id="notification-recipient-summary" class="field-help">未设置接收人</p></div>
+                  <button id="notification-recipient-open" class="secondary" type="button" aria-haspopup="dialog">选择接收人</button>
+                </div>
+                <div class="notification-recipient-field notification-test-field">
+                  <div><strong>测试通知</strong><p class="field-help">向已保存的接收人发送一条测试消息. 当前未保存的修改不会用于测试.</p></div>
+                  <button id="notification-test" class="secondary" type="button">发送测试通知</button>
+                </div>
+                <p id="notification-test-status" class="notice" aria-live="polite"></p>
+                <details class="settings-details"><summary>手动填写私聊会话</summary>
+                   <label>私聊会话标识 <textarea id="setting-notification_targets" rows="3" maxlength="10260" aria-describedby="notification-target-help"></textarea><span id="notification-target-help" class="field-help">每行一个, 格式为 平台实例:FriendMessage:会话标识.</span></label>
+                </details>
+                <label>同类失败通知间隔, 秒 <input id="setting-notification_interval_seconds" type="number" min="0" aria-describedby="notification-interval-help"><span id="notification-interval-help" class="field-help">选了接收人时须大于 0. 不发送通知时清空接收人并设为 0.</span></label>
+              </section>
+              <section class="config-subsection"><h4>在群里发言</h4><p class="field-help">规则动作因目标是管理员或机器人而被平台拒绝时, 在触发规则的群里发言. 各群可以在群管理中覆盖. 真实执行关闭时不会发言.</p>
+                <label>默认处理方式 <select id="setting-protected_target_policy"><option value="exempt">不发言</option><option value="group_message">在群里发言</option></select><span class="field-help">选择在群里发言时, 会使用下方内容和引用设置.</span></label>
+                <div class="notice-settings"><label>默认发言内容 <textarea id="setting-protected_target_template" maxlength="500" aria-describedby="template-help"></textarea></label>
+                  <p id="template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回). 单群发言时可继承或自定义.</p>
+                  <div class="template-example"><strong>发言内容示例</strong><p id="setting-template-preview"></p><span>规则和成员标识为示例值.</span></div>
+                  <label class="check"><input id="setting-protected_target_quote" type="checkbox"><span>发言时引用触发消息</span></label><p class="field-help">引用导致这次规则判定的群消息.</p>
+                </div>
+              </section>
             </div></section>
             <section class="settings-section" aria-labelledby="settings-records-title"><div class="settings-intro"><h2 id="settings-records-title" tabindex="-1">消息记录</h2><p>控制记录详情中的消息原文保留时间.</p></div><div class="settings-fields">
               <label>消息原文保留天数 <input id="setting-message_retention_days" type="number" min="0" max="36500" step="1"><span class="field-help">默认 30 天, 到期自动清理. 设为 0 时不保留原文; 已清除的原文无法恢复. 数据库日志或备份可能仍有残留.</span></label>
@@ -277,28 +293,13 @@
                 <label>接收缓冲容量 <input id="setting-ingress_capacity" type="number" min="1"><span class="field-help">所有群共用的消息接收缓冲上限.</span></label>
                </div></details>
             </div></section>
-            <section class="settings-section" aria-labelledby="settings-alerts-title"><div class="settings-intro"><h2 id="settings-alerts-title" tabindex="-1">故障通知</h2><p>设置私聊通知的接收人和频率.</p></div><div class="settings-fields">
-              <div class="notification-recipient-field">
-                <div><strong>通知接收人</strong><p id="notification-recipient-summary" class="field-help">未设置接收人</p></div>
-                <button id="notification-recipient-open" class="secondary" type="button" aria-haspopup="dialog">选择接收人</button>
-              </div>
-              <div class="notification-recipient-field notification-test-field">
-                <div><strong>测试通知</strong><p class="field-help">向已保存的接收人发送一条测试消息. 当前未保存的修改不会用于测试.</p></div>
-                <button id="notification-test" class="secondary" type="button">发送测试通知</button>
-              </div>
-              <p id="notification-test-status" class="notice" aria-live="polite"></p>
-              <details class="settings-details"><summary>手动填写私聊会话</summary>
-                 <label>私聊会话标识 <textarea id="setting-notification_targets" rows="3" maxlength="10260" aria-describedby="notification-target-help"></textarea><span id="notification-target-help" class="field-help">每行一个, 格式为 平台实例:FriendMessage:会话标识.</span></label>
-              </details>
-              <label>同类故障通知间隔, 秒 <input id="setting-notification_interval_seconds" type="number" min="0" aria-describedby="notification-interval-help"><span id="notification-interval-help" class="field-help">选了接收人时须大于 0. 不发送通知时清空接收人并设为 0.</span></label>
-            </div></section>
           </div>
         </section>
       </div>
     </main>
   </div>
   <dialog id="notification-recipient-dialog" class="notification-recipient-dialog" aria-labelledby="notification-recipient-title" aria-describedby="notification-recipient-help">
-    <header><h2 id="notification-recipient-title">选择故障通知接收人</h2><p id="notification-recipient-help" class="field-help">勾选要接收私聊通知的人, 最多 20 位. 找不到时, 可以先私聊机器人, 再刷新列表.</p></header>
+    <header><h2 id="notification-recipient-title">选择失败提示接收人</h2><p id="notification-recipient-help" class="field-help">勾选要接收私聊通知的人, 最多 20 位. 找不到时, 可以先私聊机器人, 再刷新列表.</p></header>
     <div class="recipient-picker-grid">
       <div class="recipient-picker-current">
         <div class="recipient-selected-heading"><h3 id="recipient-selected-title" aria-live="polite">已选择 (0)</h3><button id="recipient-clear" class="secondary" type="button" hidden>全部清除</button></div>

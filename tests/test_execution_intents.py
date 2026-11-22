@@ -576,6 +576,18 @@ class ExecutionIntentTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT status, attempts FROM protected_target_notices").fetchone(), ("inactive", 0))
 
+    def test_protected_target_rejection_offers_private_notification_independently(self):
+        self.enable_execution()
+        self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
+        offered = []
+        class FakePlatform:
+            async def verify_permission(self, *args): return True
+            async def mute(self, *args): return {"outcome": "blocked", "reason_code": "protected_target"}
+            async def send_group_message(self, *args, **kwargs): raise AssertionError("unexpected send")
+        executor = MuteExecutor(MuteExecutionStore(self.path), FakePlatform(), notify=offered.append)
+        self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "blocked")
+        self.assertEqual(offered, ["action_rejected"])
+
     def test_unknown_notice_is_not_retried(self):
         self.enable_execution()
         settings = SettingsStore(self.path, self.path.parent / "backup.json")

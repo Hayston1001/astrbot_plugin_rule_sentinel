@@ -105,13 +105,20 @@ class DryRunHost:
             from .mute_execution_store import MuteExecutionStore
             store = MuteExecutionStore(self.queue.path, notify=self.queue.publish_intent)
             await run_sync_safely(store.recover_interrupted)
+            if interval > 0:
+                self.notifications = build_notification_dispatcher(context=self.context, queue=self.queue,
+                    recipients=targets, interval_seconds=interval,
+                    is_authorized=lambda: (self.config.get("notification_targets", []) == list(targets)
+                        and self.config.get("notification_interval_seconds", 0) == interval), on_failure=self._report_failure)
+                self.notifications.start()
             if self.config.get("action_execution_enabled") is True:
                 import aiohttp
                 from .mute_executor import MuteExecutor
                 from .qq_mute_platform import QQMutePlatform, resolve_qq_credentials
                 self.mute_session = aiohttp.ClientSession(trust_env=False)
                 self.mute_executor = MuteExecutor(store, QQMutePlatform(self.mute_session,
-                    lambda platform_id: resolve_qq_credentials(self.context, platform_id)))
+                    lambda platform_id: resolve_qq_credentials(self.context, platform_id)),
+                    notify=self.notifications.offer if self.notifications else None)
             image_fetcher = image_prefetcher = None
             if image_scope:
                 import aiohttp
@@ -127,12 +134,6 @@ class DryRunHost:
                     local_roots=[get_astrbot_temp_path()])
                 image_prefetcher = ImagePrefetcher(image_fetcher.fetch,
                     wait_seconds=settings.image_fetch_timeout_seconds)
-            if interval > 0:
-                self.notifications = build_notification_dispatcher(context=self.context, queue=self.queue,
-                    recipients=targets, interval_seconds=interval,
-                    is_authorized=lambda: (self.config.get("notification_targets", []) == list(targets)
-                        and self.config.get("notification_interval_seconds", 0) == interval), on_failure=self._report_failure)
-                self.notifications.start()
             self.runtime = build_runtime(context=self.context, config=self.config, rules=self.rules,
                                          queue=self.queue,
                                          notify=self.notifications.offer if self.notifications else None,

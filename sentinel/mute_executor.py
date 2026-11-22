@@ -6,8 +6,15 @@ from .async_io import run_sync_safely
 
 
 class MuteExecutor:
-    def __init__(self, store, platform, *, sleep=asyncio.sleep):
-        self.store, self.platform, self.sleep = store, platform, sleep
+    def __init__(self, store, platform, *, sleep=asyncio.sleep, notify=None):
+        self.store, self.platform, self.sleep, self.notify = store, platform, sleep, notify
+
+    def _notify_rejected(self):
+        if self.notify is not None:
+            try:
+                self.notify("action_rejected")
+            except Exception:
+                pass
 
     async def _acquire_guard(self, intent_id, attempt, *, notice=False, reply_options=None):
         acquire = self.store.acquire_notice_guard if notice else self.store.acquire_send_guard
@@ -118,6 +125,7 @@ class MuteExecutor:
                                           trace_id=result.get("trace_id"), reason_code=result.get("reason_code"),
                                           retry_allowed=retry_allowed)
             if state == "blocked" and result.get("reason_code") == "protected_target":
+                self._notify_rejected()
                 await self._send_notice(intent_id)
             if state != "pending_retry":
                 return state

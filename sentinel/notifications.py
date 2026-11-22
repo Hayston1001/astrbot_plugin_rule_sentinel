@@ -1,4 +1,4 @@
-"""Bounded, privacy-preserving administrator fault notifications.
+"""Bounded, privacy-preserving administrator failure notifications.
 
 The host supplies explicitly configured private recipients, a send function,
 and audit callback. No recipient is selected automatically. Notifications are
@@ -20,6 +20,7 @@ MESSAGES = {
     "queue_full": "规则监控队列已满, 有消息未处理. 请查看插件审计.",
     "storage_failed": "规则监控存储失败. 请查看插件日志.",
     "circuit_open": "规则监控模型熔断, 有消息未处理. 请查看插件审计.",
+    "action_rejected": "规则动作被平台拒绝: 目标是管理员或机器人, 动作未执行. 请查看插件审计.",
 }
 MAX_NOTIFICATION_TARGETS = 20
 MAX_NOTIFICATION_TARGET_LENGTH = 512
@@ -179,7 +180,7 @@ class NotificationDispatcher:
                 self.dropped += 1
 
 
-TEST_MESSAGE = "Rule Sentinel 测试通知: 故障通知通道可用. 无需操作."
+TEST_MESSAGE = "Rule Sentinel 测试通知: 失败提示通道可用. 无需操作."
 
 
 async def send_test_notifications(*, context, targets, message_chain_factory=None, send_timeout_seconds=10):

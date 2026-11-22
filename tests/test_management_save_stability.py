@@ -749,7 +749,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.locator("#tab-settings").click()
         opener = page.get_by_role("button", name="选择接收人", exact=True)
         opener.click()
-        dialog = page.get_by_role("dialog", name="选择故障通知接收人")
+        dialog = page.get_by_role("dialog", name="选择失败提示接收人")
         search = dialog.get_by_role("searchbox")
         expect(search).to_be_focused()
         expect(dialog.get_by_role("checkbox")).to_have_count(2)
@@ -872,7 +872,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         open_global.click()
         expect(heading).to_be_in_viewport()
         nav = page.get_by_role("navigation", name="设置分类")
-        for name in ("监控与执行", "文字判定", "图片判定", "群规守卫问答", "群提示", "消息记录", "运行限制", "故障通知"):
+        for name in ("监控与执行", "文字判定", "图片判定", "群规守卫问答", "失败提示", "消息记录", "运行限制"):
             expect(nav.get_by_role("link", name=name, exact=True)).to_be_visible()
         nav.get_by_role("link", name="图片判定").press("Enter")
         expect(page.get_by_role("heading", name="图片判定", exact=True)).to_be_focused()
