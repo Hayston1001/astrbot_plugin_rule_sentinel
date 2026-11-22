@@ -772,7 +772,7 @@ tr.record + tr td { background: var(--raised); }
   display: flex; width: fit-content; max-width: 100%; align-items: center; flex-wrap: wrap; gap: 6px 12px;
   margin: 0 0 16px; padding: 0; border: 0; background: none;
 }
-.save-bar > .primary { flex: none; min-height: 36px; padding: 5px 20px; }
+.save-bar > .primary { flex: none; min-height: 36px; }
 .save-bar > .notice { flex: 1 1 100%; margin: 0; }
 .save-state { color: var(--muted); font-size: 12.5px; font-weight: var(--weight-label); }
 .save-state[data-tone="warning"] { color: var(--signal-warning-line); }
@@ -1168,8 +1168,7 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
   .group-row > div:first-child { grid-column: 1 / -1; }
   .group-row > .group-detail-panel { margin-top: 16px; }
   .group-row:has(.group-detail-panel) { padding-bottom: 12px; }
-  .save-bar { width: 100%; }
-  .save-bar > .primary { width: 100%; min-height: 44px; }
+  .save-bar > .primary { min-height: 44px; }
   .settings-section { padding: 20px 16px; }
   .setting-switch { min-height: 64px; }
   .more { min-height: 44px; }

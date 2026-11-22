@@ -141,6 +141,10 @@ class ManagementUiTests(unittest.TestCase):
         save_bar = css.split('.save-bar {', 1)[1].split('}', 1)[0]
         self.assertIn('background: none', save_bar)
         self.assertIn('border: 0', save_bar)
+        self.assertIn('width: fit-content', save_bar)
+        self.assertNotIn('.save-bar > .primary { width: 100%', css)
+        self.assertIn('.save-bar > .primary { min-height: 44px; }', css)
+        self.assertNotIn('padding', css.split('.save-bar > .primary {', 1)[1].split('}', 1)[0])
         self.assertNotIn('.save-bar.is-dirty', css)
         self.assertIn('input.is-invalid, select.is-invalid, textarea.is-invalid,', css)
         self.assertNotIn('.editor-footer', css)
