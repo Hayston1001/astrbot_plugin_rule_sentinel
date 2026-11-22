@@ -48,16 +48,28 @@ class ContextSnapshotTests(unittest.TestCase):
             ("second", "trigger_sender", 8),
         ])
         self.assertIsNone(context.take(WorkItem("p", "g", "current", {"context_token": token}, "lease")))
-        for index in range(6):
+        for index in range(20):
             context.remember(message(f"long-{index}", "x" * 600, received=143 + index))
         short = context.prepare(trigger, 1)
         limited = context.take(WorkItem("p", "g", "current", {"context_token": short}, "lease"))
         self.assertEqual(limited.audit()["count"], 1)
         self.assertTrue(limited.entries[0].shortened)
-        token = context.prepare(trigger, 20)
-        bounded = context.take(WorkItem("p", "g", "current", {"context_token": token}, "lease"))
+        token = context.prepare(message("bounded", "current", received=200), 30)
+        bounded = context.take(WorkItem("p", "g", "bounded", {"context_token": token}, "lease"))
         self.assertEqual(bounded.audit()["chars"], MAX_TOTAL_CHARS)
         self.assertTrue(bounded.audit()["limited"])
+
+    def test_maximum_limit_keeps_every_requested_prior_message(self):
+        context = ChatContext()
+        self.addCleanup(context.close)
+        for index in range(MAX_MESSAGES + 5):
+            context.remember(message(str(index), str(index), received=index))
+        trigger = message("current", "current", received=MAX_MESSAGES + 10)
+        token = context.prepare(trigger, MAX_MESSAGES)
+        snapshot = context.take(WorkItem("p", "g", "current", {"context_token": token}, "lease"))
+        self.assertEqual(len(snapshot.entries), MAX_MESSAGES)
+        self.assertEqual([row.text for row in snapshot.entries],
+                         [str(index) for index in range(5, MAX_MESSAGES + 5)])
 
     def test_history_and_pending_snapshots_remain_bounded(self):
         context = ChatContext()
@@ -79,9 +91,28 @@ class ContextSnapshotTests(unittest.TestCase):
         self.assertEqual(decision_fingerprint(DEFAULTS, "p", "g"), decision_fingerprint(off, "p", "g"))
         self.assertNotEqual(decision_fingerprint(DEFAULTS, "p", "g"), decision_fingerprint(on, "p", "g"))
         self.assertEqual(resolve_group_settings(on, "p", "other")["context_messages"], 0)
-        for value in (True, -1, 21, 3.0, "3", None):
+        for value in (True, -1, 101, 3.0, "3", None):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_settings({**DEFAULTS, "group_overrides": {"p/g": {"context_messages": value}}})
+
+    def test_global_limit_applies_until_a_group_overrides_it(self):
+        inherited = {**DEFAULTS, "context_messages": 12}
+        validate_settings(inherited)
+        self.assertEqual(resolve_group_settings(inherited, "p", "g")["context_messages"], 12)
+        self.assertNotEqual(decision_fingerprint(DEFAULTS, "p", "g"), decision_fingerprint(inherited, "p", "g"))
+        overridden = {**inherited, "group_overrides": {"p/g": {"context_messages": 30},
+                                                       "p/other": {"context_messages": 0}}}
+        validate_settings(overridden)
+        self.assertEqual(resolve_group_settings(overridden, "p", "g")["context_messages"], 30)
+        self.assertEqual(resolve_group_settings(overridden, "p", "other")["context_messages"], 0)
+        self.assertEqual(resolve_group_settings(overridden, "p", "unknown")["context_messages"], 12)
+        # A group can turn the context off even while the global default is on.
+        self.assertEqual(decision_fingerprint(overridden, "p", "other"), decision_fingerprint(DEFAULTS, "p", "other"))
+        validate_settings({**DEFAULTS, "context_messages": 100})
+        for value in (True, -1, 101, 3.0, "12", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_settings({**DEFAULTS, "context_messages": value})
+        self.assertEqual(DEFAULTS["context_messages"], 0)
 
 
 class ContextRuntimeTests(unittest.IsolatedAsyncioTestCase):

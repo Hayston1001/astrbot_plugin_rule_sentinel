@@ -322,7 +322,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(item["platform_id"], item["group_id"]) for item in groups}, {("p1", "g"), ("p2", "g")})
         for overrides in ({"model": None}, {"execution_mode": "invalid"}, {"protected_quote": 1},
                           {"llm_reason_language": None}, {"llm_reason_language": "English\ninvalid"},
-                          {"context_messages": 21}, {"context_messages": True}, {"other": True}):
+                          {"context_messages": 101}, {"context_messages": True}, {"other": True}):
             self.raw_body = json.dumps({"platform_id": "p1", "group_id": "g", "overrides": overrides}).encode()
             self.assertEqual((await self.plugin.save_group_settings())["status_code"], 400)
         self.raw_body = b'{"platform_id":"p1","group_id":"g","overrides":{},"overrides":{}}'
@@ -354,6 +354,20 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.raw_body = json.dumps({"llm_no_action_reason_enabled": value}).encode()
             self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
         self.assertFalse(self.plugin.config["llm_no_action_reason_enabled"])
+
+    async def test_context_messages_global_roundtrip_and_group_override(self):
+        self.assertEqual((await self.plugin.get_settings())["data"]["context_messages"], 0)
+        self.raw_body = b'{"context_messages":40}'
+        result = await self.plugin.save_settings()
+        self.assertEqual(result["data"]["settings"]["context_messages"], 40)
+        self.assertEqual(self.plugin.config["context_messages"], 40)
+        for value in (101, -1, True, "3", None):
+            self.raw_body = json.dumps({"context_messages": value}).encode()
+            self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
+        self.assertEqual(self.plugin.config["context_messages"], 40)
+        self.raw_body = b'{"platform_id":"p","group_id":"g","overrides":{"context_messages":0}}'
+        result = await self.plugin.save_group_settings()
+        self.assertEqual(result["data"]["settings"]["group_overrides"]["p/g"], {"context_messages": 0})
 
     async def test_reply_defaults_are_saved_without_restarting_monitoring(self):
         defaults = (await self.plugin.get_settings())["data"]

@@ -3081,14 +3081,14 @@ el("rule-group").addEventListener("change", () => {
   editingScope = JSON.stringify(chosen ? {platform_id: chosen.platform_id, group_id: chosen.group_id} : {platform_id: "", group_id: ""});
   clearPreview();
 });
-const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "llm_no_action_reason_enabled",
+const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "context_messages", "llm_no_action_reason_enabled",
   "reply_quote", "reply_mention_sender", "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_judging_enabled", "image_understanding_mode", "image_provider_id", "image_caption_prompt",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"];
-const numericSettings = new Set(["message_retention_days", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
+const numericSettings = new Set(["message_retention_days", "context_messages", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"]);
@@ -3101,8 +3101,9 @@ const chatQueryKeys = ["status", "rules", "mute", "mute_target", "recall", "repl
 const chatQueryField = (scope, item) => el(`${scope}-chat-query-${item.replace("_", "-")}`);
 const defaultGroupChatItems = ["status", "mute", "recall", "reply"];
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
+  "group-context-mode", "group-context-messages",
   "group-protected-policy", "group-protected-quote", "group-protected-template",
-  "group-image-enabled", "group-image-model", "group-context-messages"];
+  "group-image-enabled", "group-image-model"];
 const settingsBaselines = new WeakMap();
 const groupSectionBaselines = new WeakMap();
 let ruleBaseline = null;
@@ -3176,10 +3177,12 @@ function captureGroupBaseline() {
 function groupFieldIssues() {
   const issues = new Map();
   const note = (field, message) => { if (field && !issues.has(field)) issues.set(field, message); };
-  const context = el("group-context-messages");
-  const raw = String(context.value ?? "").trim();
-  if (!raw || !Number.isInteger(Number(raw)) || Number(raw) < 0 || Number(raw) > 20) {
-    note(context, "须为 0 到 20 的整数");
+  if (el("group-context-mode").value === "custom") {
+    const context = el("group-context-messages");
+    const raw = String(context.value ?? "").trim();
+    if (!raw || !Number.isInteger(Number(raw)) || Number(raw) < 0 || Number(raw) > 100) {
+      note(context, "须为 0 到 100 的整数");
+    }
   }
   if (el("group-model-backend").value === "llm" && !String(el("group-model").value ?? "").trim()) {
     note(el("group-model"), "请填写本群模型名称");
@@ -3411,6 +3414,9 @@ function updateGroupSettingsHints(animate = false) {
   el("group-strategy-inherit").textContent = `全局(${strategy})`;
   el("group-reason-language-inherit").textContent = `全局(${settings.llm_reason_language?.trim() || "自动选择"})`;
   setPanelVisibility(el("group-reason-language-label"), el("group-reason-language-mode").value === "custom", {animate});
+  const inheritedContext = Number(settings.context_messages ?? 0);
+  el("group-context-inherit").textContent = `全局(${inheritedContext ? `${inheritedContext} 条` : "关闭"})`;
+  setPanelVisibility(el("group-context-label"), el("group-context-mode").value === "custom", {animate});
   const inheritedImage = settings.image_judging_enabled === true
     ? `已启用(${settings.image_provider_id || "未选择图片模型"})` : "未启用";
   el("group-image-inherit").textContent = `全局(${inheritedImage})`;
@@ -3451,7 +3457,9 @@ function showGroupOverrides() {
   el("group-model-backend").value = overrides.model?.backend || "";
   el("group-model").value = overrides.model?.model || "";
   el("group-strategy").value = overrides.strategy || "";
-  el("group-context-messages").value = String(overrides.context_messages ?? 0);
+  const hasContext = Object.hasOwn(overrides, "context_messages");
+  el("group-context-mode").value = hasContext ? "custom" : "";
+  el("group-context-messages").value = String(hasContext ? overrides.context_messages : settings?.context_messages ?? 0);
   showGroupChatQuery(scope, null);
   el("group-image-enabled").value = Object.hasOwn(overrides, "image_enabled") ? String(overrides.image_enabled) : "";
   el("group-image-model").value = overrides.image_model?.model || "";
@@ -3939,12 +3947,14 @@ function readGroupOverrides() {
       if (!sameChatQueryItems(chatItems, savedGroupChatItems(scope))) overrides.chat_query_items = chatItems;
     }
   }
-  const context = el("group-context-messages").value;
-  if (!/^\d+$/.test(context) || Number(context) > 20) {
-    el("group-context-messages").focus?.();
-    throw new Error("群聊上下文条数必须是 0 到 20 的整数");
+  if (el("group-context-mode").value === "custom") {
+    const context = String(el("group-context-messages").value ?? "").trim();
+    if (!/^\d+$/.test(context) || Number(context) > 100) {
+      el("group-context-messages").focus?.();
+      throw new Error("本群上下文条数必须是 0 到 100 的整数");
+    }
+    overrides.context_messages = Number(context);
   }
-  if (Number(context)) overrides.context_messages = Number(context);
   const backend = el("group-model-backend").value;
   if (backend) {
     const model = el("group-model").value.trim();
@@ -4092,6 +4102,12 @@ el("group-reason-language-mode").addEventListener("change", () => {
   updateGroupSettingsHints(true);
 });
 el("group-reason-language").addEventListener("input", () => { groupReasonDraftInitialized = true; });
+el("group-context-mode").addEventListener("change", () => {
+  if (el("group-context-mode").value === "custom" && !String(el("group-context-messages").value ?? "").trim()) {
+    el("group-context-messages").value = String(currentSettings?.context_messages ?? 0);
+  }
+  updateGroupSettingsHints(true);
+});
 for (const id of ["group-execution", "group-protected-policy", "group-protected-quote"]) {
   el(id).addEventListener("change", () => updateGroupSettingsHints(true));
 }

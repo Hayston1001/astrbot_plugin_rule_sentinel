@@ -46,7 +46,7 @@ let discoveryFailed = false;
 let discovery = {groups: [], history_available: true, truncated: false};
 const savedRules = new Map();
 const settings = {quick_start_completed: true, action_execution_enabled: true, monitoring_groups: ["p1/long-group-12345678"],
-  monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", llm_no_action_reason_enabled: true, group_overrides: {},
+  monitoring_mode: "allowlist", default_execution_mode: "execute", default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "中文", context_messages: 0, llm_no_action_reason_enabled: true, group_overrides: {},
   reply_quote: true, reply_mention_sender: false,
   decision_backend: "llm", llm_provider_id: "default-model", rule_selection_strategy: "priority",
   protected_target_policy: "exempt", protected_target_template: "global {rule_id}: {sender_id} {action}", protected_target_quote: true,
@@ -161,6 +161,9 @@ assert.equal(elements["group-strategy-inherit"].textContent, "全局(按规则�
 assert.equal(elements["group-reason-language-inherit"].textContent, "全局(中文)");
 assert.equal(elements["group-reason-language-mode"].value, "");
 assert.equal(elements["group-reason-language-label"].hidden, true);
+assert.equal(elements["group-context-inherit"].textContent, "全局(关闭)");
+assert.equal(elements["group-context-mode"].value, "");
+assert.equal(elements["group-context-label"].hidden, true);
 assert.equal(elements["group-execution-inherit"].textContent, "全局(允许执行)");
 assert.match(elements["group-defaults"].textContent, /按规则优先级/);
 assert.equal(elements["group-template-label"].hidden, true);

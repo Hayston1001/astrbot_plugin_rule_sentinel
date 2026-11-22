@@ -83,7 +83,7 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
             decider.current()
             return decider
         raise ValueError("decision backend required")
-    decider = (GroupDecider(config, make_decider) if "group_overrides" in config
+    decider = (GroupDecider(config, make_decider) if "group_overrides" in config or config.get("context_messages")
                else make_decider(settings.backend, settings.model, settings.rule_selection_strategy, None,
                                  settings.image_judging_enabled, settings.image_provider_id,
                                  settings.image_understanding_mode))

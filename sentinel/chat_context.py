@@ -5,16 +5,17 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 
-MAX_MESSAGES = 20
+MAX_MESSAGES = 100
 MAX_MESSAGE_CHARS = 512
-MAX_TOTAL_CHARS = 2400
+MAX_TOTAL_CHARS = 8000
 MAX_GROUPS = 128
 MAX_PENDING = 512
 
 
 def validate_context_messages(value):
+    """Validate one global or per-group count; zero means the context is off."""
     if type(value) is not int or not 0 <= value <= MAX_MESSAGES:
-        raise ValueError("invalid group context message limit")
+        raise ValueError("invalid context message limit")
     return value
 
 
@@ -97,7 +98,8 @@ class ChatContext:
         if self._closed or not message.is_text or message.image_urls or not message.text.strip():
             return
         key = (message.platform_id, message.group_id)
-        entries = self._groups.setdefault(key, deque(maxlen=MAX_MESSAGES))
+        # Keep one extra row so the largest limit can still see MAX_MESSAGES messages before the trigger.
+        entries = self._groups.setdefault(key, deque(maxlen=MAX_MESSAGES + 1))
         entries.append(_Observed(message.received_at, message.message_id, message.sender_id,
                                  message.text[:MAX_MESSAGE_CHARS], len(message.text) > MAX_MESSAGE_CHARS))
         self._groups.move_to_end(key)

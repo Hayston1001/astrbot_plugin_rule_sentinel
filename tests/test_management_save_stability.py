@@ -860,6 +860,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(group_rules).not_to_be_checked()
         expect(group_mute).not_to_be_checked()
         expect(source).to_contain_text("当前按本群清单回答. 保存后改用全局清单.")
+        page.locator("#group-context-mode").select_option("custom")
         page.locator("#group-context-messages").fill("4")
         page.locator("#group-settings-save").click()
         expect(page.locator("#group-settings-status")).to_contain_text("本群问答草稿已保留")
@@ -924,20 +925,27 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(rules).to_be_checked()
         expect(target).to_be_disabled()
 
-    def test_group_context_is_off_by_default_and_saves_only_for_the_selected_group(self):
+    def test_group_context_inherits_global_and_saves_only_for_the_selected_group(self):
         from playwright.sync_api import expect
 
         page = self.page
         page.locator("#tab-groups").click()
         rows = page.locator(".group-row")
         rows.first.get_by_role("button", name="配置", exact=True).click()
-        field = page.get_by_role("spinbutton", name="群聊上下文条数")
+        mode = page.locator("#group-context-mode")
+        field = page.locator("#group-context-messages")
+        expect(mode).to_have_value("")
+        expect(page.locator("#group-context-inherit")).to_have_text("全局(关闭)")
+        expect(field).to_be_hidden()
+        mode.select_option("custom")
+        expect(field).to_be_visible()
         expect(field).to_have_value("0")
-        expect(field).to_have_accessible_description("填 0 关闭. 可将触发判定的消息与前n条消息一并发给模型.")
+        expect(field).to_have_accessible_description("填 0 关闭本群上下文. 最多 100 条, 条数较多时还受总字数限制.")
         field.fill("8")
         page.locator("#group-settings-save").click()
         expect(page.locator("#group-settings-status")).not_to_contain_text("尚未保存")
         rows.nth(1).get_by_role("button", name="配置", exact=True).click()
+        expect(mode).to_have_value("")
         expect(field).to_have_value("0")
         rows.first.get_by_role("button", name="配置", exact=True).click()
         expect(field).to_have_value("8")

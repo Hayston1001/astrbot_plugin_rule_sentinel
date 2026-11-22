@@ -5,7 +5,7 @@ const settings = {
   decision_backend: "llm", llm_provider_id: "", rule_selection_strategy: "model",
   default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30,
   reply_quote: true, reply_mention_sender: false,
-  llm_reason_language: "", llm_no_action_reason_enabled: true, group_overrides: {},
+  llm_reason_language: "", llm_no_action_reason_enabled: true, context_messages: 0, group_overrides: {},
   chat_query_items: ["status", "mute", "recall", "reply"],
   protected_target_policy: "exempt", protected_target_template: "hello {rule_id}", protected_target_quote: false,
   quick_start_completed: sessionStorage.getItem(`fixture-${scenario}`) === "true", max_duration_seconds: 2592000,

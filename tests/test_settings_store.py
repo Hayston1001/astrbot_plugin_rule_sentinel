@@ -281,6 +281,23 @@ class SettingsStoreTests(unittest.TestCase):
                     store.save({**migrated, "llm_no_action_reason_enabled": invalid})
             self.assertFalse(store.load_or_migrate({})["llm_no_action_reason_enabled"])
 
+    def test_context_messages_defaults_to_off_and_migrates_into_existing_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            original = store.load_or_migrate({})
+            self.assertEqual(original["context_messages"], 0)
+            original.pop("context_messages")
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(original),))
+                db.commit()
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated["context_messages"], 0)
+            store.save({**migrated, "context_messages": 50})
+            self.assertEqual(store.load_or_migrate({})["context_messages"], 50)
+            for invalid in (101, -1, True, "3", None):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    store.save({**migrated, "context_messages": invalid})
+
     def test_retired_model_migration_disables_affected_groups_and_work(self):
         from sentinel.dry_run_queue import DryRunQueue
         for mode in ("allowlist", "blocklist"):

@@ -178,6 +178,7 @@ def resolve_group_settings(config, platform_id, group_id):
         raise ValueError("invalid image understanding mode")
     strategy = group.get("strategy", config.get("rule_selection_strategy", "model"))
     mode = group.get("execution_mode", config.get("default_execution_mode", "execute"))
+    context_messages = validate_context_messages(group.get("context_messages", config.get("context_messages", 0)))
     reason_language = validate_reason_language(group.get("llm_reason_language", config.get("llm_reason_language", "")))
     if strategy not in ("model", "priority") or mode not in ("record", "execute"):
         raise ValueError("invalid group processing")
@@ -195,7 +196,7 @@ def resolve_group_settings(config, platform_id, group_id):
             "llm_reason_language": reason_language, "image_enabled": image_enabled,
              "image_model": image_model, "image_understanding_mode": image_mode,
                "shared_violation_groups": shared,
-                "context_messages": validate_context_messages(group.get("context_messages", 0)),
+                "context_messages": context_messages,
                 "chat_query_items": query_items}
 
 
