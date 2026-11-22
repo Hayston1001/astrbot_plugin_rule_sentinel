@@ -114,6 +114,7 @@ class RuleSentinel(Star):
         self.start_error = None
         self.settings_store = None
         self._settings_lock = asyncio.Lock()
+        self._notification_test_at = 0.0
         self._closing = False
         self._rules = None
         self._queue = None
@@ -141,6 +142,7 @@ class RuleSentinel(Star):
             ("notifications", self.list_notifications, ["GET"]),
             ("notification-recipients", self.list_notification_recipients, ["GET"]),
             ("notification-recipient-labels", self.get_notification_recipient_labels, ["POST"]),
+            ("notification-test", self.test_notification, ["POST"]),
             ("status", self.status, ["GET"]),
             ("platforms", self.list_platforms, ["GET"]),
             ("groups", self.list_groups, ["GET"]),
@@ -656,6 +658,38 @@ class RuleSentinel(Star):
         except Exception:
             logger.error("Rule Sentinel could not resolve notification recipients")
             return error_response("Could not load private sessions", status_code=503)
+
+    async def test_notification(self):
+        """Send one test message to the saved private recipients only."""
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        if not self.management.actor_allowed(request.username):
+            return error_response("Not authorized", status_code=403)
+        data = await self._payload()
+        if data != {}:
+            return error_response("Invalid request", status_code=400)
+        from .sentinel.notifications import send_test_notifications, validate_notification_targets
+        try:
+            targets = validate_notification_targets(self.config.get("notification_targets", []))
+        except ValueError:
+            return error_response("Saved notification recipients are invalid", status_code=400)
+        if not targets:
+            return error_response("No saved notification recipients", status_code=400)
+        now = time.monotonic()
+        if now < self._notification_test_at:
+            return error_response("Test notification is cooling down", status_code=429)
+        self._notification_test_at = now + 10
+        try:
+            results = await send_test_notifications(context=self.context, targets=targets)
+        except Exception:
+            logger.error("Rule Sentinel test notification failed")
+            return error_response("Test notification failed", status_code=500)
+        for status in results:
+            try:
+                await run_sync_safely(self._queue.record_notification, "test", status)
+            except Exception:
+                logger.error("Rule Sentinel could not record the test notification result")
+        return json_response({status: results.count(status) for status in ("submitted", "failed", "unknown")})
 
     async def list_platforms(self):
         if self.management is None:

@@ -262,6 +262,20 @@ function fadeInContent(node) {
   if (canAnimateDisclosure(node) && (!node.getClientRects || node.getClientRects().length)) node.animate([{opacity: 0}, {opacity: 1}],
     {duration: 180, easing: "ease-out"});
 }
+const tabTransitions = new WeakMap();
+function slideTabPanel(panel, direction) {
+  if (!direction || !canAnimateDisclosure(panel)) return;
+  const previous = tabTransitions.get(panel);
+  if (previous) previous.cancel();
+  const animation = panel.animate([
+    {opacity: 0, transform: `translate3d(${direction * 28}px, 0, 0)`},
+    {opacity: 1, transform: "translate3d(0, 0, 0)"},
+  ], {duration: 240, easing: "cubic-bezier(.22, 1, .36, 1)"});
+  tabTransitions.set(panel, animation);
+  animation.onfinish = () => {
+    if (tabTransitions.get(panel) === animation) tabTransitions.delete(panel);
+  };
+}
 function loadingFadeDelay(node) {
   return canAnimateDisclosure(node) && (!node.getClientRects || node.getClientRects().length)
     ? new Promise((resolve) => setTimeout(resolve, 180)) : Promise.resolve();
@@ -342,6 +356,7 @@ function rememberTab(name) {
 }
 function selectTab(name, {remember = true, updateData = true} = {}) {
   if (!TAB_NAMES.includes(name)) return;
+  const previousTab = activeTab;
   if (name !== "rules") stopActionFollow();
   if (name !== "groups") openGuideGroupAfterAdd = false;
   activeTab = name;
@@ -367,6 +382,7 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   }
   el("tab-loading").hidden = true;
   el("page-content").hidden = false;
+  slideTabPanel(el(`panel-${name}`), Math.sign(TAB_NAMES.indexOf(name) - TAB_NAMES.indexOf(previousTab)));
   window.SentinelOverview?.setActive(name === "status");
   if (updateData && tabDataReady) {
     if (name === "records" || name === "status") startLive(); else stopLive();
@@ -441,6 +457,7 @@ function clearPreview() {
   revision += 1;
   pending = null;
   if (!saving) el("save-status").textContent = "";
+  updateRuleSaveState();
 }
 function actionModeLabel(mode, globalMode = currentSettings?.default_action_mode) {
   if (mode === "inherit") return `全局(${globalMode === "auto" ? "自动" : globalMode === "confirm" ? "人工确认" : "不可用"})`;
@@ -448,6 +465,52 @@ function actionModeLabel(mode, globalMode = currentSettings?.default_action_mode
 }
 function showError(target, error) {
   target.textContent = `操作失败: ${error.message || "未知错误"}`;
+}
+/* Unsaved-change and validation state for the page editors. */
+const invalidTitleFields = new WeakSet();
+function setClass(node, name, enabled) {
+  if (!node?.classList) return;
+  if (typeof node.classList.toggle === "function") node.classList.toggle(name, enabled);
+  else if (enabled) node.classList.add(name);
+  else node.classList.remove(name);
+}
+function paintSaveState(state, {dirty, invalid, saved = "没有未保存的修改"}) {
+  state?.setAttribute?.("data-tone", invalid ? "error" : dirty ? "warning" : "idle");
+  if (state) state.textContent = invalid ? `有 ${invalid} 项填写有误` : dirty ? "有未保存的修改" : saved;
+}
+function readFormState(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return "";
+  const values = [];
+  for (const field of root.querySelectorAll("input, select, textarea")) {
+    if (field.type === "hidden") continue;
+    values.push([field.id || field.name || `${field.tagName}:${values.length}`,
+      field.type === "checkbox" ? (field.checked ? "1" : "0") : (field.value ?? "")]);
+  }
+  return JSON.stringify(values);
+}
+function markFieldInvalid(field, invalid, message = "") {
+  if (!field) return;
+  setClass(field, "is-invalid", invalid);
+  if (field.tagName === "SELECT") {
+    const trigger = field.parentNode?.querySelector?.(".custom-select-trigger");
+    if (trigger) setClass(trigger, "is-invalid", invalid);
+  }
+  if (typeof field.setAttribute !== "function") return;
+  if (!invalid) {
+    field.removeAttribute("aria-invalid");
+    if (invalidTitleFields.has(field)) { field.removeAttribute("title"); invalidTitleFields.delete(field); }
+    return;
+  }
+  field.setAttribute("aria-invalid", "true");
+  if (message) { field.title = message; invalidTitleFields.add(field); }
+}
+function clearFieldInvalid(event) {
+  const field = event.target;
+  if (!field?.classList?.contains?.("is-invalid")) return;
+  markFieldInvalid(field, false);
+}
+function fieldLabelText(field) {
+  return field?.closest?.("label")?.firstChild?.textContent?.trim() || "";
 }
 for (const id of ["rule", "version", "priority", "text", "enabled"]) {
   const onChange = () => {
@@ -975,7 +1038,9 @@ function renderRecords(rows, append = false, update = false) {
     process.appendChild(actionSection);
     if (Number.isSafeInteger(row.violation_count?.ordinal)) {
       const section = recordElement("section", "record-detail-section");
-      section.appendChild(recordElement("h3", "", "违规累计"));
+      const heading = recordElement("div", "record-detail-heading");
+      heading.appendChild(recordElement("h3", "", "违规累计"));
+      section.appendChild(heading);
       const showCount = (count) => {
         const revoked = count.revoked_at_us != null;
         note.textContent = `${revoked ? "已撤销 / " : ""}计入时第 ${count.ordinal} 次 / 计算时长 ${formatDuration(count.duration_seconds)}`;
@@ -985,7 +1050,7 @@ function renderRecords(rows, append = false, update = false) {
       };
       const note = recordElement("p", "");
       const audit = recordElement("p", "record-detail-muted");
-      const revoke = recordElement("button", "secondary", "撤销");
+      const revoke = recordElement("button", "secondary record-detail-action", "撤销");
       revoke.type = "button";
       revoke.setAttribute("aria-label", "撤销本次违规计数");
       revoke.addEventListener("click", async () => {
@@ -996,8 +1061,9 @@ function renderRecords(rows, append = false, update = false) {
           showFeedback("已撤销本次计数, 不会解除禁言.", "success");
         } catch (error) { revoke.disabled = false; feedbackError(error, "撤销计数失败"); }
       });
+      heading.appendChild(revoke);
       showCount(row.violation_count);
-      for (const child of [note, audit, revoke]) section.appendChild(child);
+      for (const child of [note, audit]) section.appendChild(child);
       process.appendChild(section);
     }
     const events = Array.isArray(row.events) ? row.events : [];
@@ -1944,6 +2010,7 @@ el("preview").addEventListener("click", async () => {
         for (const action of actionRows) action.updateVisibility(false);
       }
       clearPreview();
+      if (!changedDuringConfirm) captureRuleBaseline();
       const completedRevision = revision;
       const currentScope = allGroups() || JSON.stringify(group()) === JSON.stringify(scope);
       await Promise.all([currentScope ? loadCurrentRules() : Promise.resolve(), refreshGroupCounts()]);
@@ -1957,7 +2024,14 @@ el("preview").addEventListener("click", async () => {
       } else showFeedback("规则已保存.");
     }
   } catch (error) {
-    if (revision === saveRevision) feedbackError(error, "保存失败");
+    if (revision === saveRevision) {
+      const focused = document.activeElement;
+      if (focused && focused !== document.body && typeof focused.setAttribute === "function" &&
+          ["INPUT", "SELECT", "TEXTAREA"].includes(focused.tagName)) {
+        markFieldInvalid(focused, true, error.message || "");
+      }
+      feedbackError(error, "保存失败");
+    }
   } finally {
     if (el("save-status").textContent === "正在保存规则...") el("save-status").textContent = "";
     pending = null;
@@ -2637,6 +2711,7 @@ async function loadCurrentRules() {
             el("text").value = rule.text;
             setActions(rule.actions || []);
             el("enabled").checked = rule.enabled;
+            captureRuleBaseline();
           }
           suspendedRuleDraft = false;
           attachRuleEditor(item, edit);
@@ -2972,6 +3047,7 @@ el("new-rule").addEventListener("click", () => {
   el("text").value = "";
   setActions([]);
   el("enabled").checked = false;
+  captureRuleBaseline();
   setPanelVisibility(el("rule-form"), true, {force: true});
   updateNewRuleButton();
   el("rule-form").scrollIntoView({behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start"});
@@ -3003,6 +3079,142 @@ const defaultGroupChatItems = ["status", "mute", "recall", "reply"];
 const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
   "group-protected-policy", "group-protected-quote", "group-protected-template",
   "group-image-enabled", "group-image-model", "group-context-messages"];
+const settingsBaselines = new WeakMap();
+const groupSectionBaselines = new WeakMap();
+let ruleBaseline = null;
+function settingsSections() {
+  return Array.from(document.querySelectorAll?.("#panel-settings .settings-section") || []);
+}
+function settingsFieldIssues() {
+  const issues = new Map();
+  const note = (field, message) => { if (field && !issues.has(field)) issues.set(field, message); };
+  const invalidRecipient = (value) => [...value].length <= 512 && /^[^:\s]+:FriendMessage:\S.*$/u.test(value) &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+  for (const key of numericSettings) {
+    const field = el(`setting-${key}`);
+    if (!field) continue;
+    const raw = String(field.value ?? "").trim();
+    if (!raw) note(field, "数值不能为空");
+    else if (!Number.isSafeInteger(Number(raw))) note(field, "数值必须为整数");
+    else if (field.validity?.rangeUnderflow || field.validity?.rangeOverflow) note(field, "超出允许范围");
+  }
+  const single = el("setting-image_max_bytes_per_image");
+  const total = el("setting-image_max_total_bytes");
+  if (!issues.has(single) && !issues.has(total) && Number(total.value) < Number(single.value)) {
+    note(total, "不能小于单张图片上限");
+  }
+  if (el("setting-image_judging_enabled").checked && !el("setting-image_provider_id").value) {
+    note(el("setting-image_provider_id"), "开启图片判定后必须选择图片模型");
+  }
+  const targets = (el("setting-notification_targets").value ?? "").split(/\r?\n/)
+    .map((value) => value.trim()).filter(Boolean);
+  if (targets.length > maxNotificationTargets || !targets.every(invalidRecipient)) {
+    note(el("setting-notification_targets"), "最多可填写 20 个有效的私聊会话标识");
+  }
+  const interval = el("setting-notification_interval_seconds");
+  if (!issues.has(interval)) {
+    if (targets.length && Number(interval.value) <= 0) note(interval, "已选择接收人时须大于 0");
+    if (!targets.length && Number(interval.value) !== 0) note(interval, "未设置接收人时须为 0");
+  }
+  const template = el("setting-protected_target_template");
+  if (formatNoticeExample(template.value) === null) {
+    note(template, "变量只支持 {rule_id}, {sender_id} 和 {action}");
+  } else if (el("setting-protected_target_policy").value === "group_message" && !String(template.value ?? "").trim()) {
+    note(template, "发送群提示时请填写默认群提示内容");
+  }
+  return issues;
+}
+function updateSettingsSaveState() {
+  let dirty = 0;
+  for (const section of settingsSections()) {
+    const baseline = settingsBaselines.get(section);
+    const changed = baseline !== undefined && readFormState(section) !== baseline;
+    setClass(section, "has-unsaved-changes", changed);
+    if (changed) dirty += 1;
+  }
+  const issues = settingsFieldIssues();
+  for (const field of Array.from(document.querySelectorAll?.("#panel-settings .is-invalid") || [])) {
+    if (!issues.has(field)) markFieldInvalid(field, false);
+  }
+  for (const [field, message] of issues) markFieldInvalid(field, true, message);
+  paintSaveState(el("settings-save-state"), {dirty: dirty > 0, invalid: issues.size});
+}
+function resetSettingsBaseline() {
+  for (const section of settingsSections()) settingsBaselines.set(section, readFormState(section));
+  updateSettingsSaveState();
+}
+function groupSections() {
+  return Array.from(document.querySelectorAll?.("#group-detail .config-subsection") || []);
+}
+function captureGroupBaseline() {
+  for (const section of groupSections()) groupSectionBaselines.set(section, readFormState(section));
+}
+function groupFieldIssues() {
+  const issues = new Map();
+  const note = (field, message) => { if (field && !issues.has(field)) issues.set(field, message); };
+  const context = el("group-context-messages");
+  const raw = String(context.value ?? "").trim();
+  if (!raw || !Number.isInteger(Number(raw)) || Number(raw) < 0 || Number(raw) > 20) {
+    note(context, "须为 0 到 20 的整数");
+  }
+  if (el("group-model-backend").value === "llm" && !String(el("group-model").value ?? "").trim()) {
+    note(el("group-model"), "请填写本群模型名称");
+  }
+  const imageModel = String(el("group-image-model").value ?? "").trim() || currentSettings?.image_provider_id || "";
+  if (el("group-image-enabled").value === "true" && !imageModel) {
+    note(el("group-image-model"), "请选择本群图片模型或关闭本群图片判定");
+  }
+  if (el("group-template-override").checked) {
+    const template = el("group-protected-template");
+    const policy = el("group-protected-policy").value || currentSettings?.protected_target_policy || "exempt";
+    if (formatNoticeExample(template.value) === null) {
+      note(template, "提示内容的花括号或变量名称无效, 请使用列出的变量");
+    } else if (policy === "group_message" && !String(template.value ?? "").trim()) {
+      note(template, "发送群提示时请填写本群提示内容");
+    }
+  }
+  return issues;
+}
+function updateGroupSaveState() {
+  let dirty = 0;
+  for (const section of groupSections()) {
+    const baseline = groupSectionBaselines.get(section);
+    const changed = baseline !== undefined && readFormState(section) !== baseline;
+    setClass(section, "has-unsaved-changes", changed);
+    if (changed) dirty += 1;
+  }
+  const issues = groupFieldIssues();
+  for (const field of Array.from(document.querySelectorAll?.("#group-detail .is-invalid") || [])) {
+    if (!issues.has(field)) markFieldInvalid(field, false);
+  }
+  for (const [field, message] of issues) markFieldInvalid(field, true, message);
+  setClass(el("group-detail-panel"), "has-unsaved-changes", dirty > 0);
+  paintSaveState(el("group-save-state"), {dirty: dirty > 0, invalid: issues.size});
+}
+function captureRuleBaseline() {
+  ruleBaseline = readFormState(el("rule-form"));
+  updateRuleSaveState();
+}
+function ruleFieldIssues() {
+  const issues = new Map();
+  const note = (field, message) => { if (field && !issues.has(field)) issues.set(field, message); };
+  if (!el("rule").readOnly && !String(el("rule").value ?? "").trim()) note(el("rule"), "请填写规则标识");
+  if (!String(el("text").value ?? "").trim()) note(el("text"), "请填写自然语言规则");
+  const priority = String(el("priority").value ?? "").trim();
+  if (!priority || !Number.isInteger(Number(priority))) note(el("priority"), "优先级必须是 32 位整数");
+  return issues;
+}
+function updateRuleSaveState() {
+  const form = el("rule-form");
+  const dirty = ruleBaseline !== null && readFormState(form) !== ruleBaseline;
+  const issues = ruleFieldIssues();
+  for (const field of Array.from(form.querySelectorAll?.(".is-invalid") || [])) {
+    if (!issues.has(field)) markFieldInvalid(field, false);
+  }
+  for (const [field, message] of issues) markFieldInvalid(field, true, message);
+  setClass(form, "has-unsaved-changes", dirty && !form.hidden);
+  paintSaveState(el("rule-save-state"), {dirty, invalid: issues.size});
+}
 function readChatQueryItems(scope) {
   return chatQueryKeys.filter(item => chatQueryField(scope, item).checked);
 }
@@ -3056,7 +3268,7 @@ function rememberGroupDraft(chatChanges = {}) {
   groupDrafts.set(key, {...groupDrafts.get(key), ...values, customTemplate: el("group-template-override").checked,
     templateInitialized: groupTemplateDraftInitialized, reasonInitialized: groupReasonDraftInitialized,
     ...chatChanges});
-  el("group-settings-status").textContent = "有尚未保存的修改.";
+  updateGroupSaveState();
 }
 function postSettings(endpoint, data) {
   const request = settingsSaveQueue.then(() => bridge.apiPost(endpoint, data));
@@ -3216,7 +3428,7 @@ function showGroupOverrides() {
   el("group-model").value = overrides.model?.model || "";
   el("group-strategy").value = overrides.strategy || "";
   el("group-context-messages").value = String(overrides.context_messages ?? 0);
-  showGroupChatQuery(scope, draft);
+  showGroupChatQuery(scope, null);
   el("group-image-enabled").value = Object.hasOwn(overrides, "image_enabled") ? String(overrides.image_enabled) : "";
   el("group-image-model").value = overrides.image_model?.model || "";
   groupReasonDraftInitialized = Object.hasOwn(overrides, "llm_reason_language");
@@ -3228,18 +3440,20 @@ function showGroupOverrides() {
   groupTemplateDraftInitialized = Object.hasOwn(overrides, "protected_template");
   el("group-template-override").checked = groupTemplateDraftInitialized;
   el("group-protected-template").value = overrides.protected_template || "";
+  captureGroupBaseline();
   if (draft && Object.hasOwn(draft, "customTemplate")) {
     for (const id of groupDraftFields) el(id).value = draft[id];
     el("group-template-override").checked = draft.customTemplate;
     groupTemplateDraftInitialized = draft.templateInitialized;
     groupReasonDraftInitialized = draft.reasonInitialized;
   }
+  showGroupChatQuery(scope, draft);
   el("group-settings-status").textContent = draft
-    ? el("group-chat-inherit").checked && !Object.hasOwn(draft, "customTemplate") ? "本群问答草稿已保留."
-      : "有尚未保存的修改."
+    ? el("group-chat-inherit").checked && !Object.hasOwn(draft, "customTemplate") ? "本群问答草稿已保留." : ""
     : "";
   updateGroupModelFields();
   updateGroupSettingsHints();
+  updateGroupSaveState();
 }
 const canShareCount = (rule) => rule?.actions?.some((action) => action.type === "mute" && action.duration_mode === "cumulative");
 function sharedCountButton(text, handle) {
@@ -3874,6 +4088,13 @@ for (const item of chatQueryKeys) chatQueryField("group", item).addEventListener
   updateChatQueryDependency("group");
   rememberGroupDraft({chatQueryItems: readChatQueryItems("group")});
 });
+for (const [panel, refresh] of [[el("panel-settings"), updateSettingsSaveState],
+  [el("group-detail"), updateGroupSaveState], [el("rule-form"), updateRuleSaveState]]) {
+  panel.addEventListener("input", clearFieldInvalid);
+  panel.addEventListener("change", clearFieldInvalid);
+  panel.addEventListener("input", refresh);
+  panel.addEventListener("change", refresh);
+}
 el("group-chat-inherit").addEventListener("change", (event) => {
   rememberGroupDraft({chatQueryInherit: event.target.checked});
   showGroupChatQuery(group(), groupDrafts.get(groupKey(group())));
@@ -3894,6 +4115,17 @@ el("group-settings-save").addEventListener("click", async () => {
   const scope = group();
   const button = el("group-settings-save");
   if (!currentSettings || groupSettingsSaving || !scope.platform_id || !scope.group_id) return;
+  const issues = groupFieldIssues();
+  if (issues.size) {
+    const [field, message] = [...issues][0];
+    updateGroupSaveState();
+    const details = field.closest?.("details");
+    if (details) setDetailsOpen(details, true);
+    field.focus?.();
+    const label = fieldLabelText(field);
+    showFeedback(label ? `${label}: ${message}` : message, "error");
+    return;
+  }
   groupSettingsSaving = true;
   button.disabled = true;
   try {
@@ -3924,7 +4156,7 @@ el("group-settings-save").addEventListener("click", async () => {
   } catch (error) { feedbackError(error, "群配置保存失败"); }
   finally { groupSettingsSaving = false; button.disabled = !currentSettings || !group().platform_id || !group().group_id; }
 });
-function showSettings(settings, submitted = null) {
+function showSettings(settings, submitted = null, {resetBaseline = true} = {}) {
   const previousActionMode = currentSettings?.default_action_mode;
   currentSettings = settings;
   if (!submitted) modelChoiceEdited = false;
@@ -3972,6 +4204,8 @@ function showSettings(settings, submitted = null) {
   showGroupOverrides();
   renderGroupList();
   renderAllGroupStatus();
+  if (resetBaseline) resetSettingsBaseline();
+  else updateSettingsSaveState();
 }
 el("setting-protected_target_template").addEventListener("input", () => {
   renderNoticeExample("setting-template-preview", el("setting-protected_target_template").value);
@@ -4006,6 +4240,7 @@ async function loadSettings() {
     updateImageProviderHints();
     updateGroupImageFields();
   }
+  resetSettingsBaseline();
 }
 const maxNotificationTargets = 20;
 let notificationRecipientDetails = new Map();
@@ -4033,6 +4268,7 @@ function renderNotificationRecipients() {
   });
   el("notification-recipient-summary").textContent = !targets.length ? "未设置接收人" :
     `${names.join(", ")}${targets.length > names.length ? ` 等 ${targets.length} 位` : ""}`;
+  updateNotificationTestControls();
 }
 async function resolveNotificationRecipients() {
   const targets = currentRecipientTargets();
@@ -4133,6 +4369,35 @@ async function loadRecipientPage(page) {
   }
 }
 notificationTarget.addEventListener("input", renderNotificationRecipients);
+function updateNotificationTestControls() {
+  const button = el("notification-test");
+  const saved = Array.isArray(currentSettings?.notification_targets) ? currentSettings.notification_targets.length : 0;
+  button.disabled = saved === 0;
+  button.title = saved ? "向已保存的通知接收人发送一条测试消息." : "请先保存至少一个通知接收人.";
+}
+el("notification-test").addEventListener("click", async () => {
+  const button = el("notification-test");
+  const status = el("notification-test-status");
+  button.disabled = true;
+  status.textContent = "正在发送测试通知...";
+  try {
+    const result = await bridge.apiPost("notification-test", {});
+    const submitted = Number(result?.submitted) || 0;
+    const failed = Number(result?.failed) || 0;
+    const unknown = Number(result?.unknown) || 0;
+    const parts = [`已提交 ${submitted} 位`];
+    if (failed) parts.push(`${failed} 位发送失败`);
+    if (unknown) parts.push(`${unknown} 位结果不明`);
+    status.textContent = `${parts.join(", ")}. 仅表示消息已交给平台, 不代表对方已经阅读.`;
+    if (failed || unknown) showFeedback("测试通知未全部确认, 请检查接收人和平台状态.", "warning");
+    else showFeedback("测试通知已提交.", "success");
+  } catch (error) {
+    status.textContent = "测试通知未发送, 请确认已保存接收人后重试.";
+    feedbackError(error, "测试通知失败");
+  } finally {
+    updateNotificationTestControls();
+  }
+});
 el("notification-recipient-open").addEventListener("click", () => {
   recipientDraft = new Map(currentRecipientTargets().map(target => [target, notificationRecipientDetails.get(target) || {target}]));
   recipientSearch.value = "";
@@ -4163,6 +4428,7 @@ el("recipient-confirm").addEventListener("click", () => {
   notificationRecipientDetails = new Map([...recipientDraft].filter(([, item]) => item.platform));
   if (!notificationTarget.value) el("setting-notification_interval_seconds").value = "0";
   renderNotificationRecipients();
+  updateSettingsSaveState();
   recipientDialog.close();
 });
 recipientDialog.addEventListener("close", () => {
@@ -4171,6 +4437,17 @@ recipientDialog.addEventListener("close", () => {
   recipientDraft.clear();
 });
 el("settings-save").addEventListener("click", async () => {
+  const liveIssues = settingsFieldIssues();
+  if (liveIssues.size) {
+    const [field, message] = [...liveIssues][0];
+    updateSettingsSaveState();
+    const details = field.closest?.("details");
+    if (details) setDetailsOpen(details, true);
+    field.focus?.();
+    const label = fieldLabelText(field);
+    showFeedback(label ? `${label}: ${message}` : message, "error");
+    return;
+  }
   el("settings-save").disabled = true;
   try {
     const data = {};
@@ -4181,6 +4458,7 @@ el("settings-save").addEventListener("click", async () => {
         const invalid = (message) => {
           const details = field.closest?.("details");
           if (details) setDetailsOpen(details, true);
+          markFieldInvalid(field, true, message);
           field.focus?.();
           const label = field.closest?.("label")?.firstChild?.textContent?.trim();
           throw new Error(label ? `${label}: ${message}` : message);
@@ -4192,6 +4470,7 @@ el("settings-save").addEventListener("click", async () => {
       } else data[key] = field.value;
     }
     if (data.image_max_total_bytes < data.image_max_bytes_per_image) {
+      markFieldInvalid(el("setting-image_max_total_bytes"), true, "不能小于单张图片上限");
       el("setting-image_max_total_bytes").focus?.();
       throw new Error("单条图片总量上限不能小于单张图片上限");
     }
@@ -4202,10 +4481,13 @@ el("settings-save").addEventListener("click", async () => {
     if (data.notification_targets.length > maxNotificationTargets || !data.notification_targets.every(validRecipientTarget)) {
       const details = notificationTarget.closest?.("details");
       if (details) setDetailsOpen(details, true);
+      markFieldInvalid(notificationTarget, true, "最多可填写 20 个有效的私聊会话标识");
       notificationTarget.focus?.();
       throw new Error("最多可填写 20 个有效的私聊会话标识");
     }
     if (data.notification_interval_seconds < 0 || Boolean(data.notification_targets.length) !== (data.notification_interval_seconds > 0)) {
+      markFieldInvalid(el("setting-notification_interval_seconds"), true,
+        data.notification_targets.length ? "已选择接收人时须大于 0" : "未设置接收人时须为 0");
       el("setting-notification_interval_seconds").focus?.();
       throw new Error(data.notification_targets.length ? "请填写大于 0 秒的故障通知间隔" : "未设置接收人时, 通知间隔须为 0");
     }
@@ -4213,6 +4495,8 @@ el("settings-save").addEventListener("click", async () => {
     for (const key of byteSettings) displayData[key] = data[key] / MIB;
     const template = data.protected_target_template;
     if (formatNoticeExample(template) === null || (data.protected_target_policy === "group_message" && !template.trim())) {
+      markFieldInvalid(el("setting-protected_target_template"), true,
+        formatNoticeExample(template) === null ? "变量只支持 {rule_id}, {sender_id} 和 {action}" : "选择发送群提示时须填写默认群提示内容");
       el("setting-protected_target_template").focus?.();
       throw new Error("请填写有效的默认群提示内容, 变量只支持 {rule_id}, {sender_id} 和 {action}");
     }
@@ -4239,7 +4523,7 @@ el("settings-save").addEventListener("click", async () => {
         : el(`setting-${key}`).value !== String(data[key] ?? "")) ||
       !sameChatQueryItems(currentRecipientTargets(), data.notification_targets) ||
       (data.chat_query_items && !sameChatQueryItems(readChatQueryItems("global"), data.chat_query_items));
-    showSettings(result.settings, displayData);
+    showSettings(result.settings, displayData, {resetBaseline: !changedSinceSubmit});
     if (el("setting-llm_provider_id").value === data.llm_provider_id) modelChoiceEdited = false;
     const message = result.start_error === "model_not_configured"
       ? `${changedSinceSubmit ? "设置已保存, 新修改尚未保存." : "设置已保存."} 请选择默认判定模型.`

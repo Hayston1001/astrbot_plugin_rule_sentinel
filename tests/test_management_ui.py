@@ -132,8 +132,13 @@ class ManagementUiTests(unittest.TestCase):
         self.assertNotIn('id="confirm"', html)
         self.assertNotIn('id="preview-result"', html)
         self.assertIn('>所有群</option>', html)
-        self.assertIn('.editor-footer > button { width: 100%; min-height: 56px; }', css)
-        self.assertIn('.group-settings-save { width: 100%; min-height: 56px; }', css)
+        save_bar = css.split('.save-bar {', 1)[1].split('}', 1)[0]
+        self.assertIn('background: none', save_bar)
+        self.assertIn('border: 0', save_bar)
+        self.assertNotIn('.save-bar.is-dirty', css)
+        self.assertIn('input.is-invalid, select.is-invalid, textarea.is-invalid,', css)
+        self.assertNotIn('.editor-footer', css)
+        self.assertNotIn('.editor-footer', html)
         self.assertNotIn("确认保存</button>", html)
         self.assertEqual(html.count('<option value="priority">按规则优先级</option>'), 2)
         self.assertNotIn("管理员优先级", html + script)
@@ -190,6 +195,21 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('background: var(--surface)', current)
         self.assertIn('.rule-action-number', css)
 
+    def test_tab_changes_slide_and_editors_report_unsaved_state(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
+        css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("slideTabPanel", script)
+        self.assertIn("translate3d(${direction * 28}px, 0, 0)", script)
+        for name in ("settings", "group", "rule"):
+            self.assertIn(f'id="{name}-save-bar" class="save-bar"', (root / "views" / "management" / "index.html").read_text(encoding="utf-8"))
+            self.assertIn(f"update{name.capitalize()}SaveState", script)
+        self.assertIn('recordElement("button", "secondary record-detail-action", "撤销")', script)
+        self.assertIn('.record-detail-heading .record-detail-action {', css)
+        self.assertIn('id="notification-test" class="secondary" type="button">发送测试通知</button>',
+                      (root / "views" / "management" / "index.html").read_text(encoding="utf-8"))
+        self.assertIn('bridge.apiPost("notification-test", {})', script)
+
     def test_record_table_column_sizes_do_not_depend_on_details(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
@@ -203,11 +223,15 @@ class ManagementUiTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
-        footer = css.split('.settings-footer {', 1)[1].split('}', 1)[0]
-        self.assertNotIn('background:', footer)
-        self.assertNotIn('padding:', footer)
-        self.assertIn('.settings-footer > button { width: 100%; min-height: 56px; }', css)
-        self.assertIn('id="settings-status" class="notice" aria-live="polite"', html)
+        self.assertNotIn('.settings-footer', css)
+        self.assertNotIn('class="settings-footer"', html)
+        save_bar = html.split('<div id="settings-save-bar" class="save-bar">', 1)[1].split('</div>', 1)[0]
+        self.assertIn('id="settings-save"', save_bar)
+        self.assertIn('id="settings-save-state"', save_bar)
+        self.assertIn('id="settings-status" class="notice" aria-live="polite"', save_bar)
+        self.assertLess(html.index('id="settings-save-bar"'), html.index('class="settings-jump"'))
+        self.assertLess(html.index('id="group-save-bar"'), html.index('id="group-detail-name"'))
+        self.assertLess(html.index('id="rule-save-bar"'), html.index('id="rule-group-picker"'))
         self.assertIn('id="live-status" class="badge live-status" data-tone="warning"', html)
         self.assertIn('<th>监控状态</th>', html)
         self.assertIn('<table id="groups-status-table"><colgroup>', html)

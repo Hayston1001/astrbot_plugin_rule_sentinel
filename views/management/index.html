@@ -74,6 +74,11 @@
           <div id="current-rules" class="rule-list" aria-live="polite"></div>
           <section id="rule-form" class="form-panel rule-editor item-editor" hidden>
             <div class="editor-heading"><div><h2 id="rule-form-title">新增或修改规则</h2><p>设置规则内容和处理动作.</p></div></div>
+            <div id="rule-save-bar" class="save-bar">
+              <button id="preview" class="primary" type="button">保存</button>
+              <p id="rule-save-state" class="save-state" aria-live="polite">没有未保存的修改</p>
+              <p id="save-status" class="notice" aria-live="polite"></p>
+            </div>
             <label id="rule-group-picker" hidden>所属群 <select id="rule-group"><option value="">请选择群</option></select></label>
             <label id="new-rule-enabled" class="rule-enabled"><span><strong>启用这条规则</strong><small>开启后, 此规则参与消息判定.</small></span><input id="enabled" type="checkbox"></label>
             <div class="form-grid">
@@ -84,7 +89,6 @@
             <label>自然语言规则 <textarea id="text" rows="4"></textarea></label>
             <div class="form-section-heading"><div><h3>处理动作</h3><p id="action-order-help">动作按序处理. 拖动排序, 按方向键, 或使用上移和下移按钮调整.</p></div><button id="add-action" class="secondary" type="button">添加动作</button></div>
             <div id="action-list" role="list" aria-label="处理动作"></div><span id="action-order-status" class="visually-hidden" aria-live="polite"></span>
-            <div class="editor-footer"><button id="preview" class="primary" type="button">保存</button><p id="save-status" class="notice" aria-live="polite"></p></div>
           </section>
         </section>
 
@@ -100,6 +104,11 @@
             </section>
             <div id="group-detail-home" hidden><section id="group-detail-panel" class="group-detail-panel item-editor"><h2>群配置</h2><p id="group-detail-empty" class="empty">请选择群.</p>
               <div id="group-detail" hidden>
+                <div id="group-save-bar" class="save-bar">
+                  <button id="group-settings-save" class="primary" type="button">保存群配置</button>
+                  <p id="group-save-state" class="save-state" aria-live="polite">没有未保存的修改</p>
+                  <p id="group-settings-status" class="notice" aria-live="polite"></p>
+                </div>
                 <div class="group-detail-heading"><div><strong id="group-detail-name"></strong></div><label class="check"><input id="monitor-group" type="checkbox" disabled><span>监控此群</span></label></div>
                 <p id="group-monitor-help" class="field-help"></p>
                 <div class="group-name-controls"><label>群备注 <input id="group-alias" maxlength="100" autocomplete="off" placeholder="输入方便识别的名称"></label><button id="save-group-alias" class="secondary" type="button">保存备注</button><button id="get-group-name" class="secondary" type="button">获取 QQ 群名</button></div>
@@ -151,7 +160,6 @@
                       <div class="template-example"><strong>提示内容示例</strong><p id="group-template-preview"></p><span>规则和成员标识为示例值.</span></div>
                     </div>
                   </section>
-                  <button id="group-settings-save" class="primary group-settings-save" type="button">保存群配置</button><p id="group-settings-status" class="notice" aria-live="polite"></p>
                 </div>
               </div>
             </section></div>
@@ -168,7 +176,7 @@
             </ol>
           </section>
           <div class="overview-controls"><button id="overview-layout-retry" class="secondary" type="button" hidden>重新读取布局</button><p id="overview-layout-status" class="notice" aria-live="polite">正在读取布局...</p></div>
-          <section id="overview-editor" class="overview-editor" aria-labelledby="overview-editor-title" hidden><div class="records-heading"><h2 id="overview-editor-title">自定义布局</h2><span class="field-help">拖动手柄或使用方向键调整顺序.</span></div><div id="overview-visibility" class="overview-visibility"></div><div class="buttons"><button id="overview-save" class="primary" type="button">保存布局</button><button id="overview-cancel" class="secondary" type="button">取消</button><button id="overview-reset" class="secondary" type="button">恢复默认</button></div><p id="overview-edit-status" class="notice" aria-live="polite"></p><span id="overview-order-status" class="visually-hidden" aria-live="polite"></span></section>
+          <section id="overview-editor" class="overview-editor" aria-labelledby="overview-editor-title" hidden><div class="records-heading"><h2 id="overview-editor-title">自定义布局</h2><span class="field-help">拖动手柄或使用方向键调整顺序.</span></div><div class="buttons overview-editor-actions"><button id="overview-save" class="primary" type="button">保存布局</button><button id="overview-cancel" class="secondary" type="button">取消</button><button id="overview-reset" class="secondary" type="button">恢复默认</button></div><div id="overview-visibility" class="overview-visibility"></div><p id="overview-edit-status" class="notice" aria-live="polite"></p><span id="overview-order-status" class="visually-hidden" aria-live="polite"></span></section>
           <div id="overview-grid" class="overview-grid" hidden>
             <section class="overview-card status-panel" data-card="pending" aria-labelledby="overview-pending-title"><div class="overview-card-heading"><div><h2 id="overview-pending-title">待确认禁言</h2><p id="overview-pending-scope" class="field-help">所有群</p></div><span id="overview-pending-live" class="badge" data-tone="warning" aria-live="polite">实时 · 重连中</span></div><p id="overview-pending-count" class="overview-count" aria-live="polite">正在读取...</p><div id="overview-pending-empty" class="overview-pending-empty" role="status" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 13 6.7 5.5h10.6l2.2 7.5v5H4.5z"/><path d="M4.5 13h4.2l1.4 2h3.8l1.4-2h4.2"/></svg><div><strong>暂无待确认禁言</strong><span>需要确认的禁言会显示在这里.</span></div></div><p id="overview-pending-status" class="notice" aria-live="polite"></p><div id="overview-pending-list" class="overview-pending-list"></div><button id="overview-pending-more" class="secondary" type="button" hidden>加载更多</button></section>
             <section class="overview-card status-panel status-main" id="status-main" data-card="overall" data-tone="muted"><h2>整体状态</h2><span class="overview-kicker">消息处理服务</span><strong id="status-label">正在读取</strong><p id="status-detail">正在读取状态...</p><div class="overview-facts"><div><span>真实执行</span><strong id="status-execution">-</strong></div><div><span>已知群</span><strong id="status-groups-total">-</strong></div><div><span>允许监控</span><strong id="status-groups-enabled">-</strong></div></div><span id="status-backend" hidden></span><button id="status-settings" class="secondary" type="button">设置</button></section>
@@ -180,6 +188,11 @@
         </section>
 
         <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+          <div id="settings-save-bar" class="save-bar">
+            <button id="settings-save" class="primary" type="button">保存设置</button>
+            <p id="settings-save-state" class="save-state" aria-live="polite">没有未保存的修改</p>
+            <p id="settings-status" class="notice" aria-live="polite"></p>
+          </div>
           <nav class="settings-jump" aria-label="设置分类">
             <a href="#settings-monitor-title">监控与执行</a>
             <a href="#settings-decision-title">文字判定</a>
@@ -267,12 +280,16 @@
                 <div><strong>通知接收人</strong><p id="notification-recipient-summary" class="field-help">未设置接收人</p></div>
                 <button id="notification-recipient-open" class="secondary" type="button" aria-haspopup="dialog">选择接收人</button>
               </div>
+              <div class="notification-recipient-field notification-test-field">
+                <div><strong>测试通知</strong><p class="field-help">向已保存的接收人发送一条测试消息. 当前未保存的修改不会用于测试.</p></div>
+                <button id="notification-test" class="secondary" type="button">发送测试通知</button>
+              </div>
+              <p id="notification-test-status" class="notice" aria-live="polite"></p>
               <details class="settings-details"><summary>手动填写私聊会话</summary>
                  <label>私聊会话标识 <textarea id="setting-notification_targets" rows="3" maxlength="10260" aria-describedby="notification-target-help"></textarea><span id="notification-target-help" class="field-help">每行一个, 格式为 平台实例:FriendMessage:会话标识.</span></label>
               </details>
               <label>同类故障通知间隔, 秒 <input id="setting-notification_interval_seconds" type="number" min="0" aria-describedby="notification-interval-help"><span id="notification-interval-help" class="field-help">选了接收人时须大于 0. 不发送通知时清空接收人并设为 0.</span></label>
             </div></section>
-            <div class="settings-footer"><button id="settings-save" class="primary" type="button">保存设置</button><p id="settings-status" class="notice" aria-live="polite"></p></div>
           </div>
         </section>
       </div>

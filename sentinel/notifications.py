@@ -179,6 +179,42 @@ class NotificationDispatcher:
                 self.dropped += 1
 
 
+TEST_MESSAGE = "Rule Sentinel 测试通知: 故障通知通道可用. 无需操作."
+
+
+async def send_test_notifications(*, context, targets, message_chain_factory=None, send_timeout_seconds=10):
+    """Send one test message to each saved recipient without retrying.
+
+    Only explicitly saved private sessions are accepted. A transport exception
+    leaves the result unknown because the request may already have been sent.
+    """
+    recipients = validate_notification_targets(targets)
+    if not recipients:
+        raise ValueError("explicit private notification recipient required")
+    if type(send_timeout_seconds) not in (int, float) or not math.isfinite(send_timeout_seconds) \
+            or send_timeout_seconds <= 0:
+        raise ValueError("invalid notification timeout")
+    if message_chain_factory is None:
+        def message_chain_factory(text):
+            from astrbot.api.event import MessageChain
+            return MessageChain().message(text)
+
+    async def send_one(target):
+        try:
+            accepted = await asyncio.wait_for(
+                context.send_message(target, message_chain_factory(TEST_MESSAGE)),
+                timeout=send_timeout_seconds)
+            return "submitted" if accepted is True else "failed" if accepted is False else "unknown"
+        except Exception:
+            return "unknown"
+
+    results = []
+    for offset in range(0, len(recipients), 4):
+        results.extend(await asyncio.gather(*(send_one(target)
+                                             for target in recipients[offset:offset + 4])))
+    return results
+
+
 def build_notification_dispatcher(*, context, queue, recipients, interval_seconds: int,
                                   message_chain_factory=None, is_authorized=lambda: True, on_failure=None):
     """Build but do not start a dispatcher using AstrBot's proactive API."""

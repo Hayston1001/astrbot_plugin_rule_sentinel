@@ -79,7 +79,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 36)
+        self.assertEqual(len(self.context.routes), 37)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -130,6 +130,32 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = b'{"notification_targets":["qq1:GroupMessage:group"]}'
         self.assertEqual((await self.plugin.save_settings())["status_code"], 400)
         self.assertEqual((await self.plugin.get_settings())["data"]["notification_targets"], targets)
+
+    async def test_test_notification_uses_saved_recipients_only(self):
+        from sentinel_test_plugin.sentinel import notifications
+
+        self.plugin.config["notification_targets"] = ["tg:FriendMessage:u"]
+        self.plugin._notification_test_at = 0.0
+        self.raw_body = b"{}"
+        with patch.object(notifications, "send_test_notifications",
+                          new=AsyncMock(return_value=["submitted", "unknown"])) as send:
+            response = await self.plugin.test_notification()
+        self.assertEqual(response["data"], {"submitted": 1, "failed": 0, "unknown": 1})
+        audit = await asyncio.to_thread(self.plugin._queue.list_notifications)
+        self.assertEqual([(row["code"], row["status"]) for row in audit],
+                         [("test", "submitted"), ("test", "unknown")])
+        send.assert_awaited_once()
+        self.assertEqual(send.await_args.kwargs["targets"], ("tg:FriendMessage:u",))
+        self.assertEqual((await self.plugin.test_notification())["status_code"], 429)
+        self.plugin.config["notification_targets"] = []
+        self.plugin._notification_test_at = 0.0
+        self.assertEqual((await self.plugin.test_notification())["status_code"], 400)
+        self.raw_body = b'{"targets":["tg:FriendMessage:other"]}'
+        self.assertEqual((await self.plugin.test_notification())["status_code"], 400)
+        self.request.username = ""
+        self.raw_body = b"{}"
+        self.plugin._notification_test_at = 0.0
+        self.assertEqual((await self.plugin.test_notification())["status_code"], 403)
 
     async def test_action_rules_and_execution_status(self):
         fields = {"platform_id": "p", "group_id": "g", "rule_id": "reply", "expected_version": 0,

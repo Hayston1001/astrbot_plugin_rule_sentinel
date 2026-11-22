@@ -74,3 +74,46 @@ class NotificationRecipientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(second["recipients"]), 4 if sender else 3)
         self.assertFalse({row["target"] for row in first["recipients"]} &
                          {row["target"] for row in second["recipients"]})
+
+    async def test_recorded_sender_name_fills_a_missing_private_nickname(self):
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch.dict(os.environ, {"ASTRBOT_ROOT": root}))
+        from astrbot.core.db import po
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        self.addAsyncCleanup(engine.dispose)
+        tables = [po.ConversationV2.__table__, po.UmoAlias.__table__]
+        if getattr(po, "UmoSender", None) is not None:
+            tables.append(po.UmoSender.__table__)
+        if getattr(po, "PlatformMessageHistory", None) is not None:
+            tables.append(po.PlatformMessageHistory.__table__)
+        async with engine.begin() as connection:
+            await connection.run_sync(lambda db: po.UmoAlias.metadata.create_all(db, tables=tables))
+
+        db = SimpleNamespace(get_db=async_sessionmaker(engine))
+        private = "bot:FriendMessage:u1"
+        unknown = "bot:FriendMessage:u2"
+        saved = [po.UmoAlias(umo=private, creator_sender_id="u1", auto_name=None, user_alias=None),
+                 po.UmoAlias(umo=unknown, creator_sender_id="u2", auto_name=None, user_alias=None),
+                 po.UmoAlias(umo="other:FriendMessage:u1", creator_sender_id="u1", auto_name=None, user_alias=None)]
+        sender = getattr(po, "UmoSender", None)
+        if sender is not None:
+            saved.append(sender(umo="bot:GroupMessage:g1", sender_id="u1", sender_name="群内昵称"))
+            # The same identifier on another platform instance must not leak in.
+            saved.append(sender(umo="other:GroupMessage:g1", sender_id="u1", sender_name="其他实例"))
+        history = getattr(po, "PlatformMessageHistory", None)
+        if history is not None:
+            saved.append(history(platform_id="bot", user_id="bot:GroupMessage:g1", sender_id="u2",
+                                 sender_name="历史昵称", content="ignored"))
+        async with db.get_db() as session:
+            session.add_all(saved)
+            await session.commit()
+
+        rows = await find_notification_recipients(db, {"bot": "qq_official"}, page=1)
+        names = {row["target"]: row["nickname"] for row in rows["recipients"]}
+        self.assertEqual(names[private], "群内昵称" if sender is not None else "")
+        self.assertEqual(names[unknown], "历史昵称" if history is not None else "")
+        expected_other = "其他实例" if sender is not None else ""
+        self.assertEqual((await find_notification_recipients(db, {"other": "qq_official"}, page=1))
+                         ["recipients"][0]["nickname"], expected_other)

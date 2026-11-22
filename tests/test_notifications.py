@@ -4,8 +4,10 @@ import tempfile
 import threading
 from pathlib import Path
 from contextlib import closing
+from types import SimpleNamespace
 
-from sentinel.notifications import NotificationDispatcher, NotificationService, build_notification_dispatcher
+from sentinel.notifications import (NotificationDispatcher, NotificationService, TEST_MESSAGE,
+                                   build_notification_dispatcher, send_test_notifications)
 from sentinel.dry_run_queue import DryRunQueue
 
 
@@ -43,6 +45,31 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send, audit=audit)
         self.assertEqual(await service.notify("model_failed"), "submitted")
         self.assertEqual(results, ["submitted"])
+
+    async def test_test_notification_sends_once_to_each_saved_recipient(self):
+        calls = []
+
+        async def send(target, chain):
+            calls.append((target, chain))
+            if target.endswith(":bad"):
+                return False
+            if target.endswith(":error"):
+                raise RuntimeError("transport detail")
+            return True
+
+        context = SimpleNamespace(send_message=send)
+        results = await send_test_notifications(
+            context=context, targets=["p:FriendMessage:ok", "p:FriendMessage:bad", "p:FriendMessage:error"],
+            message_chain_factory=lambda text: text)
+        self.assertEqual(results, ["submitted", "failed", "unknown"])
+        self.assertEqual([call[0] for call in calls],
+                         ["p:FriendMessage:ok", "p:FriendMessage:bad", "p:FriendMessage:error"])
+        self.assertTrue(all(call[1] == TEST_MESSAGE for call in calls))
+        with self.assertRaises(ValueError):
+            await send_test_notifications(context=context, targets=[], message_chain_factory=lambda text: text)
+        with self.assertRaises(ValueError):
+            await send_test_notifications(context=context, targets=["p:GroupMessage:g"],
+                                          message_chain_factory=lambda text: text)
 
     async def test_fans_out_once_per_recipient_and_isolates_failures(self):
         targets = [f"bot{i}:FriendMessage:same-user" for i in range(5)]
