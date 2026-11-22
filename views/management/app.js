@@ -5,14 +5,32 @@ function showFeedback(message, tone = "success") {
   const toast = document.createElement("div");
   toast.className = "feedback-toast";
   toast.setAttribute("data-tone", tone);
+  let content = typeof message === "string" ? message : String(message ?? "");
+  if (content.endsWith(".") && !content.endsWith("..")) content = content.slice(0, -1);
   const text = document.createElement("span");
   text.className = "feedback-message";
-  text.textContent = message;
+  text.textContent = content;
+  const timerBox = document.createElement("span");
+  timerBox.className = "feedback-timer";
   const close = document.createElement("button");
   close.type = "button";
   close.className = "feedback-close";
   close.setAttribute("aria-label", "关闭提示");
-  close.textContent = "\u00d7";
+  if (typeof document.createElementNS === "function") {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("class", "feedback-close-icon");
+    icon.setAttribute("viewBox", "0 0 16 16");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    for (const [x1, y1, x2, y2] of [[4.5, 4.5, 11.5, 11.5], [11.5, 4.5, 4.5, 11.5]]) {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      for (const [name, value] of Object.entries({x1, y1, x2, y2})) line.setAttribute(name, String(value));
+      icon.appendChild(line);
+    }
+    close.appendChild(icon);
+  } else {
+    close.textContent = "\u00d7";
+  }
   const duration = tone === "success" ? 3000 : 6000;
   let remaining = duration;
   let startedAt = 0;
@@ -24,20 +42,26 @@ function showFeedback(message, tone = "success") {
   let outline = null;
   if (typeof document.createElementNS === "function" && !prefersReducedMotion()) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    if (typeof rect.animate === "function") {
+    const track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    const arc = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    if (typeof arc.animate === "function") {
       svg.setAttribute("class", "feedback-countdown");
+      svg.setAttribute("viewBox", "0 0 26 26");
       svg.setAttribute("aria-hidden", "true");
       svg.setAttribute("focusable", "false");
-      for (const [name, value] of Object.entries({x: "1.5", y: "1.5", rx: "13.5", pathLength: "100"})) {
-        rect.setAttribute(name, value);
+      for (const [name, value] of Object.entries({cx: "13", cy: "13", r: "11.5", pathLength: "100"})) {
+        track.setAttribute(name, value);
+        arc.setAttribute(name, value);
       }
-      svg.appendChild(rect);
-      outline = rect;
-      toast.classList.add("has-countdown");
-      toast.appendChild(svg);
+      track.setAttribute("class", "feedback-countdown-track");
+      arc.setAttribute("class", "feedback-countdown-arc");
+      svg.appendChild(track);
+      svg.appendChild(arc);
+      timerBox.appendChild(svg);
+      outline = arc;
     }
   }
+  timerBox.appendChild(close);
   const resetCountdown = () => {
     if (!outline) return;
     countdown?.cancel();
@@ -77,7 +101,7 @@ function showFeedback(message, tone = "success") {
     exitTimer = setTimeout(() => {
       exitTimer = null;
       toast.remove();
-    }, 220);
+    }, 180);
   };
   const schedule = () => {
     if (leaving || timer !== null || toast.matches?.(":hover, :focus-within")) return;
@@ -98,8 +122,8 @@ function showFeedback(message, tone = "success") {
   toast.addEventListener("mouseleave", schedule);
   toast.addEventListener("focusin", pause);
   toast.addEventListener("focusout", () => queueMicrotask(schedule));
-  toast.insertBefore(text, toast.children[0] || null);
-  toast.insertBefore(close, toast.children[1] || null);
+  toast.appendChild(text);
+  toast.appendChild(timerBox);
   region.insertBefore(toast, region.children[0] || null);
   region.scrollTop = 0;
   schedule();

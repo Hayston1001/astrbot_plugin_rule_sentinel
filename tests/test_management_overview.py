@@ -62,7 +62,7 @@ class ManagementOverviewTests(unittest.TestCase):
         expect(first).to_contain_text("执行结果尚未产生")
         self.assertEqual(first.locator("script").count(), 0)
         first.get_by_role("button", name=re.compile("确认并尝试禁言")).first.click()
-        expect(page.locator("#feedback-region")).to_contain_text("禁言已执行.")
+        expect(page.locator("#feedback-region")).to_contain_text("禁言已执行")
         expect(page.locator("#overview-pending-count")).to_have_text("24 个动作, 涉及 24 条消息")
         self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
         page.evaluate("""() => { const node = document.querySelector('#group-select');
@@ -1144,10 +1144,10 @@ class ManagementOverviewTests(unittest.TestCase):
     def test_confirmation_failures_and_expired_actions_report_their_actual_state(self):
         from playwright.sync_api import expect
         cases = (
-            ({"status": "not_claimed", "reason_code": "intent_expired"}, "动作已到期, 禁言未执行."),
-            ({"status": "not_claimed", "reason_code": "rule_version_changed"}, "规则配置已变化, 禁言未执行."),
-            ({"status": "failed"}, "禁言执行失败, 请查看判定记录."),
-            ({"status": "unknown"}, "执行结果不明, 请人工核查."),
+            ({"status": "not_claimed", "reason_code": "intent_expired"}, "动作已到期, 禁言未执行"),
+            ({"status": "not_claimed", "reason_code": "rule_version_changed"}, "规则配置已变化, 禁言未执行"),
+            ({"status": "failed"}, "禁言执行失败, 请查看判定记录"),
+            ({"status": "unknown"}, "执行结果不明, 请人工核查"),
         )
         page = self.page
         for result, message in cases:
@@ -1167,7 +1167,7 @@ class ManagementOverviewTests(unittest.TestCase):
         first = page.locator(".overview-pending-message").first
         first.locator("summary").click()
         first.get_by_role("button", name=re.compile("确认并尝试禁言")).first.click()
-        expect(page.locator("#feedback-region")).to_contain_text("无法确认动作结果, 请查看判定记录后再操作.")
+        expect(page.locator("#feedback-region")).to_contain_text("无法确认动作结果, 请查看判定记录后再操作")
         expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
         self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
 

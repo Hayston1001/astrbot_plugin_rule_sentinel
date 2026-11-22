@@ -51,8 +51,6 @@
   --success-bg: #e8e8e8;
   --red: #a02632;
   --red-bg: #fbecef;
-  --feedback-red-border: #a02632;
-  --feedback-red-close: #4b5563;
   --dark-red: #8e2028;
   --dark-red-bg: #fae5e6;
   --amber: var(--signal-warning-ink);
@@ -93,8 +91,6 @@
   --success-bg: #383838;
   --red: #ffb5bb;
   --red-bg: #502b30;
-  --feedback-red-border: #ffb5bb;
-  --feedback-red-close: #d1d5db;
   --dark-red: #ffc0c2;
   --dark-red-bg: #552a2e;
   --amber: #f1d492;
@@ -115,7 +111,6 @@
     --button-bg: #393939; --button-hover-bg: #4a4a4a; --button-border: #929292; --button-hover-border: #c0c0c0;
     --button-disabled-bg: #303030; --button-disabled-border: #585858;
     --success: #f2f2f2; --success-bg: #383838; --red: #ffb5bb; --red-bg: #502b30;
-    --feedback-red-border: #ffb5bb; --feedback-red-close: #d1d5db;
     --dark-red: #ffc0c2; --dark-red-bg: #552a2e; --amber: #f1d492; --amber-bg: #4a3c20;
     --gray: #bcbcbc; --gray-bg: #303030;
   }
@@ -375,27 +370,35 @@ label > .field-help { display: block; margin-top: 6px; font-weight: 400; }
 }
 .feedback-region:empty { padding: 0; pointer-events: none; }
 .feedback-toast {
+  --feedback-tone: var(--signal-success-line);
   position: relative; display: flex; align-items: center; gap: 12px; width: fit-content; min-width: min(200px, 100%);
-  max-width: 100%; min-height: 56px; padding: 9px 9px 9px 14px;
-  overflow-wrap: anywhere; border: 3px solid var(--feedback-border); border-radius: var(--radius);
-  box-shadow: 0 6px 20px rgb(0 0 0 / .16); font-size: 14px; font-weight: var(--weight-label); line-height: 1.45;
-  pointer-events: auto; animation: feedback-enter 480ms cubic-bezier(.2, .65, .25, 1) both;
+  max-width: 100%; min-height: 50px; padding: 8px 8px 8px 14px;
+  overflow-wrap: anywhere; border: 2px solid color-mix(in srgb, var(--feedback-tone) 45%, var(--border));
+  border-radius: var(--radius); color: var(--text);
+  background: color-mix(in srgb, var(--text) 4%, var(--surface));
+  box-shadow: 0 10px 26px rgb(0 0 0 / .1), 0 1px 2px rgb(0 0 0 / .04);
+  font-size: 14px; font-weight: var(--weight-label); line-height: 1.45;
+  pointer-events: auto; animation: feedback-enter 240ms cubic-bezier(.2, .8, .25, 1) both;
 }
 .feedback-toast.is-restored { animation: none; }
-.feedback-toast.is-leaving { animation: feedback-exit 220ms ease-in both; }
-.feedback-toast.has-countdown { border-color: transparent; }
-.feedback-countdown { position: absolute; inset: -3px; width: calc(100% + 6px); height: calc(100% + 6px); pointer-events: none; }
-.feedback-countdown rect { width: calc(100% - 3px); height: calc(100% - 3px); rx: calc(var(--radius) - 1.5px); fill: none; stroke: var(--feedback-border); stroke-width: 3px; stroke-dasharray: 100 100; }
+.feedback-toast.is-leaving { animation: feedback-exit 180ms ease-in both; }
 .feedback-message { flex: 1; min-width: 0; }
-.feedback-toast[data-tone="success"] { --feedback-close-color: #4b5563; --feedback-border: #2f7d4f; color: var(--signal-success-ink); background: var(--signal-success-bg); }
-.feedback-toast[data-tone="warning"] { --feedback-close-color: #4b5563; --feedback-border: #9a6410; color: var(--signal-warning-ink); background: var(--signal-warning-bg); }
-.feedback-toast[data-tone="error"] { --feedback-close-color: var(--feedback-red-close); --feedback-border: var(--feedback-red-border); color: var(--red); background: var(--red-bg); }
+.feedback-timer { position: relative; flex: none; display: grid; place-items: center; width: 30px; height: 30px; }
+.feedback-countdown { position: absolute; inset: 2px; width: 26px; height: 26px; pointer-events: none; transform: rotate(-90deg); }
+.feedback-countdown circle { fill: none; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 100 100; }
+.feedback-countdown-track { stroke: color-mix(in srgb, var(--feedback-tone) 20%, transparent); }
+.feedback-countdown-arc { stroke: var(--feedback-tone); }
+.feedback-toast[data-tone="success"] { --feedback-tone: var(--signal-success-line); }
+.feedback-toast[data-tone="warning"] { --feedback-tone: var(--signal-warning-line); }
+.feedback-toast[data-tone="error"] { --feedback-tone: var(--red); }
 .feedback-close {
-  flex: none; display: grid; place-items: center; width: 28px; min-height: 28px; padding: 0;
-  border: 0; border-radius: var(--radius-sm); color: var(--feedback-close-color); background: transparent;
-  font-size: 20px; line-height: 1;
+  position: absolute; inset: 0; display: grid; place-items: center; width: 30px; height: 30px; min-height: 30px; padding: 0;
+  border: 0; border-radius: 50%; color: var(--muted); background: transparent;
+  font-size: 15px; line-height: 1;
 }
-.feedback-close:hover:not(:disabled) { color: var(--feedback-close-color); background: rgb(0 0 0 / .1); }
+.feedback-close-icon { width: 16px; height: 16px; }
+.feedback-close-icon line { stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.feedback-close:hover:not(:disabled) { color: var(--text); }
 .feedback-close:focus-visible { outline-color: currentColor; }
 .is-loading::before {
   content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 7px;
@@ -1040,8 +1043,8 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
 
 /* Motion */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes feedback-enter { from { opacity: 0; transform: translateY(-28px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes feedback-exit { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-12px); } }
+@keyframes feedback-enter { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes feedback-exit { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(12px); } }
 @keyframes spin { to { transform: rotate(1turn); } }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1054,7 +1057,6 @@ details.is-closing > summary::after { transform: none; color: var(--muted); }
   }
   .tab-glide { transition: none; }
   .feedback-toast, .feedback-toast.is-leaving { animation: none; }
-  .feedback-toast.has-countdown { border-color: var(--feedback-border); }
   .feedback-countdown { display: none; }
   .is-loading::before { border-right-color: currentColor; opacity: .55; }
   .action-drop-placeholder { animation: none; }

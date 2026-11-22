@@ -317,7 +317,7 @@ assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" &&
 failSave = true;
 elements["group-select"].value = JSON.stringify(["p2", "separate-group"]);
 await elements["group-select"].trigger("change");
-assert.equal(latestFeedback().children[0].textContent, "无法保存上次选择.");
+assert.equal(latestFeedback().children[0].textContent, "无法保存上次选择");
 failSave = false;
 assert.equal(elements["group-model-backend"].value, "");
 elements["group-model-backend"].value = "llm";
