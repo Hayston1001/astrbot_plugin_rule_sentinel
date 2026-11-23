@@ -27,7 +27,8 @@ class SettingsStoreTests(unittest.TestCase):
             for key, expected in {"max_duration_seconds": 2592000, "model_concurrency": 20,
                                   "model_timeout_seconds": 35, "global_rate_per_minute": 100,
                                   "group_rate_per_minute": 60, "model_failure_threshold": 5,
-                                  "model_cooldown_seconds": 120, "queue_capacity_per_group": 100}.items():
+                                  "model_cooldown_seconds": 120, "queue_capacity_per_group": 100,
+                                  "audit_retention_days": 90, "diagnostic_capture": False}.items():
                 with self.subTest(key=key):
                     self.assertEqual(config[key], expected)
             validate_settings(config)
@@ -37,9 +38,22 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertEqual(store.load_or_migrate({})["message_retention_days"], 10)
             for changes in ({"model_concurrency": 0}, {"monitoring_enabled": False},
                             {"llm_provider_id": None}, {"decision_backend": "jev"},
-                            {"decision_backend": "unknown"}):
+                            {"decision_backend": "unknown"}, {"audit_retention_days": -1},
+                            {"audit_retention_days": 36501}, {"diagnostic_capture": "yes"}):
                 with self.subTest(changes=changes), self.assertRaises(ValueError):
                     store.save({**config, **changes})
+
+    def test_audit_retention_upgrade_uses_the_uniform_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SettingsStore(root / "state.sqlite", root / "backup.json")
+            config = store.load_or_migrate({})
+            old = {key: value for key, value in config.items() if key != "audit_retention_days"}
+            with closing(sqlite3.connect(store.path)) as db:
+                db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(old),))
+                db.commit()
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated["audit_retention_days"], 90)
 
     def test_removed_switch_migrates_without_changing_execution(self):
         for monitoring in (False, True):

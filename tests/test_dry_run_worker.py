@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -36,7 +37,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("secret private message")
         worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1)
         self.assertEqual(await worker.drain_group("p", "g"), 2)
-        self.assertEqual(self.events(), [("1", "review", "needs_review"), ("2", "failed", "decision_error")])
+        events = self.events()
+        self.assertEqual(events[0], ("1", "review", "needs_review"))
+        self.assertEqual(events[1][:2], ("2", "failed"))
+        detail = json.loads(events[1][2])
+        self.assertEqual(detail["reason_code"], "decision_error")
+        self.assertEqual(detail["error"], {"type": "RuntimeError"})
+        self.assertNotIn("secret", events[1][2])
 
     async def test_timeout_is_not_no_action(self):
         self.enqueue("g", "1")
@@ -120,7 +127,10 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60)
         worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1, breaker=breaker)
         self.assertEqual(await worker.drain_group("p", "g"), 2)
-        self.assertEqual(self.events(), [("1", "failed", "decision_error"), ("2", "skipped", "circuit_open")])
+        events = self.events()
+        self.assertEqual(events[1], ("2", "skipped", "circuit_open"))
+        self.assertEqual(events[0][:2], ("1", "failed"))
+        self.assertEqual(json.loads(events[0][2])["reason_code"], "decision_error")
 
     async def test_cancelled_probe_settles_breaker_before_worker_exits(self):
         self.enqueue("g", "1")
@@ -161,7 +171,11 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             return Decision("proposed", "x" * 100001)
         worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1)
         self.assertEqual(await worker.drain_group("p", "g"), 1)
-        self.assertEqual(self.events(), [("1", "failed", "audit_detail_invalid_or_too_large")])
+        events = self.events()
+        self.assertEqual(events[0][:2], ("1", "failed"))
+        detail = json.loads(events[0][2])
+        self.assertEqual(detail["reason_code"], "audit_detail_invalid_or_too_large")
+        self.assertIs(detail["detail_truncated"], True)
 
     async def test_stop_finishes_current_and_preserves_pending(self):
         self.enqueue("g", "1")

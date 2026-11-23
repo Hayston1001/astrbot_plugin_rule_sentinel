@@ -3,6 +3,10 @@
 import unicodedata
 
 
+PROMPT_VERSION = 1
+# Bump PROMPT_VERSION whenever prompt text, tool descriptions, or required
+# argument shapes change, so stored audits can be tied to the exact template.
+
 PROMPTS = {
     "en": {
         "system_model": (
@@ -47,7 +51,8 @@ PROMPTS = {
         "tool_priority": "Return one data-only assessment per rule.",
         "rule_id": "Identifier of an enabled rule.",
         "severity": "Configured severity for a strict rule.",
-        "duration_seconds": "Proposed duration in seconds for an autonomous rule.",
+        "duration_seconds": ("Proposed integer duration in seconds for an autonomous rule, "
+                             "not exceeding that rule's duration_limit_seconds."),
         "reason": ("Summarize why the rule was or was not violated in one sentence of at most 30 words. "
                    "Do not repeat or quote the original message, or copy links, accounts or contact details."),
         "reason_hit": ("Summarize why the rule was violated in one sentence of at most 30 words. "
@@ -103,7 +108,7 @@ PROMPTS = {
         "tool_priority": "为每条规则返回一项仅供记录的判定.",
         "rule_id": "已启用规则的标识.",
         "severity": "严格规则中配置的严重级别.",
-        "duration_seconds": "自主规则建议的时长, 单位为秒.",
+        "duration_seconds": "自主规则建议的时长, 单位为秒, 必须是不超过该规则 duration_limit_seconds 的整数.",
         "reason": "用一句话概括违反或未违反规则的理由, 不超过 40 字. 不要复述或引用消息原文, 不要抄写链接, 账号或联系方式.",
         "reason_hit": "用一句话概括违反规则的理由, 不超过 40 字. 不要复述或引用消息原文, 不要抄写链接, 账号或联系方式.",
         "assessments": "为每条规则提供一项判定.",

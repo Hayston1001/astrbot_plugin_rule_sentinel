@@ -227,6 +227,12 @@ class ManagementService:
         return {"content": self.queue.message_content(platform_id=platform_id, group_id=group_id, message_id=message_id),
                  "images": self.queue.message_images(platform_id=platform_id, group_id=group_id, message_id=message_id)}
 
+    def event_detail(self, actor, platform_id, group_id, message_id, event_id):
+        self._check(actor, platform_id, group_id)
+        row = self.queue.event_detail(platform_id=platform_id, group_id=group_id,
+                                      message_id=message_id, event_id=event_id)
+        return {"available": True, **row} if row else {"available": False}
+
     def revoke_count(self, actor, fields):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")

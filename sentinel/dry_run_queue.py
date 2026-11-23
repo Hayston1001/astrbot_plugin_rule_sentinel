@@ -21,6 +21,42 @@ from .violation_store import count_cumulative_mute, initialize_violation_store, 
 SYSTEM_PLATFORM = "__rule_sentinel_system__"
 OVERFLOW_GROUP = "__ingress_overflow__"
 MAX_AUDIT_DETAIL_CHARS = 100000
+AUDIT_DETAIL_VERSION = 1
+
+
+def _stamp_detail(detail):
+    """Add the audit schema version to JSON object details, within the size cap."""
+    if not isinstance(detail, str) or not detail.lstrip().startswith("{"):
+        return detail
+    try:
+        value = json.loads(detail)
+    except (ValueError, TypeError, RecursionError):
+        return detail
+    if not isinstance(value, dict) or value.get("detail_version") == AUDIT_DETAIL_VERSION:
+        return detail
+    value["detail_version"] = AUDIT_DETAIL_VERSION
+    try:
+        stamped = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return detail
+    return stamped if len(stamped) <= MAX_AUDIT_DETAIL_CHARS else detail
+
+
+def _mark_truncated(detail, marker):
+    """Mark JSON details when an enrichment was omitted to stay within the limit."""
+    try:
+        value = json.loads(detail)
+    except (ValueError, TypeError, RecursionError):
+        return detail
+    if not isinstance(value, dict):
+        return detail
+    value["detail_truncated"] = marker
+    try:
+        marked = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return detail
+    return marked if len(marked) <= MAX_AUDIT_DETAIL_CHARS else detail
+
 SUMMARY_LIMIT = 5000
 
 
@@ -69,6 +105,7 @@ class DryRunQueue:
                 );
                 CREATE INDEX IF NOT EXISTS dry_run_events_group_message_id
                     ON dry_run_events(platform_id, group_id, message_id, id);
+                CREATE INDEX IF NOT EXISTS dry_run_events_created_at ON dry_run_events(created_at);
                 CREATE TABLE IF NOT EXISTS execution_intents (
                     id INTEGER PRIMARY KEY, source_event_id INTEGER NOT NULL UNIQUE,
                     source_attempt_id TEXT NOT NULL, platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
@@ -129,6 +166,7 @@ class DryRunQueue:
                     id INTEGER PRIMARY KEY, code TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 );
+                CREATE INDEX IF NOT EXISTS notification_events_created_at ON notification_events(created_at);
             """)
             # Serialize schema migrations across processes.
             db.execute("BEGIN IMMEDIATE")
@@ -276,6 +314,7 @@ class DryRunQueue:
         """Persist the exact rule snapshot before calling a decision provider."""
         if not isinstance(detail, str) or not detail.strip() or len(detail) > MAX_AUDIT_DETAIL_CHARS:
             raise ValueError("invalid evaluation snapshot")
+        detail = _stamp_detail(detail)
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -364,6 +403,8 @@ class DryRunQueue:
                             updated = ""
                         if updated and len(updated) <= MAX_AUDIT_DETAIL_CHARS:
                             detail = updated
+                        else:
+                            detail = _mark_truncated(detail, "started_snapshot_omitted: prompt_language, chat_context")
             if rule_versions is not None:
                 rows = db.execute("""SELECT r.rule_id, r.version FROM rule_versions r
                     WHERE r.platform_id=? AND r.group_id=? AND r.enabled=1 AND r.version=(
@@ -386,7 +427,8 @@ class DryRunQueue:
                                              "original_status": status})
                     if len(detail) > MAX_AUDIT_DETAIL_CHARS:
                         detail = json.dumps({"review_reason": "rule_snapshot_changed_at_commit",
-                                             "original_status": status})
+                                             "original_status": status,
+                                             "detail_truncated": "decision_snapshot_omitted: decision"})
                     status = "review"
             if settings_fingerprint is not None and status in ("proposed", "no_action"):
                 from .group_settings import decision_fingerprint
@@ -406,13 +448,16 @@ class DryRunQueue:
                         review["decision"] = previous
                     detail = json.dumps(review, ensure_ascii=False, allow_nan=False)
                     if len(detail) > MAX_AUDIT_DETAIL_CHARS:
-                        detail = json.dumps({"review_reason": "group_settings_changed_at_commit", "original_status": status})
+                        detail = json.dumps({"review_reason": "group_settings_changed_at_commit",
+                                             "original_status": status,
+                                             "detail_truncated": "decision_snapshot_omitted: decision"})
                     status = "review"
             source = db.execute("SELECT payload FROM dry_run_queue WHERE platform_id=? AND group_id=? AND message_id=? AND state='processing' AND lease=?", (*key, item.lease)).fetchone()
             result = db.execute("UPDATE dry_run_queue SET state='done', payload=NULL, lease=NULL WHERE platform_id=? AND group_id=? AND message_id=? AND state='processing' AND lease=?", (*key, item.lease))
             if result.rowcount != 1:
                 db.rollback()
                 return False
+            detail = _stamp_detail(detail)
             event = db.execute("INSERT INTO dry_run_events (platform_id, group_id, message_id, status, detail, attempt_id) VALUES (?, ?, ?, ?, ?, ?)", (*key, status, detail, item.lease))
             if status == "proposed" and rule_versions is not None:
                 self._record_execution_intent(db, item, source["payload"], event.lastrowid, detail)
@@ -863,6 +908,59 @@ class DryRunQueue:
         except BaseException:
             db.rollback()
             raise
+        finally:
+            db.close()
+
+    def purge_expired_records(self, days, *, batch: int = 50000):
+        """Delete old audit and notification events while preserving execution history.
+
+        Events for a message linked to any execution intent stay, so pending
+        confirmations and action history never lose their decision context.
+        """
+        if type(days) is not int or not 0 <= days <= 36500 or type(batch) is not int or not 1 <= batch <= 50000:
+            raise ValueError("invalid audit retention")
+        if days == 0:
+            return 0, 0
+        cutoff = f"-{days} days"
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            events = db.execute("""
+                DELETE FROM dry_run_events WHERE id IN (
+                    SELECT e.id FROM dry_run_events e
+                    WHERE e.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM execution_intents i
+                          WHERE i.platform_id = e.platform_id
+                            AND i.group_id = e.group_id
+                            AND i.message_id = e.message_id)
+                    ORDER BY e.id LIMIT ?)""", (cutoff, batch))
+            notices = db.execute("""
+                DELETE FROM notification_events WHERE id IN (
+                    SELECT id FROM notification_events
+                    WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+                    ORDER BY id LIMIT ?)""", (cutoff, batch))
+            db.commit()
+            return events.rowcount, notices.rowcount
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def event_detail(self, *, platform_id: str, group_id: str, message_id: str, event_id: int):
+        """Read one audit event for an authorized message scope."""
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 512
+               for value in (platform_id, group_id, message_id)):
+            raise ValueError("invalid message identity")
+        if type(event_id) is not int or event_id <= 0:
+            raise ValueError("invalid event identity")
+        db = self._connect()
+        try:
+            row = db.execute("""SELECT id, status, detail, attempt_id, created_at
+                FROM dry_run_events WHERE platform_id=? AND group_id=? AND message_id=? AND id=?""",
+                (platform_id, group_id, message_id, event_id)).fetchone()
+            return dict(row) if row else None
         finally:
             db.close()
 

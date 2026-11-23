@@ -112,3 +112,14 @@ class LlmProtocolTests(unittest.TestCase):
         priority = self.response(["assess_rules"], [{"assessments": []}])
         priority.raw_completion = {"choices": [{"finish_reason": "stop"}]}
         self.assertEqual(normalize_priority_response(priority).reason, "inconsistent_finish_reason")
+
+    def test_failure_diagnostics_keep_shapes_not_values(self):
+        response = SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
+            tools_call_args=[{"secret": "value"}], raw_completion={"finish_reason": "tool_calls"})
+        result = normalize_response(response)
+        self.assertEqual(result.reason, "unsupported_tool_or_arguments")
+        self.assertEqual(result.diagnostics["tool_names"], ["wrong_tool"])
+        self.assertEqual(result.diagnostics["argument_types"], ["dict"])
+        self.assertEqual(result.diagnostics["argument_keys"], ["secret"])
+        self.assertEqual(result.diagnostics["finish_reason"], "tool_calls")
+        self.assertNotIn("value", str(result.diagnostics))

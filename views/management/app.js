@@ -779,6 +779,15 @@ function executionFailureReason(execution) {
   if (!reason) reason = "未提供具体原因";
   return reason;
 }
+const failureReasonText = {decision_error: "模型判定失败", decision_timeout: "模型判定超时", context_length_exceeded: "内容超过模型处理限制",
+  evaluation_audit_unavailable: "无法保存判定记录", rule_snapshot_too_large: "规则信息超出记录大小限制",
+  invalid_message_snapshot: "消息信息不完整", invalid_decider_result: "模型判定结果无效",
+  invalid_decider_status: "模型判定状态无效", audit_detail_invalid_or_too_large: "判定记录无效或超出大小限制",
+  invalid_assessment: "模型返回的规则判定无效", invalid_assessment_fields: "模型返回的规则判定不完整",
+  invalid_parameters: "模型返回的数据未通过校验", invalid_severity: "模型返回的严重级别无效",
+  invalid_duration: "禁言时长无效或超过上限", unknown_rule: "模型选择的规则不存在",
+  decision_model_removed: "原判定模型已移除, 需要人工复核",
+  rule_snapshot_changed: "判定期间规则已变化", rule_snapshot_changed_at_commit: "判定期间规则已变化"};
 function recordFailureReason(row, detail, decision, actions) {
   const label = recordStatus(row)[0];
   if (!["全部失败", "部分失败", "全部无法执行", "无法执行", "无法撤回", "已超时不可撤回",
@@ -787,18 +796,9 @@ function recordFailureReason(row, detail, decision, actions) {
     (failureStates.has(action.execution.status) || (label === "部分失败" && action.execution.status === "inactive")));
   if (failures.length) return failures.map((action) => `${describeRecordAction(action)}: ${executionFailureReason(action.execution)}`).join("\n");
   if (row.execution && failureStates.has(row.execution.status)) return executionFailureReason(row.execution);
-  const value = detail.review_reason || decision.review_reason || decision.validation ||
-    (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : "");
-  const reasons = {decision_error: "模型判定失败", decision_timeout: "模型判定超时", context_length_exceeded: "内容超过模型处理限制",
-    evaluation_audit_unavailable: "无法保存判定记录", rule_snapshot_too_large: "规则信息超出记录大小限制",
-    invalid_message_snapshot: "消息信息不完整", invalid_decider_result: "模型判定结果无效",
-    invalid_decider_status: "模型判定状态无效", audit_detail_invalid_or_too_large: "判定记录无效或超出大小限制",
-    invalid_assessment: "模型返回的规则判定无效", invalid_assessment_fields: "模型返回的规则判定不完整",
-    invalid_parameters: "模型返回的数据未通过校验", invalid_severity: "模型返回的严重级别无效",
-    invalid_duration: "禁言时长无效或超过上限", unknown_rule: "模型选择的规则不存在",
-    decision_model_removed: "原判定模型已移除, 需要人工复核",
-    rule_snapshot_changed: "判定期间规则已变化", rule_snapshot_changed_at_commit: "判定期间规则已变化"};
-  return Object.hasOwn(reasons, value) ? reasons[value] : value && !/^[a-z0-9_]+$/.test(String(value))
+  const value = detail.review_reason || decision.review_reason || detail.reason_code || decision.reason_code ||
+    decision.validation || (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : "");
+  return Object.hasOwn(failureReasonText, value) ? failureReasonText[value] : value && !/^[a-z0-9_]+$/.test(String(value))
     ? String(value) : "暂无具体原因, 请查看原始记录.";
 }
 function recordElement(tag, className, text) {
@@ -812,6 +812,39 @@ function addRecordDetail(container, title, value, fallback = false) {
   section.appendChild(recordElement("h3", "", title));
   section.appendChild(recordElement("p", fallback ? "record-detail-value record-reason-fallback" : "record-detail-value", value));
   container.appendChild(section);
+}
+function rejectedCallText(call) {
+  if (!call || typeof call !== "object") return "无法读取模型建议.";
+  const parts = [];
+  if (typeof call.rule_id === "string" && call.rule_id) parts.push(`规则「${call.rule_id}」`);
+  if (typeof call.action === "string" && call.action) parts.push(`动作: ${actionNames[call.action] || call.action}`);
+  const duration = call.duration_seconds;
+  if (duration && typeof duration === "object") {
+    const types = {int: "整数", float: "小数", str: "字符串", bool: "布尔值", NoneType: "空值", list: "列表", dict: "对象"};
+    const type = types[duration.type] || duration.type || "未知类型";
+    if (Object.hasOwn(duration, "value")) {
+      const value = String(duration.value);
+      const seconds = duration.type === "int" || duration.type === "float" || (duration.type === "str" && /^\d+$/.test(value));
+      parts.push(`时长: ${value}${seconds ? " 秒" : ""} (${type})`);
+    }
+    else if (Number.isSafeInteger(duration.digits)) parts.push(`时长: 超出范围的 ${duration.digits} 位整数`);
+    else parts.push(`时长类型: ${type}`);
+  } else if (typeof duration === "string" || typeof duration === "number") {
+    parts.push(`时长: ${String(duration)}`);
+  }
+  if (Number.isSafeInteger(call.max_duration_seconds)) parts.push(`上限: ${call.max_duration_seconds} 秒`);
+  if (typeof call.severity === "string" && call.severity) parts.push(`严重级别: ${call.severity}`);
+  if (typeof call.reason === "string" && call.reason.trim()) parts.push(`模型理由: ${call.reason.trim()}`);
+  return parts.length ? parts.join("; ") : "模型建议未通过校验, 未记录可读字段.";
+}
+function errorDetailText(error) {
+  if (!error || typeof error !== "object") return "";
+  const parts = [];
+  if (typeof error.type === "string" && error.type) parts.push(`错误: ${error.type}`);
+  for (const [key, label] of [["status_code", "状态码"], ["http_status", "HTTP"], ["status", "状态"], ["code", "错误码"], ["error_code", "错误码"], ["retry_after", "重试等待"], ["cause", "底层错误"]]) {
+    if (Object.hasOwn(error, key) && error[key] !== "" && error[key] != null) parts.push(`${label}: ${String(error[key])}`);
+  }
+  return parts.join("; ");
 }
 function decisionBucket(row) {
   if (row.status === "no_action" || row.status === "skipped") return row.status;
@@ -877,14 +910,15 @@ function recordReason(row, detail, decision, proposal) {
   if (typeof supplied === "string" && supplied.trim()) return {text: supplied, fallback: false};
   if (row.status === "no_action") return {text: decision.no_action_reason_enabled === false
     ? "未违反规则, 已关闭理由记录." : "未违反规则, 模型未提供具体理由.", fallback: true};
-  const value = String(detail.review_reason || decision.review_reason || decision.validation ||
-    (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : ""));
+  const value = String(detail.review_reason || decision.review_reason || detail.reason_code || decision.reason_code ||
+    decision.validation || (typeof row.detail === "string" && !row.detail.startsWith("{") ? row.detail : ""));
   const nonText = row.status === "skipped" && value === "non_text_or_unknown";
   const removedModel = row.status === "review" && value === "decision_model_removed";
   const contextReview = row.status === "review" && Object.hasOwn(contextReviewText, value) ? contextReviewText[value] : "";
   const skipped = row.status === "skipped" && Object.hasOwn(skipReasonText, value) ? skipReasonText[value] : "";
-  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : contextReview || skipped || value,
-    fallback: nonText || removedModel || Boolean(contextReview || skipped)};
+  const failureText = Object.hasOwn(failureReasonText, value) ? failureReasonText[value] : value;
+  return {text: nonText ? "消息包含非文本内容或类型无法识别." : removedModel ? "原判定模型已移除, 需要人工复核." : contextReview || skipped || failureText,
+    fallback: nonText || removedModel || Boolean(contextReview || skipped || Object.hasOwn(failureReasonText, value))};
 }
 function matchesRecord(row) {
   if (currentFilter !== "all" && decisionBucket(row) !== currentFilter) return false;
@@ -988,6 +1022,17 @@ function renderRecords(rows, append = false, update = false) {
     const explainedByActions = actions.some((action) => action.execution &&
       (failureStates.has(action.execution.status) || (recordStatus(row)[0] === "部分失败" && action.execution.status === "inactive")));
     if (failureReason && !explainedByActions) addRecordDetail(info, "结果说明", failureReason);
+    if (decision.rejected_call && typeof decision.rejected_call === "object") {
+      addRecordDetail(info, "模型建议", rejectedCallText(decision.rejected_call));
+    }
+    const errorDetail = errorDetailText(decision.error);
+    if (errorDetail) addRecordDetail(info, "错误详情", errorDetail);
+    const truncated = decision.detail_truncated || detail.detail_truncated;
+    if (truncated) {
+      addRecordDetail(info, "记录完整性", typeof truncated === "string"
+        ? "部分诊断字段因大小限制未保存: " + truncated
+        : "部分诊断字段因大小限制未保存.");
+    }
     addRecordDetail(info, "判定理由", fullReason || "暂无理由.", fallbackReason);
     addRecordDetail(info, "相关规则", rules.title || "暂无规则信息.");
     const context = decision.chat_context;
@@ -1094,7 +1139,36 @@ function renderRecords(rows, append = false, update = false) {
     const timeline = recordElement("section", "record-detail-section");
     timeline.appendChild(recordElement("h3", "", "判定过程"));
     const eventList = recordElement("ol", "record-timeline");
-    for (const event of events) eventList.appendChild(recordElement("li", "", `${localTimeFor(event.created_at)}  ${recordStatuses[event.status]?.[0] || event.status}`));
+    for (const event of events) {
+      const item = recordElement("li", "", `${localTimeFor(event.created_at)}  ${recordStatuses[event.status]?.[0] || event.status}`);
+      if (Number.isSafeInteger(event.id)) {
+        const details = recordElement("details", "record-raw record-event-raw");
+        details.appendChild(recordElement("summary", "", "查看此步详情"));
+        const pre = recordElement("pre", "", "展开后读取.");
+        details.appendChild(pre);
+        let loading = false, loaded = false;
+        details.addEventListener("toggle", async () => {
+          if (!details.open || loading || loaded) return;
+          loading = true;
+          pre.textContent = "正在读取...";
+          try {
+            const result = await bridge.apiGet("event-detail", {...rowScope, message_id: messageId, event_id: event.id});
+            if (result && typeof result === "object" && result.available !== false) {
+              pre.textContent = JSON.stringify(result, null, 2);
+              loaded = true;
+            } else {
+              pre.textContent = "该步骤记录已清理或不可用.";
+            }
+          } catch {
+            pre.textContent = "读取此步详情失败.";
+          } finally {
+            loading = false;
+          }
+        });
+        item.appendChild(details);
+      }
+      eventList.appendChild(item);
+    }
     timeline.appendChild(events.length ? eventList : recordElement("p", "record-detail-muted", "暂无过程记录."));
     process.appendChild(timeline);
     content.appendChild(process);
@@ -3081,19 +3155,19 @@ el("rule-group").addEventListener("change", () => {
   editingScope = JSON.stringify(chosen ? {platform_id: chosen.platform_id, group_id: chosen.group_id} : {platform_id: "", group_id: ""});
   clearPreview();
 });
-const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "llm_reason_language", "context_messages", "llm_no_action_reason_enabled",
+const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "audit_retention_days", "diagnostic_capture", "llm_reason_language", "context_messages", "llm_no_action_reason_enabled",
   "reply_quote", "reply_mention_sender", "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_judging_enabled", "image_understanding_mode", "image_provider_id", "image_caption_prompt",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"];
-const numericSettings = new Set(["message_retention_days", "context_messages", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
+const numericSettings = new Set(["message_retention_days", "audit_retention_days", "context_messages", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
   "queue_capacity_per_group", "ingress_capacity", "notification_interval_seconds",
   "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds"]);
 const booleanSettings = new Set(["action_execution_enabled", "protected_target_quote", "llm_no_action_reason_enabled",
-  "reply_quote", "reply_mention_sender", "image_judging_enabled"]);
+  "reply_quote", "reply_mention_sender", "image_judging_enabled", "diagnostic_capture"]);
 const byteSettings = new Set(["image_max_bytes_per_image", "image_max_total_bytes"]);
 const MIB = 1048576;
 let modelChoiceEdited = false;

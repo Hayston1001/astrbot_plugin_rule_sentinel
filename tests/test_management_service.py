@@ -37,6 +37,16 @@ class ManagementTests(unittest.TestCase):
             self.service.confirm("api_key:123", preview)
         self.assertEqual(self.rules.history("p", "g", "r"), [])
 
+    def test_event_detail_is_scoped_and_authorized(self):
+        self.queue.record_skip(platform_id="p", group_id="g", message_id="m", reason="empty_text")
+        event = self.queue.list_events(platform_id="p", group_id="g")[0]
+        detail = self.service.event_detail("admin", "p", "g", "m", event["id"])
+        self.assertEqual(detail["status"], "skipped")
+        self.assertTrue(detail["available"])
+        self.assertEqual(self.service.event_detail("admin", "p", "g", "other", event["id"]), {"available": False})
+        with self.assertRaises(PermissionError):
+            self.service.event_detail("api_key:key", "p", "g", "m", event["id"])
+
     def test_authorized_rule_and_audit_operations(self):
         saved = self.service.confirm("admin", self.service.preview("admin", self.fields))
         self.assertEqual(saved["modified_by"], "admin")

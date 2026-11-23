@@ -111,6 +111,62 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "rejected")
         self.assertEqual(audit["validation"], "unknown_rule")
 
+    async def test_invalid_duration_keeps_the_rejected_value_and_limit(self):
+        self.rules.save(**{**self.rule, "expected_version": 1, "duration_mode": "autonomous",
+                           "severity_seconds": {}})
+        async def invoke(**kwargs):
+            self.assertEqual(kwargs["rules"][0]["duration_limit_seconds"], 300)
+            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
+                tools_call_args=[{"violated": True, "rule_id": "r", "duration_seconds": "600",
+                                  "reason": "spam" * 200}])
+        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
+            max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "rejected")
+        self.assertEqual(audit["validation"], "invalid_duration")
+        self.assertEqual(audit["rejected_call"]["duration_seconds"],
+                         {"type": "str", "value": "600", "chars": 3})
+        self.assertEqual(audit["rejected_call"]["max_duration_seconds"], 300)
+        self.assertEqual(audit["rejected_call"]["rule_id"], "r")
+        self.assertEqual(len(audit["rejected_call"]["reason"]), 500)
+        self.assertEqual(audit["rejected_call"]["reason_chars"], 800)
+        self.assertNotIn("proposal", audit)
+
+    async def test_protocol_diagnostics_and_input_fingerprint_are_audited(self):
+        async def invoke(**kwargs):
+            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
+                tools_call_args=[{"x": 1}], raw_completion={"finish_reason": "tool_calls"})
+        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
+            max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "rejected")
+        self.assertEqual(audit["response_status"], "unsupported_tool_or_arguments")
+        self.assertEqual(audit["detail_version"], 1)
+        self.assertEqual(audit["prompt_version"], 1)
+        self.assertRegex(audit["input_hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(audit["protocol"]["tool_names"], ["wrong_tool"])
+        self.assertEqual(audit["protocol"]["argument_types"], ["dict"])
+        self.assertEqual(audit["protocol"]["argument_keys"], ["x"])
+        self.assertEqual(audit["protocol"]["finish_reason"], "tool_calls")
+        self.assertNotIn("raw_tool_arguments", audit)
+
+    async def test_debug_capture_is_opt_in_and_bounded(self):
+        async def invoke(**kwargs):
+            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
+                tools_call_args=[{"x": "y" * 5000}], raw_completion={"finish_reason": "tool_calls"},
+                completion_text="Z" * 2000)
+        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
+            max_duration_seconds=300, queue=self.queue, diagnostic_capture=True),
+            concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        status, audit = self.audit()
+        self.assertEqual(status, "rejected")
+        self.assertIn("y" * 100, audit["raw_tool_arguments"])
+        self.assertTrue(audit["raw_tool_arguments"].endswith("...[truncated]"))
+        self.assertEqual(len(audit["raw_completion_text"]), 1000)
+
     async def test_forbidden_action_is_rejected_without_mute_fallback(self):
         async def invoke(**kwargs):
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
@@ -148,7 +204,11 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         events = self.queue.list_events(platform_id="p", group_id="g")
         self.assertEqual([event["status"] for event in events], ["started", "failed"])
         self.assertEqual(json.loads(events[0]["detail"])["prompt_language"], "en")
-        self.assertEqual(json.loads(events[1]["detail"]), {"prompt_language": "en", "reason": "decision_error"})
+        detail = json.loads(events[1]["detail"])
+        self.assertEqual(detail["prompt_language"], "en")
+        self.assertEqual(detail["reason_code"], "decision_error")
+        self.assertEqual(detail["error"], {"type": "RuntimeError"})
+        self.assertNotIn("private provider error", events[1]["detail"])
 
     async def test_no_action_reason_is_recorded_as_returned(self):
         for text, expected in (("NO_ACTION\nNo rule was violated.", "No rule was violated."),

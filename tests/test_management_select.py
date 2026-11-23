@@ -32,7 +32,7 @@ window.AstrBotPluginView = {
       settings: {quick_start_completed: false, monitoring_mode: 'allowlist', monitoring_groups: [], decision_backend: 'llm',
         rule_selection_strategy: 'priority', llm_provider_id: 'test-model', default_action_mode: 'auto',
         default_execution_mode: 'record', protected_target_policy: 'exempt', protected_target_template: 'hello',
-        message_retention_days: 30, llm_no_action_reason_enabled: true},
+        message_retention_days: 30, audit_retention_days: 90, diagnostic_capture: false, llm_no_action_reason_enabled: true},
       providers: [{id: 'test-model'}], 'ui-state': {platform_id: 'p', group_id: 'g'},
       platforms: [{id: 'p', type: 'qq_official'}],
       groups: [{platform_id: 'p', group_id: 'g', alias: '测试群', rule_count: 0}],

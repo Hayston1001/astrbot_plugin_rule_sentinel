@@ -1,7 +1,9 @@
 """Dry-run LLM decision flow using an injected, isolated model caller."""
 
 import asyncio
+import hashlib
 import json
+import math
 import time
 from dataclasses import asdict
 
@@ -14,8 +16,70 @@ from .rule_selection import RuleAssessment, select_rule
 from .sentinel_core import RuleSnapshot, validate_plan_proposal
 from .rule_snapshot_guard import snapshot_is_current
 from .audit_safety import safe_resolved_model
-from .prompts import select_prompt_language
+from .prompts import PROMPT_VERSION, select_prompt_language
 from .image_fetch import ImageFetchError
+
+
+_AUDIT_FIELD_KEYS = ("rule_id", "action", "severity")
+_AUDIT_VALUE_CHARS = 120
+_AUDIT_REASON_CHARS = 500
+_SAFE_JSON_INT = 9007199254740991
+
+
+def _audit_value(value):
+    """Describe one untrusted model value without storing unbounded data."""
+    if value is None or type(value) is bool:
+        return {"type": type(value).__name__, "value": value}
+    if type(value) is int:
+        if -_SAFE_JSON_INT <= value <= _SAFE_JSON_INT:
+            return {"type": "int", "value": value}
+        return {"type": "int", "digits": len(str(abs(value)))}
+    if type(value) is float:
+        return {"type": "float", "value": value if math.isfinite(value) else repr(value)}
+    if isinstance(value, str):
+        return {"type": "str", "value": value[:_AUDIT_VALUE_CHARS], "chars": len(value)}
+    return {"type": type(value).__name__}
+
+
+def _audit_rejected_call(call, *, max_duration_seconds):
+    """Keep the fields that explain why an untrusted model verdict was rejected."""
+    if not isinstance(call, dict):
+        return {"type": type(call).__name__, "max_duration_seconds": max_duration_seconds}
+    result = {
+        "fields": [str(key)[:64] for key in sorted(call, key=str)[:24]],
+        "max_duration_seconds": max_duration_seconds,
+    }
+    for key in _AUDIT_FIELD_KEYS:
+        value = call.get(key)
+        if isinstance(value, str):
+            result[key] = value[:200]
+    if type(call.get("violated")) is bool:
+        result["violated"] = call["violated"]
+    if "duration_seconds" in call:
+        result["duration_seconds"] = _audit_value(call["duration_seconds"])
+    reason = call.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        result["reason"] = reason.strip()[:_AUDIT_REASON_CHARS]
+        result["reason_chars"] = len(reason)
+    return result
+
+
+def _input_hash(material):
+    """Hash the exact judge inputs without storing message text or context."""
+    try:
+        encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _bounded_capture(value, limit=2000):
+    """Serialize an opt-in debug excerpt without allowing unbounded growth."""
+    try:
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return text[:limit] + ("...[truncated]" if len(text) > limit else "")
 
 
 class LlmDecider:
@@ -29,7 +93,8 @@ class LlmDecider:
     def __init__(self, rules, invoke, *, model: str, max_duration_seconds: int, queue, strategy: str = "model",
                  no_action_reason_enabled: bool = True, image_enabled: bool = False,
                  image_model: str | None = None, image_mode: str = "direct",
-                 caption_prompt: str = "", fetcher=None, prefetcher=None, chat_context=None):
+                 caption_prompt: str = "", fetcher=None, prefetcher=None, chat_context=None,
+                 diagnostic_capture: bool = False):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if type(max_duration_seconds) is not int or max_duration_seconds <= 0:
@@ -40,6 +105,8 @@ class LlmDecider:
             raise ValueError("invalid no-action reason setting")
         if type(image_enabled) is not bool or image_mode not in ("caption", "direct"):
             raise ValueError("invalid image judging setting")
+        if type(diagnostic_capture) is not bool:
+            raise ValueError("invalid diagnostic capture setting")
         if image_model is not None and (not isinstance(image_model, str) or not image_model.strip()):
             raise ValueError("invalid image model")
         if image_mode == "caption" and image_enabled and not isinstance(caption_prompt, str):
@@ -58,6 +125,7 @@ class LlmDecider:
         self.fetcher = fetcher
         self.prefetcher = prefetcher
         self.chat_context = chat_context
+        self.diagnostic_capture = diagnostic_capture
 
     async def __call__(self, item):
         rules = await asyncio.to_thread(self.rules.current_for_group, item.platform_id, item.group_id)
@@ -148,10 +216,25 @@ class LlmDecider:
                 data["duration_mode"] = mute["duration_mode"]
                 if mute["duration_mode"] == "strict":
                     data["severity_levels"] = list(mute["severity_seconds"])
+                else:
+                    data["duration_limit_seconds"] = self.max_duration_seconds
             model_rules.append(data)
         language = select_prompt_language([rule.text for rule in enabled], message or caption or "")
+        context_prompt = context.prompt_data() if context is not None else None
+        input_material = {"message": message, "rules": model_rules, "strategy": self.strategy,
+                          "language": language, "prompt_version": PROMPT_VERSION}
+        if caption:
+            input_material["caption"] = caption
+        if context_prompt is not None:
+            input_material["chat_context"] = context_prompt
+        if images:
+            input_material["image_count"] = image_count
+            input_material["image_bytes"] = image_bytes
+        input_hash = _input_hash(input_material)
         start_detail = {"backend": "llm", "model": judge_model, "strategy": self.strategy, "rules": rule_data,
-                        "sender_id": sender, "prompt_language": language}
+                        "sender_id": sender, "prompt_language": language, "prompt_version": PROMPT_VERSION}
+        if input_hash is not None:
+            start_detail["input_hash"] = input_hash
         if context is not None:
             start_detail["chat_context"] = context.audit()
         if images:
@@ -168,8 +251,8 @@ class LlmDecider:
         started = time.monotonic()
         invoke_kwargs = {"model": judge_model, "message": message, "rules": model_rules,
                          "strategy": self.strategy, "language": language}
-        if context is not None:
-            invoke_kwargs["chat_context"] = context.prompt_data()
+        if context_prompt is not None:
+            invoke_kwargs["chat_context"] = context_prompt
         if images and self.image_mode == "direct":
             invoke_kwargs["image_urls"] = image_data_urls
         elif images and caption:
@@ -179,8 +262,20 @@ class LlmDecider:
         normalized = (normalize_priority_response(response) if self.strategy == "priority" else
                       normalize_response(response, allow_context_review=context is not None))
         detail = {"backend": "llm", "model": judge_model, "rules": rule_data,
-                  "strategy": self.strategy, "prompt_language": language, "response_status": normalized.reason,
-                  "model_latency_ms": elapsed_ms, "message_chars": len(message)}
+                  "strategy": self.strategy, "prompt_language": language, "prompt_version": PROMPT_VERSION,
+                  "response_status": normalized.reason, "model_latency_ms": elapsed_ms,
+                  "message_chars": len(message)}
+        if input_hash is not None:
+            detail["input_hash"] = input_hash
+        if normalized.diagnostics and normalized.status in ("failed", "rejected"):
+            detail["protocol"] = normalized.diagnostics
+        if self.diagnostic_capture and normalized.status in ("failed", "rejected"):
+            raw_arguments = _bounded_capture(getattr(response, "tools_call_args", None))
+            if raw_arguments is not None:
+                detail["raw_tool_arguments"] = raw_arguments
+            completion = getattr(response, "completion_text", None)
+            if isinstance(completion, str) and completion.strip():
+                detail["raw_completion_text"] = completion.strip()[:1000]
         if context is not None:
             detail["chat_context"] = context.audit()
         if normalized.status == "review":
@@ -223,6 +318,8 @@ class LlmDecider:
                 validated = validate_plan_proposal(proposal_call, sender_id=sender, rules=snapshots,
                     max_duration_seconds=self.max_duration_seconds, decision_backend="llm")
                 if not validated.proposal:
+                    detail["rejected_call"] = _audit_rejected_call(
+                        proposal_call, max_duration_seconds=self.max_duration_seconds)
                     return Decision("rejected", json.dumps({**detail, "validation": validated.reason}, ensure_ascii=False))
                 assessments.append(RuleAssessment(rule_id, True))
                 proposals[rule_id] = validated.proposal
@@ -244,6 +341,9 @@ class LlmDecider:
                 status = validated.status
                 if validated.proposal:
                     detail["proposal"] = asdict(validated.proposal)
+                else:
+                    detail["rejected_call"] = _audit_rejected_call(
+                        normalized.calls[0], max_duration_seconds=self.max_duration_seconds)
         if status == "no_action":
             detail["no_action_reason_enabled"] = self.no_action_reason_enabled
         if status in ("proposed", "no_action"):

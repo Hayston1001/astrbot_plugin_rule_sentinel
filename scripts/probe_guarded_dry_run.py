@@ -143,8 +143,11 @@ def main():
                 ("context", "started"), ("context", "failed")]
             proposal = json.loads(events[1]["detail"])["proposal"]
             assert proposal["target_sender_id"] == "trigger-sender" and proposal["duration_seconds"] == 60
-            assert json.loads(events[5]["detail"]) == {"reason": "decision_error", "prompt_language": "en"}
-            assert json.loads(events[-1]["detail"]) == {"reason": "context_length_exceeded", "prompt_language": "en"}
+            tamper = json.loads(events[5]["detail"])
+            assert tamper["reason_code"] == "decision_error" and tamper["prompt_language"] == "en"
+            assert "private" not in events[5]["detail"]
+            context_failure = json.loads(events[-1]["detail"])
+            assert context_failure["reason"] == "context_length_exceeded" and context_failure["prompt_language"] == "en"
             assert delivered == ["private proposal", "private normal", "private context"]
             assert notifications == ["model_failed", "context_limit"]
             assert all("private proposal" not in event["detail"] and "private normal" not in event["detail"]

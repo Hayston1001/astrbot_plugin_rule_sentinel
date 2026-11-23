@@ -1,6 +1,7 @@
 """Mocked plugin wiring tests; these do not load a running AstrBot instance."""
 
 import importlib
+import importlib.machinery
 import importlib.util
 import asyncio
 import json
@@ -23,9 +24,10 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         package = types.ModuleType("sentinel_test_plugin")
         package.__path__ = [str(root)]
         astrbot = types.ModuleType("astrbot")
+        astrbot.__spec__ = importlib.machinery.ModuleSpec("astrbot", None)
         api = types.ModuleType("astrbot.api")
         api.AstrBotConfig = dict
-        api.logger = types.SimpleNamespace(info=lambda *args: None, error=lambda *args: None, warning=lambda *args: None)
+        api.logger = types.SimpleNamespace(info=lambda *args: None, error=lambda *args: None, warning=lambda *args: None, debug=lambda *args: None)
         star = types.ModuleType("astrbot.api.star")
         star.Context = object
         class Star:
@@ -79,7 +81,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 37)
+        self.assertEqual(len(self.context.routes), 38)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -1207,7 +1209,10 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(self.module, "run_sync_safely", new=AsyncMock()) as purge:
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._clean_message_contents()
-            purge.assert_awaited_once_with(self.plugin._queue.purge_message_contents)
+            purge.assert_any_await(self.plugin._queue.purge_message_contents)
+            purge.assert_any_await(self.plugin._queue.purge_expired_records,
+                                   self.plugin.config.get("audit_retention_days", 90))
+            self.assertEqual(purge.await_count, 2)
 
     async def test_snapshot_prefilter_does_not_extract_inactive_group_text(self):
         policy = types.SimpleNamespace(enabled=True, mode="blocklist", groups=set())

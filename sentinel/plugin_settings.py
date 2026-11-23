@@ -30,6 +30,7 @@ class Settings:
     image_max_bytes_per_image: int
     image_max_total_bytes: int
     image_fetch_timeout_seconds: int
+    diagnostic_capture: bool
 
 
 def decision_model_unconfigured(config):
@@ -62,6 +63,7 @@ def read_settings(config, *, require_model=True) -> Settings:
     image_max_bytes = config.get("image_max_bytes_per_image", 10485760)
     image_max_total = config.get("image_max_total_bytes", 20971520)
     image_timeout = config.get("image_fetch_timeout_seconds", 15)
+    diagnostic_capture = config.get("diagnostic_capture", False)
     if mode not in ("allowlist", "blocklist") or not isinstance(entries, list):
         raise ValueError("invalid monitoring settings")
     groups = set()
@@ -100,6 +102,8 @@ def read_settings(config, *, require_model=True) -> Settings:
         raise ValueError("invalid image size limit")
     if type(image_timeout) is not int or not 1 <= image_timeout <= 60:
         raise ValueError("invalid image timeout")
+    if type(diagnostic_capture) is not bool:
+        raise ValueError("invalid diagnostic capture setting")
     if image_enabled:
         if not image_provider.strip():
             raise ValueError("image provider is required")
@@ -111,4 +115,4 @@ def read_settings(config, *, require_model=True) -> Settings:
     return Settings(MonitoringPolicy(mode, frozenset(groups)), capacity, backend,
                     model, duration, concurrency, timeout, global_rate, group_rate, failure_threshold, cooldown, ingress_capacity, strategy,
                     no_action_reason, image_enabled, image_mode, image_provider.strip(), image_caption_prompt,
-                    image_max_count, image_max_bytes, image_max_total, image_timeout)
+                    image_max_count, image_max_bytes, image_max_total, image_timeout, diagnostic_capture)

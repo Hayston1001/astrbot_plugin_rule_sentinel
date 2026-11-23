@@ -281,5 +281,26 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue").fetchone()[0], 2)
 
 
+    def test_audit_retention_keeps_events_linked_to_execution_history(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            old = "2020-01-01T00:00:00.000Z"
+            for message in ("old", "kept"):
+                db.execute("INSERT INTO dry_run_events (platform_id, group_id, message_id, status, detail, created_at) "
+                           "VALUES ('p', 'g', ?, 'proposed', '{\"detail_version\": 1}', ?)", (message, old))
+            old_event = db.execute("SELECT id FROM dry_run_events WHERE message_id='old'").fetchone()[0]
+            kept_event = db.execute("SELECT id FROM dry_run_events WHERE message_id='kept'").fetchone()[0]
+            db.execute("INSERT INTO execution_intents (source_event_id, source_attempt_id, platform_id, group_id, "
+                       "message_id, rule_id, rule_version, action, target_sender_id, mode, status, created_at, updated_at, "
+                       "plan_id, action_index) "
+                       "VALUES (?, 'attempt', 'p', 'g', 'kept', 'r', 1, 'mute', 'member', 'auto', 'succeeded', ?, ?, 'plan', 0)",
+                       (kept_event, old, old))
+            db.execute("INSERT INTO notification_events (code, status, created_at) VALUES ('model_failed', 'succeeded', ?)", (old,))
+            db.commit()
+        self.assertEqual(self.queue.purge_expired_records(90), (1, 1))
+        self.assertIsNone(self.queue.event_detail(platform_id="p", group_id="g", message_id="old", event_id=old_event))
+        self.assertIsNotNone(self.queue.event_detail(platform_id="p", group_id="g", message_id="kept", event_id=kept_event))
+        self.assertEqual(self.queue.purge_expired_records(0), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

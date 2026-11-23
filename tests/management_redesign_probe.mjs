@@ -87,6 +87,12 @@ firstPage[42].detail = JSON.stringify({proposal: {rule_id: "plan", rule_version:
 firstPage[44].detail = JSON.stringify({proposal: {rule_id: "legacy", rule_version: 1, action: "mute", duration_seconds: 120}});
 firstPage[45].status = "timed_out";
 firstPage[45].detail = "decision_timeout";
+firstPage[49].status = "rejected";
+firstPage[49].detail = JSON.stringify({validation: "invalid_duration",
+  rejected_call: {rule_id: "ads", action: "mute", duration_seconds: {type: "str", value: "600", chars: 3},
+    max_duration_seconds: 300, reason: "spam"},
+  error: {type: "RuntimeError", code: "provider_error"},
+  rules: [{rule_id: "ads", version: 2}]});
 firstPage[46].execution_summary = "partial_failed";
 firstPage[46].executions = [{action: "recall", status: "succeeded"},
   {action: "reply", status: "failed", platform_code: "400"},
@@ -111,19 +117,20 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       model_concurrency: 2, model_timeout_seconds: 30, global_rate_per_minute: 60, group_rate_per_minute: 30,
       model_failure_threshold: 5, model_cooldown_seconds: 60, queue_capacity_per_group: 100,
       ingress_capacity: 256, notification_targets: [], notification_interval_seconds: 0,
-      default_action_mode: "auto", message_retention_days: 30, llm_reason_language: "", context_messages: 0,
+      default_action_mode: "auto", message_retention_days: 30, audit_retention_days: 90, diagnostic_capture: false, llm_reason_language: "", context_messages: 0,
       llm_no_action_reason_enabled: true,
       protected_target_policy: "group_message", protected_target_template: "hello {sender_id}", protected_target_quote: true,
       image_judging_enabled: false, image_understanding_mode: "caption", image_provider_id: "",
       image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
       image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10};
-    if (endpoint === "providers") return [{id: "example"}];
-    if (endpoint === "image-model-options") return {providers: [{id: "example", model: "example", modalities: ["text"], image_capability: "no_image", tool_capability: "undeclared"}], framework_caption_provider_id: ""};
+    if (endpoint === "providers") return [{id: "example"}];    if (endpoint === "image-model-options") return {providers: [{id: "example", model: "example", modalities: ["text"], image_capability: "no_image", tool_capability: "undeclared"}], framework_caption_provider_id: ""};
     if (endpoint === "ui-state") return {platform_id: "p", group_id: "g", active_tab: "records"};
     if (endpoint === "platforms") return [{id: "p", type: "qq_official"}];
     if (endpoint === "groups") return [{platform_id: "p", group_id: "g", rule_count: 0}];
     if (endpoint === "rules") return [];
     if (endpoint === "message-content") return {content: "original <text>"};
+    if (endpoint === "event-detail") return {id: params.event_id, status: "started",
+      detail: JSON.stringify({prompt_version: 1, rule_count: 2})};
     if (endpoint === "messages") return noRecords ? [] : params.before_id === undefined ? firstPage : [
       {id: 50, message_id: "next", status: "skipped", detail: "non_text_or_unknown", events: []}];
     if (endpoint === "summary") return {total_messages: 51, status_counts: {proposed: 25, no_action: 25, skipped: 1},
@@ -325,6 +332,15 @@ assert.equal(section(detailAt(42), "处理动作").children[1].textContent, "暂
 assert.equal(section(detailAt(44), "处理动作").children[1].children[0].children[0].children[0].textContent, "1. 禁言 2分钟");
 assert.equal(section(detailAt(46), "结果说明"), undefined);
 assert.equal(section(detailAt(45), "结果说明").children[1].textContent, "模型判定超时");
+assert.equal(section(detailAt(49), "结果说明").children[1].textContent, "禁言时长无效或超过上限");
+assert.equal(section(detailAt(49), "模型建议").children[1].textContent,
+  "规则「ads」; 动作: 禁言; 时长: 600 秒 (字符串); 上限: 300 秒; 模型理由: spam");
+assert.equal(section(detailAt(49), "错误详情").children[1].textContent, "错误: RuntimeError; 错误码: provider_error");
+const eventDetails = section(detailAt(0), "判定过程").children[1].children[0].children[0];
+eventDetails.open = true;
+await eventDetails.trigger("toggle");
+assert.match(eventDetails.children[1].textContent, /prompt_version/);
+assert.ok(requests.some((request) => request.endpoint === "event-detail" && request.params.event_id === 100));
 for (const index of [2, 16]) {
   const action = section(detailAt(index), "处理动作").children[1].children[0];
   assert.equal(action.children[0].children[1].textContent, "执行失败");

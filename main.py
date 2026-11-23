@@ -43,19 +43,6 @@ capture_legacy_config(_plugin_data_root / PLUGIN_NAME,
                       _plugin_data_root.parent / "config" / f"{PLUGIN_NAME}_config.json")
 
 
-def _image_capture_hint(event):
-    """Return True for an image-bearing message without retaining its content."""
-    try:
-        chain = getattr(event.message_obj, "message", None)
-        if isinstance(chain, list) and any(isinstance(segment, Image) for segment in chain):
-            return True
-        raw = getattr(event.message_obj, "raw_message", None)
-        raw_data = getattr(raw, "raw_data", None)
-        attachments = raw_data.get("attachments") if isinstance(raw_data, dict) else None
-        return isinstance(attachments, list) and bool(attachments)
-    except Exception:
-        return False
-
 
 def _unique_json_object(pairs):
     result = {}
@@ -135,6 +122,7 @@ class RuleSentinel(Star):
             ("revoke-violation-count", self.revoke_violation_count, ["POST"]),
             ("pending-confirmations", self.pending_confirmations, ["GET"]),
             ("message-content", self.message_content, ["GET"]),
+            ("event-detail", self.event_detail, ["GET"]),
             ("execute-mute", self.execute_mute, ["POST"]),
             ("execute-action", self.execute_mute, ["POST"]),
             ("confirm-pending-mute", self.confirm_pending_mute, ["POST"]),
@@ -187,6 +175,10 @@ class RuleSentinel(Star):
             await run_sync_safely(queue.purge_message_contents)
         except Exception:
             logger.error("Rule Sentinel could not clean expired message contents.")
+        try:
+            await run_sync_safely(queue.purge_expired_records, self.config.get("audit_retention_days", 90))
+        except Exception:
+            logger.error("Rule Sentinel could not clean expired audit records.")
         self._retention_task = asyncio.create_task(self._clean_message_contents())
         await self._start_monitoring()
 
@@ -197,6 +189,11 @@ class RuleSentinel(Star):
                 await run_sync_safely(self._queue.purge_message_contents)
             except Exception:
                 logger.error("Rule Sentinel could not clean expired message contents.")
+            try:
+                await run_sync_safely(self._queue.purge_expired_records,
+                                      self.config.get("audit_retention_days", 90))
+            except Exception:
+                logger.error("Rule Sentinel could not clean expired audit records.")
 
     async def _start_monitoring(self):
         self.start_error = None
@@ -297,12 +294,9 @@ class RuleSentinel(Star):
         seen here. The handler only copies; it never sends a reply, sets a
         result or stops the event, so the rest of the pipeline is unaffected.
         """
-        image_hint = _image_capture_hint(event)
-
         def diagnose(reason):
             # Short static codes only: no message text, links or member ids.
-            if image_hint:
-                logger.info(f"Rule Sentinel image capture result: {reason}")
+            logger.debug(f"Rule Sentinel message capture: {reason}")
 
         intake = self.intake
         if intake is None:
@@ -349,9 +343,9 @@ class RuleSentinel(Star):
                             reference = getattr(segment, "file", None) or getattr(segment, "url", None)
                             if isinstance(reference, str):
                                 scheme = reference.split(":", 1)[0][:24] if ":" in reference else "none"
-                                logger.info(f"Rule Sentinel image reference: len={len(reference)} scheme={scheme}")
+                                logger.debug(f"Rule Sentinel image reference: len={len(reference)} scheme={scheme}")
                             else:
-                                logger.info(f"Rule Sentinel image reference: type={type(reference).__name__}")
+                                logger.debug(f"Rule Sentinel image reference: type={type(reference).__name__}")
                             break
                 platform_id, group_id = event.get_platform_id(), getattr(obj, "group_id", None)
                 message_id = getattr(obj, "message_id", None)
@@ -359,9 +353,9 @@ class RuleSentinel(Star):
                     status = intake.offer(Skip(platform_id, group_id, message_id, result.status,
                                       getattr(event, "unified_msg_origin", None)))
                     diagnose(f"extract_{result.status}_{status}")
-        except Exception:
+        except Exception as error:
             diagnose("exception")
-            logger.error("Rule Sentinel could not capture a group message.")
+            logger.error(f"Rule Sentinel could not capture a group message: {type(error).__name__}")
 
     async def _run(self, operation, *args):
         if self.management is None:
@@ -374,8 +368,9 @@ class RuleSentinel(Star):
             return error_response("Rule changed; preview again", status_code=409)
         except (ValueError, TypeError, KeyError):
             return error_response("Invalid request", status_code=400)
-        except Exception:
-            logger.error("Rule Sentinel management operation failed")
+        except Exception as error:
+            operation_name = getattr(operation, "__name__", "unknown")
+            logger.error(f"Rule Sentinel management operation failed: operation={operation_name} error={type(error).__name__}")
             return error_response("Operation failed", status_code=500)
 
     async def _payload(self):
@@ -480,6 +475,17 @@ class RuleSentinel(Star):
             return error_response("Service not initialized", status_code=503)
         return await self._run(self.management.message_content, request.username,
                                 request.query.get("platform_id"), request.query.get("group_id"), request.query.get("message_id"))
+
+    async def event_detail(self):
+        if self.management is None:
+            return error_response("Service not initialized", status_code=503)
+        try:
+            event_id = int(request.query.get("event_id", ""))
+        except (TypeError, ValueError):
+            return error_response("Invalid event", status_code=400)
+        return await self._run(self.management.event_detail, request.username,
+                               request.query.get("platform_id"), request.query.get("group_id"),
+                               request.query.get("message_id"), event_id)
 
     async def revoke_violation_count(self):
         if self.management is None:

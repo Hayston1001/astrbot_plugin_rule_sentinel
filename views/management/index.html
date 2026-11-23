@@ -277,8 +277,10 @@
                 </div>
               </section>
             </div></section>
-            <section class="settings-section" aria-labelledby="settings-records-title"><div class="settings-intro"><h2 id="settings-records-title" tabindex="-1">消息记录</h2><p>控制记录详情中的消息原文保留时间.</p></div><div class="settings-fields">
+            <section class="settings-section" aria-labelledby="settings-records-title"><div class="settings-intro"><h2 id="settings-records-title" tabindex="-1">消息记录</h2><p>控制记录详情和判定记录的保留时间.</p></div><div class="settings-fields">
               <label>消息原文保留天数 <input id="setting-message_retention_days" type="number" min="0" max="36500" step="1"><span class="field-help">默认 30 天, 到期自动清理. 设为 0 时不保留原文; 已清除的原文无法恢复. 数据库日志或备份可能仍有残留.</span></label>
+              <label>判定和通知记录保留天数 <input id="setting-audit_retention_days" type="number" min="0" max="36500" step="1"><span class="field-help">默认 90 天, 到期自动清理. 设为 0 时不自动清理. 仍关联待确认禁言或执行记录的事件会保留.</span></label>
+              <label class="setting-switch"><span><strong>记录模型原始输出片段</strong><small>默认关闭. 开启后被拒的判定会保存最多 2000 字符的工具参数和 1000 字符的文本输出, 可能包含消息片段; 仍受判定记录保留期限制.</small></span><input id="setting-diagnostic_capture" type="checkbox"></label>
             </div></section>
             <section class="settings-section" aria-labelledby="settings-limits-title"><div class="settings-intro"><h2 id="settings-limits-title" tabindex="-1">运行限制</h2><p>设置判定容量, 超时和禁言时长上限.</p></div><div class="settings-fields">
                <details class="settings-details"><summary>展开运行限制</summary><div class="form-grid">

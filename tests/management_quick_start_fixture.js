@@ -3,7 +3,7 @@ const testGroup = {platform_id: "p", group_id: "g", alias: "测试群", rule_cou
 const settings = {
   action_execution_enabled: false, monitoring_mode: "allowlist", monitoring_groups: [],
   decision_backend: "llm", llm_provider_id: "", rule_selection_strategy: "model",
-  default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30,
+  default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30, audit_retention_days: 90, diagnostic_capture: false,
   reply_quote: true, reply_mention_sender: false,
   llm_reason_language: "", llm_no_action_reason_enabled: true, context_messages: 0, group_overrides: {},
   chat_query_items: ["status", "mute", "recall", "reply"],
