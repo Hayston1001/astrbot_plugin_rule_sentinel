@@ -220,6 +220,16 @@ class ManagementUiTests(unittest.TestCase):
                       (root / "views" / "management" / "index.html").read_text(encoding="utf-8"))
         self.assertIn('bridge.apiPost("notification-test", {})', script)
 
+    def test_raw_record_copy_button_is_icon_only(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
+        css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
+        self.assertIn('recordCopyButton(rawText, "复制原始记录")', script)
+        self.assertIn("navigator.clipboard.writeText", script)
+        self.assertIn("event.preventDefault();\n    event.stopPropagation();", script)
+        self.assertIn(".record-raw-copy {", css)
+        self.assertIn(".record-raw-copy-icon { width: 14px; height: 14px; }", css)
+
     def test_record_table_column_sizes_do_not_depend_on_details(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")

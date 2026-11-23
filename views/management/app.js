@@ -801,6 +801,61 @@ function recordFailureReason(row, detail, decision, actions) {
   return Object.hasOwn(failureReasonText, value) ? failureReasonText[value] : value && !/^[a-z0-9_]+$/.test(String(value))
     ? String(value) : "暂无具体原因, 请查看原始记录.";
 }
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* Fall back to a hidden textarea. */ }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+function recordCopyButton(text, label) {
+  const button = recordElement("button", "record-raw-copy");
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  if (typeof document.createElementNS === "function") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    for (const [name, value] of Object.entries({
+      class: "record-raw-copy-icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+      "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round",
+      "aria-hidden": "true", focusable: "false",
+    })) svg.setAttribute(name, value);
+    const front = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    for (const [name, value] of Object.entries({width: "14", height: "14", x: "8", y: "8", rx: "2"})) {
+      front.setAttribute(name, value);
+    }
+    const back = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    back.setAttribute("d", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2");
+    svg.appendChild(front);
+    svg.appendChild(back);
+    button.appendChild(svg);
+  } else {
+    button.textContent = "复制";
+  }
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const copied = await copyText(text);
+    showFeedback(copied ? "已复制" : "复制失败, 请手动选择文本.", copied ? "success" : "error");
+  });
+  return button;
+}
 function recordElement(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -1178,8 +1233,11 @@ function renderRecords(rows, append = false, update = false) {
       attempt_id: row.attempt_id ?? null, detail: latestDetail, execution: row.execution ?? null,
       executions: Array.isArray(row.executions) ? row.executions : executions, events};
     const raw = recordElement("details", "record-raw");
-    raw.appendChild(recordElement("summary", "", "查看原始记录"));
-    raw.appendChild(recordElement("pre", "", JSON.stringify(latest, null, 2)));
+    const rawText = JSON.stringify(latest, null, 2);
+    const rawSummary = recordElement("summary", "", "查看原始记录");
+    rawSummary.appendChild(recordCopyButton(rawText, "复制原始记录"));
+    raw.appendChild(rawSummary);
+    raw.appendChild(recordElement("pre", "", rawText));
     content.appendChild(raw);
     cell.appendChild(content);
     detailRow.appendChild(cell);
