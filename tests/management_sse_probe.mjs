@@ -58,7 +58,7 @@ const parent = {postMessage(message) {
     } else if (message.action === "sse:unsubscribe") {
       post({kind: "response", requestId: message.requestId, ok: true});
     } else if (message.action === "api:get") {
-      const data = {status: {monitoring: "disabled"}, "ui-state": {platform_id: "p", group_id: "g", active_tab: "records"},
+      const data = {status: {monitoring: "disabled"}, "ui-state": {platform_id: "p", group_id: "g", records_platform_id: "p", records_group_id: "g", active_tab: "records"},
         platforms: [], groups: [], rules: [], messages: [row], providers: [],
         settings: {monitoring_groups: [], monitoring_mode: "allowlist"},
         summary: {total_messages: 1, status_counts: {}, recent_24h: {messages: 1, proposed: 0, no_action: 0}}}[message.endpoint];
@@ -74,7 +74,8 @@ post({kind: "context", context: {}});
 const source = await readFile(process.argv[2]);
 await import("data:text/javascript;base64," + source.toString("base64"));
 for (let i = 0; i < 20; i++) await Promise.resolve();
-assert.deepEqual(subscriptions[0].params, {platform_id: "p", group_id: "g"});
+// One all-groups stream feeds the records page (filtered locally) and the overview badge on every tab.
+assert.deepEqual(subscriptions[0].params, {all_groups: "true"});
 assert.equal(elements["live-status"].textContent, "实时 · 已连接");
 assert.equal(elements["live-status"].attributes["data-tone"], "success");
 const before = elements["records-body"].children[0];

@@ -57,9 +57,6 @@ class MuteExecutor:
                                       reason_code="permission_denied" if allowed is False else None)
                 return outcome
             guard = await self._acquire_guard(intent_id, intent["attempt"], reply_options=intent.get("reply_options"))
-            if guard == "recall_expired":
-                await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"], outcome="blocked", reason_code="recall_expired")
-                return "blocked"
             if guard == "earlier_mute_unresolved":
                 await run_sync_safely(self.store.complete_attempt, intent_id, intent["attempt"],
                                       outcome="review", reason_code=guard)

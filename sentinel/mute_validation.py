@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from .action_config import resolve_action_mode, validate_actions
+from .action_config import intent_mode_allowed, validate_actions
 
 
 @dataclass(frozen=True)
@@ -38,15 +38,11 @@ def revalidate_mute(intent, *, rule, max_duration_seconds, default_action_mode=N
     except (TypeError, ValueError):
         return reject("invalid_rule_actions")
     action = next((item for item in actions if item["type"] == "mute"), None)
-    try:
-        mode = resolve_action_mode(action["mode"], default_action_mode) if action else None
-    except ValueError:
-        mode = None
-    if mode is None or intent.get("mode") != mode:
+    if action is None or not intent_mode_allowed(rule.execution_mode, intent.get("mode"), default_action_mode):
         return reject("action_not_allowed")
     duration = intent.get("duration_seconds")
     if (action["duration_mode"] == "cumulative" and awaiting_count
-            and mode == "confirm" and duration is None and intent.get("expires_at") is None):
+            and intent.get("mode") == "confirm" and duration is None and intent.get("expires_at") is None):
         return MuteCheck(True, "awaiting_count")
     if (type(max_duration_seconds) is not int or not 0 < max_duration_seconds <= 2592000
             or type(duration) is not int or not 0 < duration <= max_duration_seconds):

@@ -77,8 +77,9 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
                 called.set()
                 return {"outcome": "succeeded"}
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "rule"}])
+            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low",
+                                                   "reason": "rule"}]}])
         host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue, lock_path=self.directory / "lock")
         with patch("aiohttp.ClientSession", return_value=FakeSession()), patch("sentinel.qq_mute_platform.QQMutePlatform", return_value=FakePlatform()), patch("sentinel.runtime_factory.AstrBotLlmInvoker", return_value=invoke):
             await host.start()
@@ -211,8 +212,8 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs)
             entered.set()
             await release.wait()
-            return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
-                                   tools_call_name=[], tools_call_args=[])
+            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                                   tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
         config = {"monitoring_groups": ["p/g"], "decision_backend": "llm", "llm_provider_id": "m"}
         host = DryRunHost(context=object(), config=config, rules=self.rules, queue=self.queue,
                           lock_path=self.directory / "lock", session_gate=self.session_gate)

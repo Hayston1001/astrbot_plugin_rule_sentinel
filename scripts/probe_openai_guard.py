@@ -26,10 +26,8 @@ def main():
         async def probe():
             rules = [{"rule_id": "r", "text": "no spam", "allowed_actions": ["mute"],
                       "duration_mode": "strict", "severity_seconds": {"low": 60}}]
-            for strategy in ("model", "priority"):
-                request = build_openai_request(model="synthetic", message="example message", strategy=strategy, rules=rules)
-                assert request["tools"] == make_tool_set(strategy).openai_schema()
-            expected = build_openai_request(model="synthetic", message="example message", strategy="model", rules=rules)
+            expected = build_openai_request(model="synthetic", message="example message", rules=rules)
+            assert expected["tools"] == make_tool_set().openai_schema()
             endpoint = "https://example.invalid/v1/chat/completions"
             delivered = []
             def new_http(*, redirect=False, response_factory=None):
@@ -42,7 +40,7 @@ def main():
                         return response_factory()
                     return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 0,
                         "model": "synthetic", "choices": [{"index": 0, "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "NO_ACTION"}}]})
+                        "message": {"role": "assistant", "content": "ok"}}]})
                 guard = SingleRequestGuard(endpoint=endpoint, expected=expected)
                 transport = make_guarded_transport(delegate=httpx.MockTransport(handler), guard=guard,
                                                    api_key="synthetic")

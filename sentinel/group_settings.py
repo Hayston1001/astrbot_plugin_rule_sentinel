@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+from .action_config import DEFAULT_EQUAL_PRIORITY_POLICY
 from .chat_context import validate_context_messages
 
 
@@ -12,7 +13,7 @@ DEFAULT_CHAT_QUERY_ITEMS = ("status", *CHAT_ACTIONS)
 LEGACY_CHAT_FLAGS = ("chat_show_rules", "chat_show_mute_target")
 GROUP_CHAT_ITEM_KEYS = frozenset((*LEGACY_CHAT_FLAGS, "chat_query_items"))
 GROUP_CHAT_KEYS = GROUP_CHAT_ITEM_KEYS | {"chat_query_inherit"}
-GROUP_KEYS = GROUP_CHAT_KEYS | {"model", "strategy", "execution_mode", "protected_policy",
+GROUP_KEYS = GROUP_CHAT_KEYS | {"model", "execution_mode", "protected_policy",
                                 "protected_template", "protected_quote", "llm_reason_language",
                                 "image_enabled", "image_model", "shared_violation_rules", "shared_violation_groups",
                                 "context_messages"}
@@ -176,11 +177,10 @@ def resolve_group_settings(config, platform_id, group_id):
     image_mode = config.get("image_understanding_mode", "direct")
     if image_mode not in ("caption", "direct"):
         raise ValueError("invalid image understanding mode")
-    strategy = group.get("strategy", config.get("rule_selection_strategy", "model"))
     mode = group.get("execution_mode", config.get("default_execution_mode", "execute"))
     context_messages = validate_context_messages(group.get("context_messages", config.get("context_messages", 0)))
     reason_language = validate_reason_language(group.get("llm_reason_language", config.get("llm_reason_language", "")))
-    if strategy not in ("model", "priority") or mode not in ("record", "execute"):
+    if mode not in ("record", "execute"):
         raise ValueError("invalid group processing")
     if backend not in ("", "llm") or not isinstance(model, str):
         raise ValueError("invalid group model")
@@ -191,7 +191,7 @@ def resolve_group_settings(config, platform_id, group_id):
     validate_protected_target_settings({"protected_target_policy": policy,
                                         "protected_target_template": template,
                                         "protected_target_quote": quote})
-    return {"backend": backend, "model": model, "strategy": strategy, "execution_mode": mode,
+    return {"backend": backend, "model": model, "execution_mode": mode,
             "protected_policy": policy, "protected_template": template, "protected_quote": quote,
             "llm_reason_language": reason_language, "image_enabled": image_enabled,
              "image_model": image_model, "image_understanding_mode": image_mode,
@@ -218,6 +218,7 @@ def decision_fingerprint(config, platform_id, group_id):
                "monitoring_groups": config.get("monitoring_groups", []),
                "action_execution_enabled": config.get("action_execution_enabled", False),
                "default_action_mode": config.get("default_action_mode", "auto"),
+               "equal_priority_policy": config.get("equal_priority_policy", DEFAULT_EQUAL_PRIORITY_POLICY),
                "max_duration_seconds": config.get("max_duration_seconds", 2592000)}
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

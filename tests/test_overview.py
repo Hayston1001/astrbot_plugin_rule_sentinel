@@ -67,36 +67,41 @@ class OverviewTests(unittest.TestCase):
             self.add_action("p", "g", f"m{index}")
         self.add_action("p", "g", "m0")
         self.add_action("p2", "g", "m0")
-        for status, mode, action in (("review", "confirm", "mute"), ("unknown", "confirm", "mute"),
-                                     ("pending_auto", "auto", "mute"), ("pending_confirm", "confirm", "reply")):
+        for status, mode, action in (("pending_auto", "auto", "mute"), ("succeeded", "confirm", "mute"),
+                                     ("inactive", "confirm", "recall"), ("failed", "auto", "reply"),
+                                     ("dismissed", "confirm", "reply")):
             self.add_action("p", "g", f"excluded-{status}-{action}", status=status, mode=mode, action=action)
+        self.add_action("p", "g", "extra-reply", action="reply")
+        self.add_action("p", "g", "check-review", status="review")
+        self.add_action("p", "g", "check-unknown", status="unknown")
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("INSERT INTO message_contents (platform_id, group_id, message_id, content) VALUES ('p', 'g', 'm0', ?)", ("x" * 500,))
             db.commit()
-        first = self.service.pending_confirmations("admin", None, None, limit=10, all_groups=True)
-        self.assertEqual((first["total_messages"], first["total_actions"]), (26, 27))
+        first = self.service.pending_reviews("admin", None, None, limit=10, all_groups=True)
+        self.assertEqual((first["total_messages"], first["total_actions"], first["total_checks"]), (29, 28, 2))
         self.assertEqual(len(first["messages"]), 10)
-        second = self.service.pending_confirmations("admin", None, None, before_id=first["next_before_id"], limit=100, all_groups=True)
+        second = self.service.pending_reviews("admin", None, None, before_id=first["next_before_id"], limit=100, all_groups=True)
+        self.assertIsNone(second["next_before_id"])
         items = first["messages"] + second["messages"]
-        self.assertEqual(len(items), 26)
-        self.assertEqual(len({(item["platform_id"], item["group_id"], item["message_id"]) for item in items}), 26)
+        self.assertEqual(len(items), 29)
+        self.assertEqual(len({(item["platform_id"], item["group_id"], item["message_id"]) for item in items}), 29)
         target = next(item for item in items if item["platform_id"] == "p" and item["message_id"] == "m0")
         self.assertEqual(len(target["actions"]), 2)
         self.assertEqual(len(target["content"]), 400)
         self.assertTrue(target["content_truncated"])
         self.assertTrue(all(action["created_at"].startswith("2025-") for action in target["actions"]))
-        scoped = self.service.pending_confirmations("admin", "p2", "g")
+        scoped = self.service.pending_reviews("admin", "p2", "g")
         self.assertEqual((scoped["total_messages"], scoped["total_actions"]), (1, 1))
         self.assertIsNone(scoped["messages"][0]["content"])
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps({"message_retention_days": 0}),))
             db.commit()
-        self.assertIsNone(self.service.pending_confirmations("admin", "p", "g")["messages"][0]["content"])
+        self.assertIsNone(self.service.pending_reviews("admin", "p", "g")["messages"][0]["content"])
         for actor in (None, "", "api_key:key"):
             with self.subTest(actor=actor), self.assertRaises(PermissionError):
-                self.service.pending_confirmations(actor, None, None, all_groups=True)
+                self.service.pending_reviews(actor, None, None, all_groups=True)
         with self.assertRaises(ValueError):
-            self.service.pending_confirmations("admin", "p", "g", limit=0)
+            self.service.pending_reviews("admin", "p", "g", limit=0)
 
 
 if __name__ == "__main__":

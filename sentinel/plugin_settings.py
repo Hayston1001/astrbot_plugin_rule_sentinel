@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from .action_config import DEFAULT_EQUAL_PRIORITY_POLICY, validate_equal_priority_policy
 from .monitoring_policy import MonitoringPolicy
 from .dry_run_queue import SYSTEM_PLATFORM
 
@@ -20,7 +21,7 @@ class Settings:
     failure_threshold: int
     cooldown_seconds: int
     ingress_capacity: int
-    rule_selection_strategy: str
+    equal_priority_policy: str
     llm_no_action_reason_enabled: bool
     image_judging_enabled: bool
     image_understanding_mode: str
@@ -53,7 +54,7 @@ def read_settings(config, *, require_model=True) -> Settings:
     failure_threshold = config.get("model_failure_threshold", 5)
     cooldown = config.get("model_cooldown_seconds", 120)
     ingress_capacity = config.get("ingress_capacity", 256)
-    strategy = config.get("rule_selection_strategy", "model")
+    equal_priority = config.get("equal_priority_policy", DEFAULT_EQUAL_PRIORITY_POLICY)
     no_action_reason = config.get("llm_no_action_reason_enabled", True)
     image_enabled = config.get("image_judging_enabled", False)
     image_mode = config.get("image_understanding_mode", "direct")
@@ -83,8 +84,7 @@ def read_settings(config, *, require_model=True) -> Settings:
         raise ValueError("duration exceeds QQ official limit")
     if backend not in ("", "llm"):
         raise ValueError("invalid decision backend")
-    if strategy not in ("model", "priority"):
-        raise ValueError("invalid rule selection strategy")
+    validate_equal_priority_policy(equal_priority)
     if type(no_action_reason) is not bool:
         raise ValueError("invalid no-action reason setting")
     if type(image_enabled) is not bool or image_mode not in ("caption", "direct"):
@@ -113,6 +113,6 @@ def read_settings(config, *, require_model=True) -> Settings:
     if not isinstance(model, str) or (require_model and (not backend or not model.strip())):
         raise ValueError("explicit decision model is required")
     return Settings(MonitoringPolicy(mode, frozenset(groups)), capacity, backend,
-                    model, duration, concurrency, timeout, global_rate, group_rate, failure_threshold, cooldown, ingress_capacity, strategy,
+                    model, duration, concurrency, timeout, global_rate, group_rate, failure_threshold, cooldown, ingress_capacity, equal_priority,
                     no_action_reason, image_enabled, image_mode, image_provider.strip(), image_caption_prompt,
                     image_max_count, image_max_bytes, image_max_total, image_timeout, diagnostic_capture)

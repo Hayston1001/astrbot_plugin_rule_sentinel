@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from sentinel.group_settings import GROUP_KEYS, decision_fingerprint, resolve_group_settings
 from sentinel.plugin_settings import read_settings
 from sentinel.settings_store import DEFAULTS, SettingsStore, capture_legacy_config, validate_settings
 
@@ -312,6 +313,111 @@ class SettingsStoreTests(unittest.TestCase):
                 with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                     store.save({**migrated, "context_messages": invalid})
 
+    def stored_payload(self, store):
+        with closing(sqlite3.connect(store.path)) as db:
+            return json.loads(db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone()[0])
+
+    def replace_payload(self, store, payload):
+        with closing(sqlite3.connect(store.path)) as db:
+            db.execute("UPDATE dashboard_settings SET payload=? WHERE id=1", (json.dumps(payload),))
+            db.commit()
+
+    def test_equal_priority_policy_default_and_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            config = store.load_or_migrate({})
+            self.assertEqual(config["equal_priority_policy"], "execute_all")
+            self.assertEqual(DEFAULTS["equal_priority_policy"], "execute_all")
+            self.assertNotIn("rule_selection_strategy", config)
+            self.assertEqual(read_settings(config, require_model=False).equal_priority_policy, "execute_all")
+            self.assertEqual(read_settings({k: v for k, v in config.items() if k != "equal_priority_policy"},
+                                           require_model=False).equal_priority_policy, "execute_all")
+            store.save({**config, "equal_priority_policy": "confirm"})
+            self.assertEqual(store.load_or_migrate({})["equal_priority_policy"], "confirm")
+            for invalid in ("model", "priority", "", None, True, 1, ["confirm"]):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaises(ValueError):
+                        store.save({**config, "equal_priority_policy": invalid})
+                    with self.assertRaises(ValueError):
+                        read_settings({**config, "equal_priority_policy": invalid}, require_model=False)
+            self.assertEqual(store.load_or_migrate({})["equal_priority_policy"], "confirm")
+
+    def test_upgrade_cleans_retired_selection_keys_and_uses_one_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            config = store.load_or_migrate({})
+            old = {key: value for key, value in config.items() if key != "equal_priority_policy"}
+            old["rule_selection_strategy"] = "model"
+            old["group_overrides"] = {"p/g": {"strategy": "priority", "execution_mode": "record"}}
+            self.replace_payload(store, old)
+            migrated = store.load_or_migrate({})
+            self.assertEqual(migrated["equal_priority_policy"], "execute_all")
+            self.assertNotIn("rule_selection_strategy", migrated)
+            self.assertEqual(migrated["group_overrides"], {"p/g": {"execution_mode": "record"}})
+            validate_settings(migrated)
+            self.assertEqual(self.stored_payload(store), migrated)
+            self.assertEqual(store.load_or_migrate({}), migrated)
+            self.assertEqual(decision_fingerprint(migrated, "p", "g"),
+                             decision_fingerprint({k: v for k, v in migrated.items() if k != "equal_priority_policy"}, "p", "g"))
+
+    def test_retired_selection_keys_are_removed_even_when_nothing_else_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            config = store.load_or_migrate({})
+            self.replace_payload(store, {**config, "rule_selection_strategy": "priority"})
+            self.assertEqual(store.load_or_migrate({}), config)
+            self.assertNotIn("rule_selection_strategy", self.stored_payload(store))
+            self.replace_payload(store, {**config, "group_overrides": {"p/g": {"strategy": "model"}}})
+            self.assertEqual(store.load_or_migrate({})["group_overrides"], {"p/g": {}})
+            self.assertEqual(self.stored_payload(store)["group_overrides"], {"p/g": {}})
+
+    def test_group_overrides_no_longer_accept_a_strategy(self):
+        self.assertNotIn("strategy", GROUP_KEYS)
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            config = store.load_or_migrate({})
+            with self.assertRaises(ValueError):
+                validate_settings({**config, "group_overrides": {"p/g": {"strategy": "priority"}}})
+            with self.assertRaises(ValueError):
+                validate_settings({**config, "rule_selection_strategy": "priority"})
+            self.assertNotIn("strategy", resolve_group_settings(config, "p", "g"))
+
+    def test_equal_priority_policy_is_part_of_the_decision_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            config = store.load_or_migrate({})
+            first = decision_fingerprint(config, "p", "g")
+            self.assertEqual(first, decision_fingerprint({**config, "equal_priority_policy": "execute_all"}, "p", "g"))
+            self.assertNotEqual(first, decision_fingerprint({**config, "equal_priority_policy": "confirm"}, "p", "g"))
+
+    def test_changing_the_policy_deactivates_waiting_intents(self):
+        from sentinel.dry_run_queue import DryRunQueue
+        from sentinel.rule_store import RuleStore
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "state.sqlite", Path(directory) / "backup")
+            queue, rules = DryRunQueue(store.path), RuleStore(store.path)
+            queue.initialize()
+            rules.initialize()
+            config = {**store.load_or_migrate({}), "action_execution_enabled": True, "monitoring_groups": ["p/g"],
+                      "llm_provider_id": "model"}
+            store.save(config)
+            rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=0, text="rule", enabled=True,
+                       actions=[{"type": "recall"}], execution_mode="auto", modified_by="admin")
+            queue.enqueue(platform_id="p", group_id="g", message_id="m", capacity=10,
+                          payload={"text": "t", "sender_id": "s"})
+            item = queue.claim("p", "g")
+            detail = json.dumps({"proposal": {"action": "recall", "rule_id": "r", "rule_version": 1, "target_sender_id": "s"}})
+            queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", 1),),
+                         settings_fingerprint=decision_fingerprint(config, "p", "g"))
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(db.execute("SELECT status FROM execution_intents").fetchone()[0], "pending_auto")
+            store.save({**config})
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(db.execute("SELECT status FROM execution_intents").fetchone()[0], "pending_auto")
+            store.save({**config, "equal_priority_policy": "confirm"})
+            with closing(sqlite3.connect(store.path)) as db:
+                self.assertEqual(db.execute("SELECT status FROM execution_intents").fetchone()[0], "inactive")
+
     def test_retired_model_migration_disables_affected_groups_and_work(self):
         from sentinel.dry_run_queue import DryRunQueue
         for mode in ("allowlist", "blocklist"):
@@ -337,7 +443,7 @@ class SettingsStoreTests(unittest.TestCase):
                     migrated = store.load_or_migrate({})
                     validate_settings(migrated)
                     self.assertEqual(migrated["llm_provider_id"], "" if global_retired else "previous-llm")
-                    self.assertEqual(migrated["group_overrides"], {"p/old": {"strategy": "priority"}})
+                    self.assertEqual(migrated["group_overrides"], {"p/old": {}})
                     self.assertEqual("p/old" in migrated["monitoring_groups"], mode == "blocklist")
                     self.assertTrue(all(key not in migrated for key in ("jev_provider", "jev_model", "jev_api_key")))
                     with closing(sqlite3.connect(store.path)) as db:

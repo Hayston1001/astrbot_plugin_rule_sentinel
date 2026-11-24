@@ -17,6 +17,19 @@ from sentinel.runtime_factory import GroupDecider, build_runtime
 from sentinel.settings_store import DEFAULTS, SettingsStore, validate_settings
 
 
+def assessment_response(*assessments):
+    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                           tools_call_args=[{"assessments": list(assessments)}], completion_text="")
+
+
+def no_hit(reason="No violation.", rule_id="r"):
+    return assessment_response({"rule_id": rule_id, "outcome": "no_hit", "reason": reason})
+
+
+def hit(reason="Violates the spam rule.", rule_id="r"):
+    return assessment_response({"rule_id": rule_id, "outcome": "hit", "severity": "low", "reason": reason})
+
+
 class GroupSettingsTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -56,16 +69,15 @@ class GroupSettingsTests(unittest.TestCase):
     def test_inheritance_override_and_platform_isolation(self):
         config = copy.deepcopy(self.config)
         config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
-                                               "strategy": "priority", "execution_mode": "record",
+                                               "execution_mode": "record",
                                                "protected_policy": "group_message",
                                                "protected_template": "group {rule_id}", "protected_quote": True}}
         validate_settings(config)
         selected = resolve_group_settings(config, "p1", "g")
         other = resolve_group_settings(config, "p2", "g")
-        self.assertEqual((selected["model"], selected["strategy"], selected["execution_mode"]),
-                         ("local-model", "priority", "record"))
-        self.assertEqual((other["model"], other["strategy"], other["execution_mode"]),
-                         ("global-model", "model", "execute"))
+        self.assertEqual((selected["model"], selected["execution_mode"]), ("local-model", "record"))
+        self.assertEqual((other["model"], other["execution_mode"]), ("global-model", "execute"))
+        self.assertNotIn("strategy", selected)
         self.assertFalse(execution_allowed(config, "p1", "g"))
         self.assertTrue(execution_allowed(config, "p2", "g"))
         config["action_execution_enabled"] = False
@@ -148,17 +160,16 @@ class GroupSettingsTests(unittest.TestCase):
         self.assertEqual(migrated["group_overrides"], {})
         self.assertFalse(migrated["image_judging_enabled"])
         self.assertEqual(migrated["image_max_count"], 9)
-        migrated["group_overrides"]["p1/g"] = {"strategy": "priority"}
+        migrated["group_overrides"]["p1/g"] = {"execution_mode": "record"}
         self.assertEqual(DEFAULTS["group_overrides"], {})
         self.assertEqual(self.store.load_or_migrate({})["group_overrides"], {})
 
-    def test_router_uses_actual_group_model_and_strategy(self):
+    def test_router_uses_actual_group_model(self):
         config = copy.deepcopy(self.config)
-        config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"},
-                                               "strategy": "priority"}}
+        config["group_overrides"] = {"p1/g": {"model": {"backend": "llm", "model": "local-model"}}}
         routes = []
-        def make(backend, model, strategy, reason_language, image_enabled, image_model, image_mode, context_enabled):
-            routes.append((backend, model, strategy, reason_language))
+        def make(backend, model, reason_language, image_enabled, image_model, image_mode, context_enabled):
+            routes.append((backend, model, reason_language))
             async def decide(item):
                 return Decision("no_action", "{}")
             return decide
@@ -166,19 +177,19 @@ class GroupSettingsTests(unittest.TestCase):
         async def run():
             return [await router(SimpleNamespace(platform_id=p, group_id="g")) for p in ("p1", "p2", "p1")]
         results = asyncio.run(run())
-        self.assertEqual(routes, [("llm", "local-model", "priority", ""), ("llm", "global-model", "model", "")])
+        self.assertEqual(routes, [("llm", "local-model", ""), ("llm", "global-model", "")])
         self.assertEqual(results[0].settings_fingerprint, decision_fingerprint(config, "p1", "g"))
         self.assertNotEqual(results[0].settings_fingerprint, results[1].settings_fingerprint)
         runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
-        self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "local-model", "priority").current().strategy, "priority")
-        self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "global-model", "model").current().model, "global-model")
+        self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "local-model").current().model, "local-model")
+        self.assertEqual(runtime.worker.decide.decide.make_decider("llm", "global-model").current().model, "global-model")
 
     def test_reason_language_changes_reach_runtime_and_invalidate_old_decisions(self):
         config = copy.deepcopy(self.config)
         config["llm_reason_language"] = "Japanese"
         validate_settings(config)
         runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
-        decider = runtime.worker.decide.decide.make_decider("llm", "global-model", "model").current()
+        decider = runtime.worker.decide.decide.make_decider("llm", "global-model").current()
         self.assertEqual(decider.invoke.reason_language, "Japanese")
         self.assertNotEqual(decision_fingerprint(config, "p1", "g"), decision_fingerprint(self.config, "p1", "g"))
         self.assertTrue(runtime.admission.settings_match())
@@ -192,7 +203,7 @@ class GroupSettingsTests(unittest.TestCase):
         config = copy.deepcopy(self.config)
         config["llm_no_action_reason_enabled"] = False
         runtime = build_runtime(context=object(), config=config, rules=self.rules, queue=self.queue)
-        router = runtime.worker.decide.decide.make_decider("llm", "global-model", "model")
+        router = runtime.worker.decide.decide.make_decider("llm", "global-model")
         decider = router.current()
         self.assertFalse(decider.no_action_reason_enabled)
         self.assertFalse(decider.invoke.no_action_reason_enabled)
@@ -240,8 +251,7 @@ class GroupSettingsTests(unittest.TestCase):
             async def llm_generate(self, **kwargs):
                 message = json.loads(kwargs["prompt"])["message_untrusted"]
                 calls[message] = kwargs["system_prompt"]
-                return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                       completion_text="NO_ACTION\nNo violation.")
+                return no_hit()
         runtime = build_runtime(context=Context(), config=config, rules=self.rules, queue=self.queue)
         router = runtime.worker.decide.decide
         original = router.make_decider
@@ -258,10 +268,10 @@ class GroupSettingsTests(unittest.TestCase):
         self.assertNotIn("administrator-specified language", calls["message p1 other"])
         self.assertEqual(len(router.deciders), 3)
 
-    def test_disabled_no_action_setting_reaches_both_runtime_strategies(self):
+    def test_disabled_no_action_setting_reaches_every_runtime_route(self):
         config = copy.deepcopy(self.config)
         config["llm_no_action_reason_enabled"] = False
-        config["group_overrides"] = {"p2/g": {"strategy": "priority"}}
+        config["group_overrides"] = {"p2/g": {"model": {"backend": "llm", "model": "local-model"}}}
         self.store.save(config)
         for platform in ("p1", "p2"):
             self.rules.save(platform_id=platform, group_id="g", rule_id="r", expected_version=0,
@@ -274,11 +284,7 @@ class GroupSettingsTests(unittest.TestCase):
             async def llm_generate(self, **kwargs):
                 message = json.loads(kwargs["prompt"])["message_untrusted"]
                 calls[message] = kwargs["system_prompt"]
-                if message == "message p1":
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                           completion_text="NO_ACTION\nUnrequested reason")
-                return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit", "reason": "Unrequested reason"}]}])
+                return no_hit("Unrequested reason")
         runtime = build_runtime(context=Context(), config=config, rules=self.rules, queue=self.queue)
         router = runtime.worker.decide.decide
         original = router.make_decider
@@ -290,7 +296,7 @@ class GroupSettingsTests(unittest.TestCase):
         async def run():
             return await asyncio.gather(*(runtime.worker.drain_group(platform, "g") for platform in ("p1", "p2")))
         self.assertEqual(asyncio.run(run()), [1, 1])
-        self.assertIn("Output only NO_ACTION", calls["message p1"])
+        self.assertIn("omit the reason for no_hit", calls["message p1"])
         self.assertIn("omit the reason for no_hit", calls["message p2"])
         for platform in ("p1", "p2"):
             event = self.queue.list_events(platform_id=platform, group_id="g")[-1]
@@ -302,7 +308,7 @@ class GroupSettingsTests(unittest.TestCase):
 
     def test_reason_switch_is_snapshotted_for_each_ongoing_and_later_decision(self):
         config = copy.deepcopy(self.config)
-        config["group_overrides"] = {"p2/g": {"strategy": "priority"}}
+        config["group_overrides"] = {"p2/g": {"model": {"backend": "llm", "model": "local-model"}}}
         self.store.save(config)
         for platform in ("p1", "p2"):
             self.rules.save(platform_id=platform, group_id="g", rule_id="r", expected_version=0,
@@ -323,11 +329,7 @@ class GroupSettingsTests(unittest.TestCase):
                     if message.endswith("first"):
                         started[platform].set()
                         await release.wait()
-                    if platform == "p1":
-                        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                               completion_text="NO_ACTION\nNo violation.")
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                        tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit", "reason": "No violation."}]}])
+                    return no_hit()
             runtime = build_runtime(context=Context(), config=config, rules=self.rules, queue=self.queue)
             router = runtime.worker.decide.decide
             original = router.make_decider
@@ -353,13 +355,10 @@ class GroupSettingsTests(unittest.TestCase):
                                         capacity=10, payload={"text": f"message {platform} third", "sender_id": "sender"})
             self.assertEqual(await asyncio.gather(*(runtime.worker.drain_group(platform, "g") for platform in ("p1", "p2"))), [1, 1])
         asyncio.run(run())
-        self.assertIn("a concise reason on the next line", calls["message p1 first"])
-        self.assertIn("Output only NO_ACTION", calls["message p1 second"])
-        self.assertIn("a concise reason on the next line", calls["message p1 third"])
-        self.assertIn("reason for each hit or no_hit", calls["message p2 first"])
-        self.assertIn("omit the reason for no_hit", calls["message p2 second"])
-        self.assertIn("reason for each hit or no_hit", calls["message p2 third"])
         for platform in ("p1", "p2"):
+            self.assertIn("reason for each hit or no_hit", calls[f"message {platform} first"])
+            self.assertIn("omit the reason for no_hit", calls[f"message {platform} second"])
+            self.assertIn("reason for each hit or no_hit", calls[f"message {platform} third"])
             events = [event for event in self.queue.list_events(platform_id=platform, group_id="g") if event["status"] != "started"]
             self.assertEqual([event["status"] for event in events], ["no_action"] * 3)
             details = [json.loads(event["detail"]) for event in events]
@@ -371,8 +370,8 @@ class GroupSettingsTests(unittest.TestCase):
     def test_reason_change_during_violation_preserves_reason_and_confirmable_action(self):
         config = copy.deepcopy(self.config)
         self.rules.save(platform_id="p1", group_id="g", rule_id="r", expected_version=0,
-                        text="No spam", enabled=True, modified_by="admin", actions=[{
-                            "type": "mute", "mode": "confirm", "duration_mode": "strict", "severity_seconds": {"low": 60}}])
+                        text="No spam", enabled=True, modified_by="admin", execution_mode="confirm", actions=[{
+                            "type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}}])
         self.queue.enqueue(platform_id="p1", group_id="g", message_id="first", capacity=10,
                            payload={"text": "first message", "sender_id": "sender"})
         async def run():
@@ -383,8 +382,7 @@ class GroupSettingsTests(unittest.TestCase):
                     if message == "first message":
                         started.set()
                         await release.wait()
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                        tools_call_args=[{"rule_id": "r", "violated": True, "severity": "low", "reason": "Violates the spam rule."}])
+                    return hit()
             runtime = build_runtime(context=Context(), config=config, rules=self.rules, queue=self.queue)
             router = runtime.worker.decide.decide
             original = router.make_decider
@@ -425,14 +423,14 @@ class GroupSettingsTests(unittest.TestCase):
                            payload={"text": "private", "sender_id": "sender"}, capacity=10)
         item = self.queue.claim(platform, "g")
         detail = json.dumps({"proposal": {"action": "mute", "rule_id": "r", "rule_version": 1,
-                                        "target_sender_id": "sender", "duration_seconds": 60, "mode": "auto"}})
+                                        "target_sender_id": "sender", "duration_seconds": 60}})
         return item, detail
 
     def test_changed_configuration_during_decision_requires_review(self):
         item, detail = self.enqueue_proposal("p1", "m")
         fingerprint = decision_fingerprint(self.config, "p1", "g")
         changed = copy.deepcopy(self.config)
-        changed["group_overrides"] = {"p1/g": {"strategy": "priority"}}
+        changed["equal_priority_policy"] = "confirm"
         self.store.save(changed)
         self.queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", 1),),
                           settings_fingerprint=fingerprint)
@@ -496,13 +494,13 @@ class GroupSettingsTests(unittest.TestCase):
         for platform, mode in (("p1", "auto"), ("p2", "auto"), ("p3", "confirm"),
                                ("p4", "auto"), ("p5", "auto"), ("p6", "auto")):
             self.rules.save(platform_id=platform, group_id="g", rule_id="r", expected_version=0,
-                            text="rule", enabled=True, modified_by="admin", actions=[{
-                                "type": "mute", "mode": mode, "duration_mode": "strict", "severity_seconds": {"low": 60}}])
+                            text="rule", enabled=True, modified_by="admin", execution_mode=mode, actions=[{
+                                "type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}}])
             self.queue.enqueue(platform_id=platform, group_id="g", message_id="m", capacity=10,
                                payload={"text": "private", "sender_id": "sender"})
             item = self.queue.claim(platform, "g")
             detail = json.dumps({"proposal": {"action": "mute", "rule_id": "r", "rule_version": 1,
-                                               "target_sender_id": "sender", "duration_seconds": 60, "mode": mode}})
+                                               "target_sender_id": "sender", "duration_seconds": 60}})
             self.queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", 1),),
                               settings_fingerprint=decision_fingerprint(config, platform, "g"))
         with closing(sqlite3.connect(self.path)) as db:
@@ -557,9 +555,8 @@ class GroupSettingsTests(unittest.TestCase):
         original = router.make_decider
         seen = []
         async def llm(**kwargs):
-            seen.append(("llm", kwargs["model"], kwargs["strategy"]))
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
+            seen.append(("llm", kwargs["model"]))
+            return hit("spam")
         def make(*route):
             decider = original(*route)
             decider.current().invoke = llm
@@ -568,7 +565,7 @@ class GroupSettingsTests(unittest.TestCase):
         async def run():
             return await asyncio.gather(runtime.worker.drain_group("p1", "g"), runtime.worker.drain_group("p2", "g"))
         self.assertEqual(asyncio.run(run()), [1, 1])
-        self.assertCountEqual(seen, [("llm", "global-model", "model"), ("llm", "local-model", "model")])
+        self.assertCountEqual(seen, [("llm", "global-model"), ("llm", "local-model")])
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT platform_id, status FROM execution_intents ORDER BY platform_id").fetchall(),
                              [("p1", "inactive"), ("p2", "pending_auto")])

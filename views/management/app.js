@@ -150,6 +150,10 @@ let availableGroupsLoading = false;
 let availableGroupSaving = false;
 let availableGroupNamePending = false;
 let selectedScope = {platform_id: "", group_id: ""};
+let recordsScope = {platform_id: "", group_id: ""};
+let recordsStateRevision = 0;
+let recordsScopeTouched = false;
+let liveStarted = false;
 let groupsLoaded = false;
 let groupsLoadFailed = false;
 let runtimeStatus = null;
@@ -163,6 +167,7 @@ let frameworkCaptionProvider = "";
 let stateSave = Promise.resolve();
 let stateRevision = 0;
 let summaryRevision = 0;
+let recordsSummaryRevision = 0;
 let loadedRecords = [];
 let currentFilter = "all";
 let currentExecutionFilter = "all";
@@ -357,7 +362,7 @@ document.addEventListener("click", (event) => {
 });
 
 function updateFilterSummary() {
-  const active = currentFilter !== "all" || currentExecutionFilter !== "all" || recordSort !== "time_desc";
+  const active = currentFilter !== "all" || currentExecutionFilter !== "all" || recordSort !== "time_desc" || !recordsAll();
   el("filter-summary").textContent = active ? "筛选与排序 (已调整)" : "筛选与排序";
 }
 if (typeof window.matchMedia === "function") {
@@ -386,10 +391,10 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   activeTab = name;
   if (remember) rememberTab(name);
   const titles = {
-    records: ["判定记录", "查看所选群的判定和执行结果."],
+    records: ["判定记录", "查看判定和执行结果, 可按群筛选."],
     rules: ["群规则", "管理所选群的规则和处理动作."],
     groups: ["群管理", "管理各群的监控, 名称和处理方式."],
-    status: ["总览", "查看待确认动作, 服务状态和群情况."],
+    status: ["总览", "查看待复核事项, 服务状态和群情况."],
     settings: ["设置", "管理监控, 判定和群规守卫问答."],
   };
   el("page-title").textContent = titles[name][0];
@@ -399,7 +404,7 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   el("records-actions").hidden = name !== "records";
   el("new-rule").hidden = name !== "rules";
   el("overview-customize").hidden = name !== "status";
-  el("group-picker").hidden = name === "groups" || name === "settings";
+  el("group-picker").hidden = name !== "rules";
   for (const tab of TAB_NAMES) {
     el(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     el(`panel-${tab}`).hidden = tab !== name;
@@ -409,8 +414,9 @@ function selectTab(name, {remember = true, updateData = true} = {}) {
   slideTabPanel(el(`panel-${name}`), Math.sign(TAB_NAMES.indexOf(name) - TAB_NAMES.indexOf(previousTab)));
   window.SentinelOverview?.setActive(name === "status");
   if (updateData && tabDataReady) {
-    if (name === "records" || name === "status") startLive(); else stopLive();
-    if (name === "status") loadAllGroupSummaries();
+    ensureLive();
+    if (name === "records" && previousTab !== "records") refreshVisibleRecords();
+    if (name === "status") { loadSummary(); loadAllGroupSummaries(); }
     if (name === "groups" && groupsLoaded) refreshGroupCounts();
   }
 }
@@ -472,9 +478,14 @@ function group() {
   return {...selectedScope};
 }
 function allGroups() { return !selectedScope.platform_id && !selectedScope.group_id; }
-function scopeParams() { return allGroups() ? {all_groups: "true"} : group(); }
+function recordsAll() { return !recordsScope.platform_id && !recordsScope.group_id; }
+function recordsScopeParams() { return recordsAll() ? {all_groups: "true"} : {...recordsScope}; }
 function recordScope(row) {
-  return {platform_id: row.platform_id ?? group().platform_id, group_id: row.group_id ?? group().group_id};
+  return {platform_id: row.platform_id ?? recordsScope.platform_id, group_id: row.group_id ?? recordsScope.group_id};
+}
+function rowInRecordsScope(row) {
+  return recordsAll() || ((row.platform_id ?? recordsScope.platform_id) === recordsScope.platform_id
+    && (row.group_id ?? recordsScope.group_id) === recordsScope.group_id);
 }
 function recordKey(row) { const scope = recordScope(row); return JSON.stringify([scope.platform_id, scope.group_id, row.message_id]); }
 function clearPreview() {
@@ -486,6 +497,63 @@ function clearPreview() {
 function actionModeLabel(mode, globalMode = currentSettings?.default_action_mode) {
   if (mode === "inherit") return `全局(${globalMode === "auto" ? "自动" : globalMode === "confirm" ? "人工确认" : "不可用"})`;
   return mode === "auto" ? "自动" : mode === "confirm" ? "人工确认" : "执行方式未知";
+}
+const modeReasonText = {rule: "规则设置为人工确认", peer_tie: "同级规则命中, 统一人工确认"};
+function ruleConfirmSummary(result) {
+  const items = Array.isArray(result?.actions) ? result.actions : null;
+  if (!items || typeof result.stopped !== "boolean" || !Number.isSafeInteger(result.remaining)) return null;
+  const done = items.filter((item) => item?.status === "succeeded").length;
+  const checking = items.filter((item) => item?.status === "unknown" || item?.status === "review").length;
+  if (result.remaining > 0) return [`已执行 ${done} 项, 其余需复核, 请查看记录.`, "warning"];
+  if (checking) return [`已执行 ${done} 项, 另有 ${checking} 项需复核, 请查看记录.`, "warning"];
+  if (done > 0 && done === items.length) return [`本规则的 ${done} 项动作已执行.`, "success"];
+  if (done > 0) return [`已执行 ${done} 项, 其余未执行, 请查看记录.`, "warning"];
+  return ["本规则的动作均未执行, 请查看记录.", "error"];
+}
+function recordRuleControls(row, ruleId, count, messageId) {
+  const scope = recordScope(row);
+  const holder = recordElement("div", "record-rule-controls");
+  const run = recordElement("button", "secondary record-detail-action", `确认本规则全部 (${count} 项)`);
+  run.type = "button";
+  run.setAttribute("aria-label", `确认规则 ${ruleId} 的全部 ${count} 项待确认动作`);
+  run.addEventListener("click", async () => {
+    run.disabled = true;
+    try {
+      const result = await bridge.apiPost("execute-rule", {...scope, message_id: messageId, rule_id: ruleId});
+      const summary = ruleConfirmSummary(result);
+      if (!summary) throw new Error("invalid result");
+      showFeedback(...summary);
+      refreshVisibleRecords();
+      window.SentinelOverview?.onEvent();
+    } catch (error) { run.disabled = false; feedbackError(error, "规则确认失败"); }
+  });
+  const giveUp = recordElement("button", "secondary record-detail-action", "放弃本规则剩余");
+  giveUp.type = "button";
+  giveUp.setAttribute("aria-label", `放弃规则 ${ruleId} 的剩余 ${count} 项待确认动作`);
+  giveUp.addEventListener("click", () => {
+    const warning = recordElement("p", "record-action-note record-rule-warning",
+      "放弃后该规则的这些动作不会执行, 也不会调用平台, 且无法恢复. 原记录和操作审计仍会保留, 违规计数不受影响.");
+    warning.setAttribute("role", "alert");
+    const confirm = recordElement("button", "secondary record-detail-action record-rule-danger", "确认放弃");
+    confirm.type = "button";
+    const cancel = recordElement("button", "secondary record-detail-action", "取消");
+    cancel.type = "button";
+    holder.replaceChildren(warning, confirm, cancel);
+    cancel.addEventListener("click", () => holder.replaceChildren(run, giveUp));
+    confirm.addEventListener("click", async () => {
+      confirm.disabled = true;
+      try {
+        const result = await bridge.apiPost("review-close", {target: "rule_actions", ...scope, message_id: messageId, rule_id: ruleId});
+        if (!Number.isSafeInteger(result?.closed) || !Number.isSafeInteger(result?.already_closed)) throw new Error("invalid result");
+        showFeedback(result.closed ? "已放弃该规则的剩余动作, 未调用平台." : "该规则的动作已被处理.", result.closed ? "success" : "warning");
+        refreshVisibleRecords();
+        window.SentinelOverview?.onEvent();
+      } catch (error) { confirm.disabled = false; feedbackError(error, "放弃失败"); }
+    });
+  });
+  holder.appendChild(run);
+  holder.appendChild(giveUp);
+  return holder;
 }
 function showError(target, error) {
   target.textContent = `操作失败: ${error.message || "未知错误"}`;
@@ -536,7 +604,7 @@ function clearFieldInvalid(event) {
 function fieldLabelText(field) {
   return field?.closest?.("label")?.firstChild?.textContent?.trim() || "";
 }
-for (const id of ["rule", "version", "priority", "text", "enabled"]) {
+for (const id of ["rule", "version", "priority", "text", "enabled", "rule-execution-mode"]) {
   const onChange = () => {
     clearPreview();
     if (id === "rule") {
@@ -555,6 +623,10 @@ async function restoreUiState() {
     const saved = await bridge.apiGet("ui-state");
     if (!stateRevision && saved && typeof saved.platform_id === "string" && typeof saved.group_id === "string") {
       selectedScope = {platform_id: saved.platform_id, group_id: saved.group_id};
+    }
+    if (!recordsScopeTouched && saved && typeof saved.records_platform_id === "string" && typeof saved.records_group_id === "string"
+        && (!saved.records_platform_id === !saved.records_group_id)) {
+      recordsScope = {platform_id: saved.records_platform_id, group_id: saved.records_group_id};
     }
     if (!tabInteracted) {
       const tab = TAB_NAMES.includes(saved?.active_tab) ? saved.active_tab : "status";
@@ -679,7 +751,8 @@ function recordStatus(row) {
   if (row.execution_summary) {
     const labels = {succeeded: ["全部成功", "success"], partial_failed: ["部分失败", "warning"],
       failed: ["全部失败", "error"], blocked: ["全部无法执行", "warning"], unknown: ["结果不明", "warning"],
-      pending_confirm: ["待确认", "warning"], executing: ["执行中", "warning"], inactive: ["拟执行", "warning"]};
+      pending_confirm: ["待确认", "warning"], executing: ["执行中", "warning"], inactive: ["拟执行", "warning"],
+      dismissed: ["已放弃", "muted"], partial_dismissed: ["部分已放弃", "warning"]};
     return labels[row.execution_summary] || ["状态未知", "warning"];
   }
   const execution = row.execution;
@@ -695,7 +768,7 @@ function recordStatus(row) {
     pending_retry: ["执行中", "warning"], executing: ["执行中", "warning"], succeeded: ["已禁言", "success"],
     blocked: ["无法执行", "warning"], permission_denied: ["无法执行", "warning"], denied: ["无法执行", "warning"],
     unsupported: ["无法执行", "warning"], failed: ["执行失败", "error"], unknown: ["结果不明", "warning"],
-    review: ["需复核", "warning"]};
+    review: ["需复核", "warning"], dismissed: ["已放弃", "muted"]};
   return labels[execution.status] || ["状态未知", "warning"];
 }
 function recordRules(decision, status) {
@@ -723,7 +796,7 @@ const actionNames = {mute: "禁言", reply: "发言", recall: "撤回"};
 const actionStatusNames = {inactive: "未执行", pending_auto: "待执行", pending_confirm: "待确认",
   pending_retry: "等待重试", executing: "执行中", succeeded: "已执行", blocked: "无法执行",
   permission_denied: "权限不足", denied: "权限不足", unsupported: "不支持", failed: "执行失败",
-  unknown: "结果不明", review: "需复核"};
+  unknown: "结果不明", review: "需复核", dismissed: "已放弃"};
 function recordExecutions(row) {
   const items = Array.isArray(row.executions) && row.executions.length ? row.executions : row.execution ? [row.execution] : [];
   return items.filter((item) => item && typeof item === "object" && !Array.isArray(item));
@@ -856,6 +929,17 @@ function recordCopyButton(text, label) {
   });
   return button;
 }
+function violationOwner(count, scope) {
+  const ids = Array.isArray(count.rule_ids) && count.rule_ids.length ? count.rule_ids : [count.rule_id].filter(Boolean);
+  if (ids.length > 1) {
+    const shared = countGroupsFor(currentSettings, scope).find((item) => ids.some((id) => item.rule_ids.includes(id)));
+    if (shared) return shared.name || `共享组 (${shared.rule_ids.join(", ")})`;
+  }
+  return String(count.rule_id || ids[0] || "-");
+}
+function closureTime(value) {
+  return localTimeFor(typeof value === "number" && value > 1e14 ? value / 1000 : value);
+}
 function recordElement(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -904,7 +988,7 @@ function errorDetailText(error) {
 function decisionBucket(row) {
   if (row.status === "no_action" || row.status === "skipped") return row.status;
   const labels = {"全部成功": "succeeded", "部分失败": "partial_failed", "全部失败": "failed", "全部无法执行": "blocked", "拟执行": "proposed", "已禁言": "succeeded", "已撤回": "recalled", "无法执行": "blocked", "无法撤回": "recall_blocked", "已超时不可撤回": "recall_expired", "执行失败": "failed", "撤回失败": "recall_failed",
-    "结果不明": "unknown", "待确认": "pending_confirm"};
+    "结果不明": "unknown", "待确认": "pending_confirm", "已放弃": "dismissed", "部分已放弃": "partial_dismissed"};
   return row.status === "proposed" ? labels[recordStatus(row)[0]] || "other" : "other";
 }
 function executionBucket(row) {
@@ -1030,7 +1114,7 @@ function renderRecords(rows, append = false, update = false) {
     const rowScope = recordScope(row);
     const rowGroup = knownGroups.find((candidate) => groupKey(candidate) === groupKey(rowScope));
     const groupLabel = groupName(rowGroup || rowScope);
-    tr.setAttribute("aria-label", allGroups() ? `查看 ${groupLabel} 的消息 ${messageId} 的详情` : `查看消息 ${messageId} 的详情`);
+    tr.setAttribute("aria-label", recordsAll() ? `查看 ${groupLabel} 的消息 ${messageId} 的详情` : `查看消息 ${messageId} 的详情`);
     for (const [index, value] of [compactTime(timestamp), row.status, reason, rules.text, latency].entries()) {
       const cell = document.createElement("td");
       cell.setAttribute("data-label", ["时间", "结果", "理由摘要", "规则 ID", "模型延迟"][index]);
@@ -1051,7 +1135,7 @@ function renderRecords(rows, append = false, update = false) {
       }
       if (index === 4) cell.className = "number";
       if (index === 0) cell.title = localTime;
-      if (index === 0 && allGroups()) {
+      if (index === 0 && recordsAll()) {
         const label = recordElement("span", "record-group", groupLabel);
         cell.appendChild(label);
       }
@@ -1103,7 +1187,25 @@ function renderRecords(rows, append = false, update = false) {
     const actionSection = recordElement("section", "record-detail-section");
     actionSection.appendChild(recordElement("h3", "", "处理动作"));
     const actionList = recordElement("ol", "record-action-list");
+    const pendingByRule = new Map();
+    for (const action of actions) {
+      if (action.mode !== "confirm" || action.execution?.status !== "pending_confirm") continue;
+      const id = action.execution?.rule_id;
+      if (typeof id === "string" && id) pendingByRule.set(id, (pendingByRule.get(id) || 0) + 1);
+    }
+    const grouped = new Set();
     for (const [index, action] of actions.entries()) {
+      const groupRule = action.execution?.rule_id;
+      if (typeof groupRule === "string" && groupRule && pendingByRule.has(groupRule) && !grouped.has(groupRule)) {
+        grouped.add(groupRule);
+        const group = recordElement("li", "record-action-group");
+        const head = recordElement("div", "record-rule-head");
+        head.appendChild(recordElement("strong", "record-rule-id", `规则: ${groupRule}`));
+        head.appendChild(recordElement("span", "record-detail-muted", `${pendingByRule.get(groupRule)} 项待确认`));
+        group.appendChild(head);
+        group.appendChild(recordRuleControls(row, groupRule, pendingByRule.get(groupRule), messageId));
+        actionList.appendChild(group);
+      }
       const item = recordElement("li", "record-action");
       const heading = recordElement("div", "record-action-heading");
       heading.appendChild(recordElement("strong", "", `${index + 1}. ${describeRecordAction(action)}`));
@@ -1118,6 +1220,16 @@ function renderRecords(rows, append = false, update = false) {
       heading.appendChild(status);
       if (action.mode === "confirm" || action.mode === "auto") heading.appendChild(recordElement("span", "record-detail-muted", action.mode === "confirm" ? "人工确认" : "自动"));
       item.appendChild(heading);
+      const modeReason = action.execution?.mode_reason;
+      if (action.mode === "confirm" && Object.hasOwn(modeReasonText, modeReason)) {
+        item.appendChild(recordElement("p", "record-action-note record-action-mode-reason", `确认原因: ${modeReasonText[modeReason]}`));
+      }
+      const closure = action.execution?.closure;
+      if (state === "dismissed" || closure?.kind === "dismissed") {
+        item.appendChild(recordElement("p", "record-action-note", `已放弃执行, 未调用平台${closure?.closed_by ? ` / 操作人: ${closure.closed_by}` : ""}${closure?.closed_at ? ` / ${closureTime(closure.closed_at)}` : ""}`));
+      } else if (closure?.kind === "checked") {
+        item.appendChild(recordElement("p", "record-action-note", `已标记核查${closure.closed_by ? ` / 操作人: ${closure.closed_by}` : ""}${closure.closed_at ? ` / ${closureTime(closure.closed_at)}` : ""}`));
+      }
       if (failureStates.has(state)) item.appendChild(recordElement("p", "record-action-note", `原因: ${executionFailureReason(action.execution)}`));
       if (action.kind === "mute" && state === "succeeded" && action.execution.expires_at) {
         const applied = action.execution.history?.findLast((attempt) => attempt.status === "succeeded");
@@ -1144,14 +1256,15 @@ function renderRecords(rows, append = false, update = false) {
         button.addEventListener("click", async () => {
           button.disabled = true;
            try {
-             const result = await bridge.apiPost(cumulative ? "confirm-pending-mute" : "execute-action", {intent_id: action.execution.id});
+             const result = await bridge.apiPost("execute-action", {intent_id: action.execution.id});
              const feedback = {succeeded: ["动作已执行.", "success"], failed: ["动作执行失败, 请查看记录.", "error"],
               blocked: ["动作无法执行, 请查看记录.", "error"], permission_denied: ["权限不足, 动作未执行.", "error"],
               unknown: ["执行结果不明, 请核查后再操作.", "warning"], review: ["动作需复核, 请查看记录.", "warning"],
               not_claimed: ["动作未执行, 请查看记录.", "warning"]};
             const [message, tone] = feedback[result?.status] || ["执行状态未知, 请查看记录.", "warning"];
              showFeedback(message, tone);
-             if (cumulative) refreshVisibleRecords();
+             refreshVisibleRecords();
+             window.SentinelOverview?.onEvent();
           } catch (error) { button.disabled = false; feedbackError(error); }
         });
         item.appendChild(button);
@@ -1160,34 +1273,47 @@ function renderRecords(rows, append = false, update = false) {
     }
     actionSection.appendChild(actions.length ? actionList : recordElement("p", "record-detail-muted", "暂无动作信息."));
     process.appendChild(actionSection);
-    if (Number.isSafeInteger(row.violation_count?.ordinal)) {
+    const countUnits = (Array.isArray(row.violation_counts) ? row.violation_counts : row.violation_count ? [row.violation_count] : [])
+      .filter((count) => count && typeof count === "object" && Number.isSafeInteger(count.ordinal));
+    if (countUnits.length) {
       const section = recordElement("section", "record-detail-section");
       const heading = recordElement("div", "record-detail-heading");
       heading.appendChild(recordElement("h3", "", "违规累计"));
       section.appendChild(heading);
-      const showCount = (count) => {
-        const revoked = count.revoked_at_us != null;
-        note.textContent = `${revoked ? "已撤销 / " : ""}计入时第 ${count.ordinal} 次 / 计算时长 ${formatDuration(count.duration_seconds)}`;
-        revoke.hidden = revoked;
-        audit.hidden = !revoked;
-        if (revoked) audit.textContent = `撤销: ${localTimeFor(count.revoked_at_us / 1000)} / ${count.revoked_by}`;
-      };
-      const note = recordElement("p", "");
-      const audit = recordElement("p", "record-detail-muted");
-      const revoke = recordElement("button", "secondary record-detail-action", "撤销");
-      revoke.type = "button";
-      revoke.setAttribute("aria-label", "撤销本次违规计数");
-      revoke.addEventListener("click", async () => {
-        revoke.disabled = true;
-        try {
-          const result = await bridge.apiPost("revoke-violation-count", {...recordScope(row), message_id: messageId});
-          showCount(result);
-          showFeedback("已撤销本次计数, 不会解除禁言.", "success");
-        } catch (error) { revoke.disabled = false; feedbackError(error, "撤销计数失败"); }
-      });
-      heading.appendChild(revoke);
-      showCount(row.violation_count);
-      for (const child of [note, audit]) section.appendChild(child);
+      const many = countUnits.length > 1;
+      for (const count of countUnits) {
+        const owner = violationOwner(count, rowScope);
+        const unit = recordElement("div", many ? "record-count-unit" : "record-count-unit is-single");
+        const head = many ? recordElement("div", "record-detail-heading record-count-unit-head") : heading;
+        if (many) head.appendChild(recordElement("strong", "record-count-owner", `计数归属: ${owner}`));
+        const note = recordElement("p", "");
+        const audit = recordElement("p", "record-detail-muted");
+        const revoke = recordElement("button", "secondary record-detail-action", "撤销");
+        const showCount = (current) => {
+          const revoked = current.revoked_at_us != null;
+          note.textContent = `${revoked ? "已撤销 / " : ""}${many ? "" : `归属: ${owner} / `}计入时第 ${current.ordinal} 次 / 计算时长 ${formatDuration(current.duration_seconds)}`;
+          revoke.hidden = revoked;
+          audit.hidden = !revoked;
+          if (revoked) audit.textContent = `撤销: ${localTimeFor(current.revoked_at_us / 1000)} / ${current.revoked_by}`;
+        };
+        revoke.type = "button";
+        revoke.setAttribute("aria-label", many ? `撤销 ${owner} 的违规计数` : "撤销本次违规计数");
+        revoke.addEventListener("click", async () => {
+          revoke.disabled = true;
+          try {
+            const body = {...recordScope(row), message_id: messageId};
+            if (count.id !== undefined && count.id !== null) body.count_id = count.id;
+            const result = await bridge.apiPost("revoke-violation-count", body);
+            showCount(result);
+            showFeedback("已撤销本次计数, 不会解除禁言.", "success");
+          } catch (error) { revoke.disabled = false; feedbackError(error, "撤销计数失败"); }
+        });
+        head.appendChild(revoke);
+        showCount(count);
+        if (many) unit.appendChild(head);
+        for (const child of [note, audit]) unit.appendChild(child);
+        section.appendChild(unit);
+      }
       process.appendChild(section);
     }
     const events = Array.isArray(row.events) ? row.events : [];
@@ -1245,7 +1371,7 @@ function renderRecords(rows, append = false, update = false) {
     let contentLoading = false;
     let contentLoaded = false;
     const contentScope = recordScope(row);
-    const selectedAtRender = JSON.stringify(group());
+    const selectedAtRender = JSON.stringify(recordsScope);
     const loadOriginal = async () => {
       if (contentLoading || contentLoaded || !expandedMessages.has(key)) return;
       contentLoading = true;
@@ -1255,7 +1381,7 @@ function renderRecords(rows, append = false, update = false) {
       try {
         const result = await bridge.apiGet("message-content", {...contentScope, message_id: messageId});
         await loadingFade;
-        if (!expandedMessages.has(key) || selectedAtRender !== JSON.stringify(group()) || detailRow.isConnected === false) return;
+        if (!expandedMessages.has(key) || selectedAtRender !== JSON.stringify(recordsScope) || detailRow.isConnected === false) return;
         updateVisiblePanel(content, () => {
           original.classList.remove("is-loading");
           original.textContent = typeof result?.content === "string" ? result.content : "原文不可用或已过期.";
@@ -1323,7 +1449,7 @@ function renderRecords(rows, append = false, update = false) {
   const count = loadedRecords.filter(matchesRecord).length;
   el("records-match-count").textContent = `匹配 ${count} 条`;
   el("records-empty").hidden = count > 0;
-  el("records-empty").textContent = loadedRecords.length || recordSearch || currentFilter !== "all" || currentExecutionFilter !== "all" ? "没有匹配的记录" : allGroups() ? "还没有判定记录." : "该群还没有判定记录.";
+  el("records-empty").textContent = loadedRecords.length || recordSearch || currentFilter !== "all" || currentExecutionFilter !== "all" ? "没有匹配的记录" : recordsAll() ? "还没有判定记录." : "该群还没有判定记录.";
   const latest = loadedRecords.filter(matchesRecord).slice().sort((left, right) => {
     const a = Date.parse(left.created_at), b = Date.parse(right.created_at);
     return (Number.isFinite(a) && Number.isFinite(b) ? b - a : 0) || right.id - left.id;
@@ -1334,7 +1460,7 @@ function renderRecords(rows, append = false, update = false) {
 }
 async function loadRecords(reset) {
   const requestRevision = ++recordsRevision;
-  const current = scopeParams();
+  const current = recordsScopeParams();
   if (reset) { recordsCursor = null; loadedRecords = []; }
   el("records-next").disabled = true;
   el("records-status").textContent = "正在读取记录...";
@@ -1358,27 +1484,38 @@ async function loadRecords(reset) {
   } catch (error) { await loadingFade; if (requestRevision === recordsRevision) { showError(el("records-status"), error); fadeInContent(el("records-status")); } }
 }
 el("records-next").addEventListener("click", () => loadRecords(false));
-async function loadSummary() {
-  const current = scopeParams();
-  const requestRevision = ++summaryRevision;
+async function loadRecordsSummary() {
+  const current = recordsScopeParams();
+  const requestRevision = ++recordsSummaryRevision;
   try {
     const summary = await bridge.apiGet("summary", current);
-    if (requestRevision !== summaryRevision) return;
+    if (requestRevision !== recordsSummaryRevision) return;
     el("stat-messages").textContent = String(summary.recent_24h.messages);
     el("stat-proposed").textContent = String(summary.recent_24h.proposed);
-     el("stat-no-action").textContent = String(summary.recent_24h.no_action);
+    el("stat-no-action").textContent = String(summary.recent_24h.no_action);
+    updateFilterCounts(summary);
+    el("summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
+  } catch (error) {
+    if (requestRevision === recordsSummaryRevision) {
+      for (const id of ["stat-messages", "stat-proposed", "stat-no-action"]) el(id).textContent = "—";
+      showError(el("summary-status"), error);
+    }
+  }
+}
+async function loadSummary() {
+  const requestRevision = ++summaryRevision;
+  try {
+    const summary = await bridge.apiGet("summary", {all_groups: "true"});
+    if (requestRevision !== summaryRevision) return;
      el("overview-messages").textContent = String(summary.recent_24h.messages);
      el("overview-proposed").textContent = String(summary.recent_24h.proposed);
      el("overview-no-action").textContent = String(summary.recent_24h.no_action);
      el("overview-failed").textContent = Number.isSafeInteger(summary.recent_24h.failed) ? String(summary.recent_24h.failed) : "—";
      el("overview-review").textContent = Number.isSafeInteger(summary.recent_24h.review) ? String(summary.recent_24h.review) : "—";
-     updateFilterCounts(summary);
-     el("summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
      el("overview-summary-status").textContent = summary.truncated ? `统计仅覆盖最近 ${summary.limit} 条消息.` : "";
   } catch (error) {
     if (requestRevision === summaryRevision) {
-      for (const id of ["stat-messages", "stat-proposed", "stat-no-action", "overview-messages", "overview-proposed", "overview-no-action", "overview-failed", "overview-review"]) el(id).textContent = "—";
-      showError(el("summary-status"), error);
+      for (const id of ["overview-messages", "overview-proposed", "overview-no-action", "overview-failed", "overview-review"]) el(id).textContent = "—";
       el("overview-summary-status").textContent = "近期统计不可用.";
     }
   }
@@ -1386,19 +1523,19 @@ async function loadSummary() {
 function scheduleRefresh() {
   if (refreshTimer !== null) clearTimeout(refreshTimer);
   refreshTimer = null;
-  if (liveMode !== "polling" || document.hidden || !["records", "status"].includes(activeTab)) return;
+  if (liveMode !== "polling" || document.hidden) return;
   refreshTimer = setTimeout(async () => {
     refreshTimer = null;
     try {
       if (activeTab === "status") await Promise.all([window.SentinelOverview?.refresh(), loadSummary(), loadAllGroupSummaries()]);
-      else await refreshVisibleRecords();
+      else await Promise.all([window.SentinelOverview?.refresh(), activeTab === "records" ? refreshVisibleRecords() : null]);
     } finally { scheduleRefresh(); }
   }, 5000);
   if (typeof refreshTimer?.unref === "function") refreshTimer.unref();
 }
 async function refreshVisibleRecords() {
   if (autoRefreshing || document.hidden || activeTab !== "records") return;
-  const current = scopeParams();
+  const current = recordsScopeParams();
   autoRefreshing = true;
   streamChanges.clear();
   const requestRevision = ++recordsRevision;
@@ -1435,7 +1572,7 @@ async function refreshVisibleRecords() {
     renderRecords(loadedRecords);
     el("records-next").disabled = lastPage.length < 50;
     el("records-status").textContent = `已加载 ${loadedRecords.length} 条消息.`;
-    await loadSummary();
+    await loadRecordsSummary();
   } catch (error) { if (requestRevision === recordsRevision) showError(el("records-status"), error); }
   finally {
     autoRefreshing = false;
@@ -1446,9 +1583,18 @@ function stopLive() {
   streamGeneration++;
   for (const timer of [refreshTimer, streamWatchdog, reconnectTimer, retryTimer, summaryTimer]) if (timer !== null) clearTimeout(timer);
   refreshTimer = streamWatchdog = reconnectTimer = retryTimer = summaryTimer = null;
+  liveStarted = false;
   const id = streamId;
   streamId = null;
   if (id !== null && bridge.unsubscribeSSE) bridge.unsubscribeSSE(id).catch(() => {});
+}
+function ensureLive() {
+  if (liveStarted || reconnectTimer !== null || retryTimer !== null || liveMode === "polling") return;
+  startLive();
+}
+function resyncVisible() {
+  window.SentinelOverview?.refresh();
+  if (activeTab === "records") refreshVisibleRecords();
 }
 function liveState(mode) {
   liveMode = mode;
@@ -1477,8 +1623,8 @@ function checkLive(generation) {
 }
 function startLive(retry = false) {
   stopLive();
-  if (document.hidden || !["records", "status"].includes(activeTab)) return;
-  const scope = scopeParams();
+  if (document.hidden) return;
+  liveStarted = true;
   liveState(retry ? "polling" : "connecting");
   if (retry) scheduleRefresh();
   const generation = streamGeneration;
@@ -1488,26 +1634,29 @@ function startLive(retry = false) {
   if (typeof streamWatchdog?.unref === "function") streamWatchdog.unref();
   if (typeof bridge.subscribeSSE !== "function") { failLive(generation); return; }
   bridge.subscribeSSE("events", {
-    onOpen() { if (generation === streamGeneration && !retry) { liveState("connected"); if (activeTab === "status") window.SentinelOverview?.refresh(); else refreshVisibleRecords(); } },
+    onOpen() { if (generation === streamGeneration && !retry) { liveState("connected"); resyncVisible(); } },
     onError() { failLive(generation); },
     onMessage(event) {
       if (generation !== streamGeneration) return;
       streamLastSeen = Date.now();
-      if (retry && liveMode === "polling") { liveState("connected"); scheduleRefresh(); if (activeTab === "status") window.SentinelOverview?.refresh(); else refreshVisibleRecords(); }
+      if (retry && liveMode === "polling") { liveState("connected"); scheduleRefresh(); resyncVisible(); }
       if (Date.now() - connectedAt >= 45000) streamFailures = 0;
       if (event.eventType === "ping") return;
       if (event.eventType === "resync") {
-        if (activeTab === "status") { window.SentinelOverview?.refresh(); loadSummary(); loadAllGroupSummaries(); return; }
+        window.SentinelOverview?.refresh();
+        if (activeTab === "status") { loadSummary(); loadAllGroupSummaries(); return; }
+        if (activeTab !== "records") return;
         if (autoRefreshing) resyncPending = true; else refreshVisibleRecords();
         return;
       }
       const row = event.parsed;
       if (!row || typeof row.message_id !== "string" || !Number.isSafeInteger(row.id)) return;
+      window.SentinelOverview?.onEvent();
       if (activeTab === "status") {
-        window.SentinelOverview?.onEvent();
         if (summaryTimer === null) summaryTimer = setTimeout(() => { summaryTimer = null; loadSummary(); loadAllGroupSummaries(); }, 1000);
         return;
       }
+      if (activeTab !== "records" || !rowInRecordsScope(row)) return;
       const key = recordKey(row);
       const index = loadedRecords.findIndex((item) => recordKey(item) === key);
       if (index >= 0 && (loadedRecords[index].id > row.id || (loadedRecords[index].id === row.id &&
@@ -1520,15 +1669,15 @@ function startLive(retry = false) {
       if (autoRefreshing) streamChanges.set(key, row);
       renderRecords([row], false, true);
       el("records-status").textContent = `已加载 ${loadedRecords.length} 条消息.`;
-      if (summaryTimer === null) summaryTimer = setTimeout(() => { summaryTimer = null; loadSummary(); }, 1000);
+      if (summaryTimer === null) summaryTimer = setTimeout(() => { summaryTimer = null; loadRecordsSummary(); }, 1000);
     },
-  }, scope).then((id) => {
+  }, {all_groups: "true"}).then((id) => {
     if (generation !== streamGeneration) { bridge.unsubscribeSSE(id).catch(() => {}); return; }
     streamId = id;
   }).catch(() => failLive(generation));
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { stopLive(); recordsRevision++; summaryRevision++; }
+  if (document.hidden) { stopLive(); recordsRevision++; recordsSummaryRevision++; summaryRevision++; }
   else { streamFailures = 0; startLive(); refreshVisibleRecords(); }
 });
 window.addEventListener("pagehide", stopLive);
@@ -1571,11 +1720,11 @@ function stopActionFollow(finish = false) {
   if (finish) window.scrollTo?.({top: follow.destination, behavior: "instant"});
   for (const animation of follow.animations) animation.cancel();
 }
-function updateActionColor(row, type, mode, template, duration, mappingRows) {
+function updateActionColor(row, type, template, duration, mappingRows) {
   const levels = type.value === "mute" && duration.value === "strict"
     ? mappingRows.map(({levelInput}) => levelInput.value.normalize("NFC").trim()).filter(Boolean).sort() : [];
   const text = type.value === "reply" ? template.value.normalize("NFC") : "";
-  const key = JSON.stringify([type.value, mode.value, levels, text]);
+  const key = JSON.stringify([type.value, levels, text]);
   let hash = 2166136261;
   for (let index = 0; index < key.length; index++) hash = Math.imul(hash ^ key.charCodeAt(index), 16777619);
   const ranges = {reply: [205, 80], mute: [4, 74], recall: [108, 74]};
@@ -1797,12 +1946,6 @@ function addAction(initial = {}) {
   type.className = "action-type";
   for (const [value, label] of [["", "请选择动作"], ["reply", "发言"], ["mute", "禁言"], ["recall", "撤回"]]) addOption(type, value, label);
   type.value = initial.type || "";
-  const mode = document.createElement("select");
-  mode.id = `action-mode-${actionId}`;
-  mode.className = "action-mode";
-  const inheritOption = addOption(mode, "inherit", actionModeLabel("inherit"));
-  for (const [value, label] of [["auto", "自动"], ["confirm", "人工确认"]]) addOption(mode, value, label);
-  mode.value = initial.mode || "inherit";
   const templateLabel = document.createElement("label");
   templateLabel.textContent = "发言模板";
   const template = document.createElement("textarea");
@@ -1848,7 +1991,7 @@ function addAction(initial = {}) {
   const mapping = document.createElement("div");
   mapping.className = "severity-list";
   const mappingRows = [];
-  const updateColor = () => updateActionColor(row, type, mode, template, duration, mappingRows);
+  const updateColor = () => updateActionColor(row, type, template, duration, mappingRows);
   function addSeverity(level = "", seconds = "", savedUnit) {
     const entry = document.createElement("div");
     entry.className = "severity-row";
@@ -1991,7 +2134,7 @@ function addAction(initial = {}) {
     setPanelVisibility(cumulative, type.value === "mute" && duration.value === "cumulative", {animate});
     sharedCount.update(type.value === "mute", duration.value === "cumulative");
   };
-  for (const field of [type, mode, template, duration]) {
+  for (const field of [type, template, duration]) {
     field.addEventListener("input", clearPreview);
     field.addEventListener("change", () => { clearPreview(); updateVisibility(); updateColor(); });
   }
@@ -2018,7 +2161,7 @@ function addAction(initial = {}) {
   order.appendChild(number);
   header.appendChild(order);
   header.appendChild(handle);
-  const item = {row, type, mode, inheritOption, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows,
+  const item = {row, type, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows,
     initial, number, handle, up, down, updateVisibility};
   remove.addEventListener("click", () => { stopActionFollow(); cancelActionDrag(); actionRows = actionRows.filter((entry) => entry !== item); row.remove(); updateActionOrder(); clearPreview(); });
   up.addEventListener("click", () => { cancelActionDrag(); moveAction(item, actionRows.indexOf(item) - 1, up, true); });
@@ -2031,17 +2174,12 @@ function addAction(initial = {}) {
     moveAction(item, actionRows.indexOf(item) + (event.key === "ArrowUp" ? -1 : 1), handle, true);
   });
   row.appendChild(header);
-  for (const child of [type, mode, templateLabel, durationLabel, mappingLabel, replyFields, remove, up, down]) row.appendChild(child);
+  for (const child of [type, templateLabel, durationLabel, mappingLabel, replyFields, remove, up, down]) row.appendChild(child);
   const typeLabel = document.createElement("label");
   typeLabel.className = "action-type-label";
   typeLabel.setAttribute("for", type.id);
   typeLabel.textContent = "动作类型";
-  const modeLabel = document.createElement("label");
-  modeLabel.className = "action-mode-label";
-  modeLabel.setAttribute("for", mode.id);
-  modeLabel.textContent = "执行方式";
-   row.appendChild(typeLabel);
-   row.appendChild(modeLabel);
+  row.appendChild(typeLabel);
   row.appendChild(cumulative);
   row.appendChild(sharedCount.node);
   el("action-list").appendChild(row);
@@ -2060,9 +2198,9 @@ function setActions(actions) {
   for (const action of actions) addAction(action);
 }
 function readActions() {
-  return actionRows.map(({type, mode, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows, initial}) => {
+  return actionRows.map(({type, template, replyControls, duration, mappingRows, windowDays, windowUnit, tierRows, initial}) => {
     if (!["reply", "mute", "recall"].includes(type.value)) { type.focus?.(); throw new Error("请选择动作类型"); }
-    const result = {type: type.value, mode: mode.value};
+    const result = {type: type.value};
     if (type.value === "reply") {
       result.template = template.value;
       for (const {option, select} of replyControls) {
@@ -2147,7 +2285,7 @@ el("preview").addEventListener("click", async () => {
     const priority = Number(el("priority").value);
     if (!Number.isInteger(priority) || priority < -2147483648 || priority > 2147483647) throw new Error("优先级必须是 32 位整数");
     const fields = {...scope, rule_id: el("rule").value.trim(), expected_version: version,
-      text: el("text").value, priority, enabled: el("enabled").checked, actions: readActions()};
+      text: el("text").value, priority, enabled: el("enabled").checked, execution_mode: el("rule-execution-mode").value, actions: readActions()};
     if (ruleTogglesInFlight.has(JSON.stringify([scope.platform_id, scope.group_id, fields.rule_id]))) throw new Error("规则状态正在保存, 请稍后重试");
     el("save-status").textContent = "正在保存规则...";
     const received = await bridge.apiPost("rules/preview", fields);
@@ -2228,6 +2366,17 @@ function updateGroupOptions() {
   addOption(select, "", "所有群");
   for (const item of knownGroups) addOption(select, groupKey(item), groupName(item));
   select.value = knownGroups.some((item) => groupKey(item) === groupKey(current)) ? groupKey(current) : "";
+  updateRecordsGroupOptions();
+}
+function updateRecordsGroupOptions() {
+  const select = el("records-group-filter");
+  select.textContent = "";
+  addOption(select, "", "全部群");
+  for (const item of knownGroups) addOption(select, groupKey(item), groupName(item));
+  if (!recordsAll() && !knownGroups.some((item) => groupKey(item) === groupKey(recordsScope))) {
+    addOption(select, groupKey(recordsScope), `未命名群 (${recordsScope.group_id})`);
+  }
+  select.value = recordsAll() ? "" : groupKey(recordsScope);
 }
 function currentGroupInfo() {
   const scope = group();
@@ -2448,7 +2597,7 @@ async function refreshGroupCounts() {
 function renderAllGroupStatus() {
   const body = el("groups-status-body");
   body.textContent = "";
-  const displayedGroups = allGroups() ? knownGroups : knownGroups.filter((item) => groupKey(item) === groupKey(group()));
+  const displayedGroups = knownGroups;
   el("status-groups-total").textContent = groupsLoaded ? String(displayedGroups.length) : "-";
   el("status-groups-enabled").textContent = groupsLoaded && currentSettings
     ? String(displayedGroups.filter((item) => groupMonitoring(item) === true).length) : "-";
@@ -2518,6 +2667,88 @@ function lookupMissingGroupName() {
   attemptedAutomaticNames.add(key);
   changeGroupName("group-name", {automatic: true});
 }
+function rememberRecordsFilter() {
+  const selection = {records_platform_id: recordsScope.platform_id, records_group_id: recordsScope.group_id};
+  const currentRevision = ++recordsStateRevision;
+  stateSave = stateSave.catch(() => {}).then(async () => {
+    if (currentRevision !== recordsStateRevision) return;
+    try {
+      await bridge.apiPost("ui-state", selection);
+    } catch {
+      if (currentRevision === recordsStateRevision) showFeedback("无法保存群筛选.", "error");
+    }
+  });
+}
+function resetRecordsView() {
+  recordsRevision += 1;
+  recordsSummaryRevision += 1;
+  loadedRecords = [];
+  streamChanges.clear();
+  recordNodes.clear();
+  recordsCursor = null;
+  el("records-next").disabled = true;
+  el("records-body").textContent = "";
+  el("records-match-count").textContent = "匹配 0 条";
+  el("records-status").textContent = "";
+  el("records-empty").hidden = true;
+  el("summary-status").textContent = "";
+  for (const id of ["stat-messages", "stat-proposed", "stat-no-action", "stat-latency"]) el(id).textContent = "—";
+  updateFilterCounts(null);
+}
+function applyRecordsScope(next, {remember = true, clearExpanded = true} = {}) {
+  recordsScope = {platform_id: next.platform_id, group_id: next.group_id};
+  recordsScopeTouched = true;
+  updateRecordsGroupOptions();
+  updateFilterSummary();
+  if (clearExpanded) expandedMessages.clear();
+  resetRecordsView();
+  if (remember) rememberRecordsFilter();
+  return Promise.all([loadRecords(true), loadRecordsSummary()]);
+}
+el("records-group-filter").addEventListener("change", () => {
+  const value = el("records-group-filter").value;
+  let next = {platform_id: "", group_id: ""};
+  if (value) {
+    try { const [platform_id, group_id] = JSON.parse(value); next = {platform_id, group_id}; } catch { return; }
+  }
+  return applyRecordsScope(next);
+});
+let locatedTimer = null;
+async function jumpToRecord(target) {
+  if (!target || typeof target.message_id !== "string") return;
+  const next = {platform_id: target.platform_id, group_id: target.group_id};
+  const key = JSON.stringify([next.platform_id, next.group_id, target.message_id]);
+  selectTab("records", {updateData: false});
+  ensureLive();
+  if (groupKey(next) !== groupKey(recordsScope)) await applyRecordsScope(next);
+  else await refreshVisibleRecords();
+  let guard = 0;
+  while (!loadedRecords.some((row) => recordKey(row) === key) && !el("records-next").disabled && guard++ < 10) await loadRecords(false);
+  const row = loadedRecords.find((item) => recordKey(item) === key);
+  if (!row) {
+    showFeedback("没有找到这条消息的判定记录, 它可能已被清理, 可继续加载更早的记录再查找.", "warning");
+    return;
+  }
+  if (!matchesRecord(row)) {
+    currentFilter = currentExecutionFilter = "all";
+    recordSearch = "";
+    el("records-search").value = "";
+    el("records-decision-filter").value = "all";
+    el("records-execution-filter").value = "all";
+    updateFilterSummary();
+    renderRecords(loadedRecords);
+  }
+  const nodes = recordNodes.get(key);
+  if (!nodes) return;
+  if (!expandedMessages.has(key)) nodes[0].click();
+  nodes[0].scrollIntoView?.({behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center"});
+  nodes[0].focus?.({preventScroll: true});
+  if (locatedTimer !== null) clearTimeout(locatedTimer);
+  for (const stale of document.querySelectorAll?.("tr.record.is-located") || []) stale.classList.remove("is-located");
+  nodes[0].classList.add("is-located");
+  locatedTimer = setTimeout(() => { nodes[0].classList.remove("is-located"); locatedTimer = null; }, 2600);
+}
+window.SentinelOverview?.setJump(jumpToRecord);
 function rememberGroup() {
   const selection = group();
   const currentRevision = ++stateRevision;
@@ -2533,7 +2764,6 @@ function rememberGroup() {
 }
 function describeRuleAction(action) {
   const name = Object.hasOwn(actionNames, action.type) ? actionNames[action.type] : String(action.type ?? "未知动作");
-  const mode = actionModeLabel(action.mode);
   let extra = "";
   if (action.type === "mute") {
     if (action.duration_mode === "strict") {
@@ -2548,7 +2778,7 @@ function describeRuleAction(action) {
      const options = replyOptions.map((option) => replyOptionLabel(option, action[option.key]));
      extra = ` / ${options.join(" / ")} (${action.template ?? ""})`;
    }
-  return `${name} / ${mode}${extra}`;
+  return `${name}${extra}`;
 }
 function detachedRuleDraft() {
   return editingScope !== null && !expandedRuleCard && !el("rule-form").hidden;
@@ -2750,7 +2980,7 @@ async function loadCurrentRules() {
         el("rule-list-status").textContent = "正在更新规则状态...";
         try {
           const fields = {...current, rule_id: rule.rule_id, expected_version: originalVersion,
-            text: rule.text, priority: rule.priority ?? 0, enabled, actions: rule.actions || []};
+            text: rule.text, priority: rule.priority ?? 0, enabled, execution_mode: rule.execution_mode ?? "inherit", actions: rule.actions || []};
           const preview = await bridge.apiPost("rules/preview", fields);
           const saved = await bridge.apiPost("rules/confirm", preview);
           if (editingScope === JSON.stringify(current) && el("rule").value === rule.rule_id &&
@@ -2788,8 +3018,13 @@ async function loadCurrentRules() {
       configTitle.textContent = "当前配置";
       const priority = document.createElement("span");
       priority.textContent = `优先级: ${rule.priority ?? 0}`;
+      const ruleMode = document.createElement("span");
+      ruleMode.className = "rule-mode-label";
+      const updateRuleMode = () => { ruleMode.textContent = `执行方式: ${actionModeLabel(rule.execution_mode)}`; };
+      updateRuleMode(); ruleDescriptions.push(updateRuleMode);
       configHeading.appendChild(configTitle);
       configHeading.appendChild(priority);
+      configHeading.appendChild(ruleMode);
       currentConfig.appendChild(configHeading);
       const actions = Array.isArray(rule.actions) ? rule.actions : [];
       if (actions.length) {
@@ -2864,6 +3099,7 @@ async function loadCurrentRules() {
             el("new-rule-enabled").hidden = true;
             el("version").value = String(rule.version);
             el("priority").value = String(rule.priority ?? 0);
+            el("rule-execution-mode").value = ["auto", "confirm", "inherit"].includes(rule.execution_mode) ? rule.execution_mode : "inherit";
             el("text").value = rule.text;
             setActions(rule.actions || []);
             el("enabled").checked = rule.enabled;
@@ -2918,9 +3154,11 @@ async function loadCurrentRules() {
                 header.appendChild(time);
                 const info = document.createElement("div");
                 info.className = "history-entry-meta";
-                for (const value of [`操作人: ${entry.modified_by || "-"}`, entry.enabled ? "已启用" : "已停用", `优先级: ${entry.priority ?? 0}`]) {
+                for (const value of [`操作人: ${entry.modified_by || "-"}`, entry.enabled ? "已启用" : "已停用", `优先级: ${entry.priority ?? 0}`,
+                  () => `执行方式: ${actionModeLabel(entry.execution_mode)}`]) {
                   const item = document.createElement("span");
-                  item.textContent = value;
+                  if (typeof value === "function") { const update = () => { item.textContent = value(); }; update(); ruleDescriptions.push(update); }
+                  else item.textContent = value;
                   info.appendChild(item);
                 }
                 const body = document.createElement("div");
@@ -3010,8 +3248,6 @@ function selectCurrentGroup(remember = true) {
   cancelActionDrag();
   resetRuleDetail();
   parkRuleEditor();
-  stopLive();
-  streamFailures = 0;
   el("group-name-status").textContent = "";
   updateGroupNameControls();
   showGroupOverrides();
@@ -3023,35 +3259,18 @@ function selectCurrentGroup(remember = true) {
       ? "草稿仍未保存." : "当前群已更改, 请返回原群后保存.";
   }
   outputRevision += 1;
-  recordsRevision += 1;
   rulesRevision += 1;
-  summaryRevision += 1;
-  loadedRecords = [];
-  streamChanges.clear();
-  recordNodes.clear();
-  if (remember) expandedMessages.clear();
-  recordsCursor = null;
   auditCursor = 0;
   auditScope = "";
   el("audit-next").disabled = true;
-  el("records-next").disabled = true;
   el("output").textContent = "";
-  el("records-body").textContent = "";
-  el("records-match-count").textContent = "匹配 0 条";
   el("current-rules").textContent = "";
-  el("records-status").textContent = "";
-  el("records-empty").hidden = true;
-  el("summary-status").textContent = "";
   if (remember) el("rule-list-status").textContent = "";
-  for (const id of ["stat-messages", "stat-proposed", "stat-no-action", "stat-latency"]) el(id).textContent = "—";
-  updateFilterCounts(null);
   if (remember) rememberGroup();
   updateGroupMonitoring();
   if (!allGroups()) lookupMissingGroupName();
   renderAllGroupStatus();
-  window.SentinelOverview?.setScope(scopeParams());
-  startLive();
-  return Promise.all([loadCurrentRules(), loadRecords(true), loadSummary()]);
+  return loadCurrentRules();
 }
 el("group-select").addEventListener("change", () => {
   const item = knownGroups.find((entry) => groupKey(entry) === el("group-select").value);
@@ -3181,7 +3400,11 @@ el("add-group").addEventListener("click", async () => {
   } catch { showFeedback("无法添加群, 请重试.", "error"); }
   finally { availableGroupSaving = false; renderAvailableGroups(); }
 });
-el("refresh-group").addEventListener("click", () => { scheduleRefresh(); return selectCurrentGroup(false); });
+el("refresh-group").addEventListener("click", () => {
+  scheduleRefresh();
+  resetRecordsView();
+  return Promise.all([loadRecords(true), loadRecordsSummary()]);
+});
 el("new-rule").addEventListener("click", () => {
   if (detachedRuleDraft()) { closeRuleEditor(); return; }
   resetRuleDetail();
@@ -3200,6 +3423,7 @@ el("new-rule").addEventListener("click", () => {
   el("new-rule-enabled").hidden = false;
   el("version").value = "0";
   el("priority").value = "0";
+  el("rule-execution-mode").value = "inherit";
   el("text").value = "";
   setActions([]);
   el("enabled").checked = false;
@@ -3213,7 +3437,7 @@ el("rule-group").addEventListener("change", () => {
   editingScope = JSON.stringify(chosen ? {platform_id: chosen.platform_id, group_id: chosen.group_id} : {platform_id: "", group_id: ""});
   clearPreview();
 });
-const settingKeys = ["action_execution_enabled", "monitoring_mode", "rule_selection_strategy", "default_execution_mode", "default_action_mode", "message_retention_days", "audit_retention_days", "diagnostic_capture", "llm_reason_language", "context_messages", "llm_no_action_reason_enabled",
+const settingKeys = ["action_execution_enabled", "monitoring_mode", "equal_priority_policy", "default_execution_mode", "default_action_mode", "message_retention_days", "audit_retention_days", "diagnostic_capture", "llm_reason_language", "context_messages", "llm_no_action_reason_enabled",
   "reply_quote", "reply_mention_sender", "protected_target_policy", "protected_target_template", "protected_target_quote",
   "llm_provider_id", "max_duration_seconds", "model_concurrency", "model_timeout_seconds",
   "global_rate_per_minute", "group_rate_per_minute", "model_failure_threshold", "model_cooldown_seconds",
@@ -3232,7 +3456,7 @@ let modelChoiceEdited = false;
 const chatQueryKeys = ["status", "rules", "mute", "mute_target", "recall", "reply"];
 const chatQueryField = (scope, item) => el(`${scope}-chat-query-${item.replace("_", "-")}`);
 const defaultGroupChatItems = ["status", "mute", "recall", "reply"];
-const groupDraftFields = ["group-model-backend", "group-model", "group-strategy", "group-execution", "group-reason-language-mode", "group-reason-language",
+const groupDraftFields = ["group-model-backend", "group-model", "group-execution", "group-reason-language-mode", "group-reason-language",
   "group-context-mode", "group-context-messages",
   "group-protected-policy", "group-protected-quote", "group-protected-template",
   "group-image-enabled", "group-image-model"];
@@ -3540,10 +3764,8 @@ function updateGroupSettingsHints(animate = false) {
   const inheritedPolicy = settings.protected_target_policy === "group_message" ? "在群里发言" : "不发言";
   const inheritedQuote = settings.protected_target_quote === true ? "引用" : "不引用";
   const model = settings.decision_backend === "llm" ? settings.llm_provider_id || "未选择模型" : "未选择模型";
-  const strategy = settings.rule_selection_strategy === "priority" ? "按规则优先级" : settings.rule_selection_strategy === "model" ? "模型选择" : "不可用";
   const groupExecution = settings.default_execution_mode === "record" ? "只记录" : settings.default_execution_mode === "execute" ? "允许执行" : "不可用";
   el("group-model-inherit").textContent = `全局(${model})`;
-  el("group-strategy-inherit").textContent = `全局(${strategy})`;
   el("group-reason-language-inherit").textContent = `全局(${settings.llm_reason_language?.trim() || "自动选择"})`;
   setPanelVisibility(el("group-reason-language-label"), el("group-reason-language-mode").value === "custom", {animate});
   const inheritedContext = Number(settings.context_messages ?? 0);
@@ -3564,7 +3786,7 @@ function updateGroupSettingsHints(animate = false) {
   else if (!runtimeStatus) reason = "无法读取运行状态, 请查看运行状态.";
   else if (runtimeStatus.monitoring !== "dry_run") reason = "监控未启动, 请查看运行状态.";
   else if (runtimeStatus?.action_execution_available === false) reason = "真实执行当前不可用, 请查看运行状态.";
-  el("group-execution-state").textContent = reason || "允许执行时, 每项动作按规则中的自动或人工确认设置处理.";
+  el("group-execution-state").textContent = reason || "允许执行时, 按各规则的自动或人工确认设置处理.";
   const policy = el("group-protected-policy").value || settings.protected_target_policy || "exempt";
   el("group-protected-state").textContent = policy === "group_message"
     ? `满足上方条件时, 使用下方的发言内容和引用设置.${reason ? ` ${reason}` : ""}`
@@ -3582,13 +3804,11 @@ function showGroupOverrides() {
   const overrides = currentSettings?.group_overrides?.[`${scope.platform_id}/${scope.group_id}`] || {};
   const draft = groupDrafts.get(groupKey(scope));
   const model = settings?.decision_backend === "llm" ? settings.llm_provider_id : "";
-  const strategy = settings?.rule_selection_strategy === "priority" ? "按规则优先级" : "模型选择";
   const execution = settings?.default_execution_mode === "record" ? "只记录" : "允许执行";
-  el("group-defaults").textContent = settings ? `全局默认: ${model || "未选择模型"} / ${strategy} / ${execution}` : "全局设置不可用.";
+  el("group-defaults").textContent = settings ? `全局默认: ${model || "未选择模型"} / ${execution}` : "全局设置不可用.";
   el("group-settings-save").disabled = groupSettingsSaving || !settings || !scope.platform_id || !scope.group_id;
   el("group-model-backend").value = overrides.model?.backend || "";
   el("group-model").value = overrides.model?.model || "";
-  el("group-strategy").value = overrides.strategy || "";
   const hasContext = Object.hasOwn(overrides, "context_messages");
   el("group-context-mode").value = hasContext ? "custom" : "";
   el("group-context-messages").value = String(hasContext ? overrides.context_messages : settings?.context_messages ?? 0);
@@ -4093,7 +4313,7 @@ function readGroupOverrides() {
     if (!model) throw new Error("请填写模型名称");
     overrides.model = {backend, model};
   }
-  for (const [id, key] of [["group-strategy", "strategy"], ["group-execution", "execution_mode"],
+  for (const [id, key] of [["group-execution", "execution_mode"],
     ["group-protected-policy", "protected_policy"]]) if (el(id).value) overrides[key] = el(id).value;
   if (el("group-image-enabled").value) overrides.image_enabled = el("group-image-enabled").value === "true";
   const imageModel = el("group-image-model").value.trim();
@@ -4336,12 +4556,12 @@ function showSettings(settings, submitted = null, {resetBaseline = true} = {}) {
   if (settings.quick_start_completed === true) quickStartCompleted = true;
   else if (quickStartCompleted === null && settings.quick_start_completed === false) quickStartCompleted = false;
   if (!submitted) quickStartStateFailed = typeof settings.quick_start_completed !== "boolean";
-  if (previousActionMode && previousActionMode !== settings.default_action_mode && pending?.fields?.actions?.some((action) => action.mode === "inherit")) {
+  if (previousActionMode && previousActionMode !== settings.default_action_mode && pending?.fields?.execution_mode === "inherit") {
     clearPreview();
     el("save-status").textContent = "全局动作执行方式已更改, 请重新确认.";
   }
+  el("rule-execution-inherit").textContent = actionModeLabel("inherit");
   for (const item of actionRows) {
-    item.inheritOption.textContent = actionModeLabel("inherit");
     for (const {option, inherited} of item.replyControls) inherited.textContent = replyOptionLabel(option);
   }
   for (const update of ruleDescriptions) update();
@@ -4784,7 +5004,12 @@ async function initializeSelection() {
   if (platforms.status === "rejected" || groups.status === "rejected") {
     el("selection-status").textContent = "平台或群列表读取失败, 请刷新页面重试.";
   }
-  return selectCurrentGroup(false);
+  window.SentinelOverview?.setGroups(knownGroups.map((item) => ({...item, name: groupName(item)})));
+  const rulesLoad = selectCurrentGroup(false);
+  const initial = Promise.all([applyRecordsScope(recordsScope, {remember: false, clearExpanded: false}), loadSummary()]);
+  ensureLive();
+  const [rules] = await Promise.all([rulesLoad, initial]);
+  return rules;
 }
 tabDataReady = true;
 await Promise.all([initializeSelection(), loadSettings(), statusRead]);

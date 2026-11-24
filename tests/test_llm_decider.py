@@ -43,6 +43,22 @@ class Prefetcher:
         return self.entry
 
 
+def assess(*items, **extra):
+    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                           tools_call_args=[{"assessments": list(items)}], **extra)
+
+
+def hit(rule_id="r", severity="low", reason="spam", **extra):
+    item = {"rule_id": rule_id, "outcome": "hit", "reason": reason}
+    if severity is not None:
+        item["severity"] = severity
+    return {**item, **extra}
+
+
+def no_hit(rule_id="r", **extra):
+    return {"rule_id": rule_id, "outcome": "no_hit", **extra}
+
+
 class ImageInvoker:
     def __init__(self, *, caption=None, caption_error=None):
         self.calls = []
@@ -52,8 +68,7 @@ class ImageInvoker:
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-            tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
+        return assess(hit())
 
     async def caption(self, **kwargs):
         self.caption_calls.append(kwargs)
@@ -83,16 +98,25 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
             status, detail = db.execute("SELECT status, detail FROM dry_run_events ORDER BY id DESC LIMIT 1").fetchone()
             return status, json.loads(detail)
 
+    def decider(self, invoke, **kwargs):
+        return LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue, **kwargs)
+
+    async def run_worker(self, invoke, **kwargs):
+        worker = DryRunWorker(self.queue, self.decider(invoke, **kwargs), concurrency=1, timeout_seconds=2)
+        await worker.drain_group("p", "g")
+        return self.audit()
+
+    def add_rule(self, rule_id, **extra):
+        self.rules.save(**{**self.rule, "rule_id": rule_id, "expected_version": 0, **extra})
+
     async def test_snapshot_and_model_reason_are_audited(self):
         async def invoke(**kwargs):
             self.assertNotIn("modified_by", kwargs["rules"][0])
             self.assertNotIn("group_id", kwargs["rules"][0])
+            self.assertNotIn("strategy", kwargs)
             self.rules.save(**{**self.rule, "expected_version": 1, "enabled": False})
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "PRIVATE\u200b  MESSAGE"}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(hit(reason="PRIVATE\u200b  MESSAGE"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "review")
         self.assertEqual(audit["review_reason"], "rule_snapshot_changed")
         self.assertEqual(audit["proposal"]["rule_version"], 1)
@@ -103,26 +127,34 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_rule_is_rejected(self):
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "other", "severity": "low", "reason": "reason"}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(hit("other"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "rejected")
-        self.assertEqual(audit["validation"], "unknown_rule")
+        self.assertEqual(audit["validation"], "invalid_assessment")
+
+    async def test_invalid_outcome_and_extra_fields_are_rejected(self):
+        for item, validation in (({"rule_id": "r", "outcome": "maybe"}, "invalid_assessment"),
+                                 ({"rule_id": "r", "outcome": "no_hit", "severity": "low"}, "invalid_assessment_fields"),
+                                 ({"rule_id": "r", "outcome": "no_hit", "reason": " "}, "invalid_reason"),
+                                 ({"rule_id": "r", "outcome": "review", "action": "mute"}, "invalid_assessment_fields")):
+            with self.subTest(item=item):
+                async def invoke(**kwargs):
+                    return assess(item)
+                item_row = self.queue.claim("p", "g")
+                result = await self.decider(invoke)(item_row)
+                self.assertEqual(result.status, "rejected")
+                self.assertEqual(json.loads(result.detail)["validation"], validation)
+                self.queue.enqueue(platform_id="p", group_id="g", message_id=f"again-{validation}-{item['outcome']}",
+                                   capacity=10, payload={"text": "private message", "sender_id": "u"})
+                self.queue.finish(item_row, status=result.status, detail=result.detail)
 
     async def test_invalid_duration_keeps_the_rejected_value_and_limit(self):
         self.rules.save(**{**self.rule, "expected_version": 1, "duration_mode": "autonomous",
                            "severity_seconds": {}})
         async def invoke(**kwargs):
             self.assertEqual(kwargs["rules"][0]["duration_limit_seconds"], 300)
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "r", "duration_seconds": "600",
-                                  "reason": "spam" * 200}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
-            max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(hit(severity=None, duration_seconds="600", reason="spam" * 200))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "rejected")
         self.assertEqual(audit["validation"], "invalid_duration")
         self.assertEqual(audit["rejected_call"]["duration_seconds"],
@@ -137,14 +169,11 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         async def invoke(**kwargs):
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
                 tools_call_args=[{"x": 1}], raw_completion={"finish_reason": "tool_calls"})
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
-            max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "rejected")
-        self.assertEqual(audit["response_status"], "unsupported_tool_or_arguments")
+        self.assertEqual(audit["response_status"], "invalid_assessment_tool")
         self.assertEqual(audit["detail_version"], 1)
-        self.assertEqual(audit["prompt_version"], 1)
+        self.assertEqual(audit["prompt_version"], 2)
         self.assertRegex(audit["input_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(audit["protocol"]["tool_names"], ["wrong_tool"])
         self.assertEqual(audit["protocol"]["argument_types"], ["dict"])
@@ -157,35 +186,45 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
                 tools_call_args=[{"x": "y" * 5000}], raw_completion={"finish_reason": "tool_calls"},
                 completion_text="Z" * 2000)
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm",
-            max_duration_seconds=300, queue=self.queue, diagnostic_capture=True),
-            concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+        status, audit = await self.run_worker(invoke, diagnostic_capture=True)
         self.assertEqual(status, "rejected")
         self.assertIn("y" * 100, audit["raw_tool_arguments"])
         self.assertTrue(audit["raw_tool_arguments"].endswith("...[truncated]"))
         self.assertEqual(len(audit["raw_completion_text"]), 1000)
 
+    async def test_legacy_text_and_single_action_protocols_are_rejected(self):
+        responses = (
+            SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
+                            completion_text="NO_ACTION"),
+            SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
+                            tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}]),
+        )
+        for response in responses:
+            with self.subTest(tools=response.tools_call_name):
+                async def invoke(**kwargs):
+                    return response
+                item = self.queue.claim("p", "g")
+                result = await self.decider(invoke)(item)
+                self.assertEqual(result.status, "rejected")
+                self.assertNotIn("proposal", json.loads(result.detail))
+                self.queue.finish(item, status=result.status, detail=result.detail)
+                self.queue.enqueue(platform_id="p", group_id="g", message_id=f"x{len(response.tools_call_name)}",
+                                   capacity=10, payload={"text": "private message", "sender_id": "u"})
+
     async def test_forbidden_action_is_rejected_without_mute_fallback(self):
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"action": "reply", "violated": True, "rule_id": "r", "reason": "rule violated"}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(hit(action="reply", reason="rule violated"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "rejected")
-        self.assertEqual(audit["response_status"], "invalid_verdict")
+        self.assertEqual(audit["validation"], "invalid_parameters")
         self.assertNotIn("proposal", audit)
 
     async def test_language_is_audited_and_summary_reason_is_preserved(self):
         self.rules.save(**{**self.rule, "expected_version": 1, "text": "禁止发布广告"})
         async def invoke(**kwargs):
             self.assertEqual(kwargs["language"], "zh")
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "发布了推广内容"}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue), concurrency=1, timeout_seconds=2)
+            return assess(hit(reason="发布了推广内容"))
+        worker = DryRunWorker(self.queue, self.decider(invoke), concurrency=1, timeout_seconds=2)
         await worker.drain_group("p", "g")
         events = self.queue.list_events(platform_id="p", group_id="g")
         self.assertEqual([event["status"] for event in events], ["started", "proposed"])
@@ -198,8 +237,7 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
     async def test_language_is_audited_when_model_call_fails(self):
         async def invoke(**kwargs):
             raise RuntimeError("private provider error")
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue), concurrency=1, timeout_seconds=2)
+        worker = DryRunWorker(self.queue, self.decider(invoke), concurrency=1, timeout_seconds=2)
         await worker.drain_group("p", "g")
         events = self.queue.list_events(platform_id="p", group_id="g")
         self.assertEqual([event["status"] for event in events], ["started", "failed"])
@@ -210,154 +248,189 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["error"], {"type": "RuntimeError"})
         self.assertNotIn("private provider error", events[1]["detail"])
 
-    async def test_no_action_reason_is_recorded_as_returned(self):
-        for text, expected in (("NO_ACTION\nNo rule was violated.", "No rule was violated."),
-                               ("NO_ACTION\nPRIVATE\u200b  MESSAGE", "PRIVATE\u200b  MESSAGE"),
-                               ("NO_ACTION", None)):
-            with self.subTest(text=text):
-                self.queue.enqueue(platform_id="p", group_id="g", message_id=text, capacity=10,
-                                   payload={"text": "private message", "sender_id": "u"})
+    async def test_no_hit_reasons_are_recorded_per_rule(self):
+        self.add_rule("r2")
+        async def invoke(**kwargs):
+            return assess(no_hit("r", reason="No spam."), no_hit("r2", reason="private message"))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "no_action")
+        self.assertEqual(audit["reason"], "r: No spam.; r2: private message")
+        self.assertEqual(audit["matched_rules"], [])
+        self.assertNotIn("proposals", audit)
+        self.assertNotIn("reason_redacted", audit)
+
+    async def test_no_hit_reason_is_recorded_as_returned_and_optional(self):
+        for index, (extra, expected) in enumerate((({"reason": "No rule was violated."}, "r: No rule was violated."),
+                                                   ({"reason": "PRIVATE\u200b  MESSAGE"}, "r: PRIVATE\u200b  MESSAGE"),
+                                                   ({}, None))):
+            with self.subTest(extra=extra):
                 item = self.queue.claim("p", "g")
-                if item.message_id == "m":
-                    self.queue.finish(item, status="skipped", detail="setup")
-                    item = self.queue.claim("p", "g")
                 async def invoke(**kwargs):
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                           completion_text=text)
-                result = await LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue)(item)
+                    return assess(no_hit(**extra))
+                result = await self.decider(invoke)(item)
                 detail = json.loads(result.detail)
                 self.assertEqual(result.status, "no_action")
                 self.assertEqual(detail.get("reason"), expected)
                 self.assertNotIn("reason_redacted", detail)
                 self.queue.finish(item, status=result.status, detail=result.detail, rule_versions=result.rule_versions)
+                self.queue.enqueue(platform_id="p", group_id="g", message_id=f"next-{index}", capacity=10,
+                                   payload={"text": "private message", "sender_id": "u"})
 
-    async def test_priority_no_action_reasons_are_recorded_per_rule(self):
-        self.rules.save(**{**self.rule, "rule_id": "r2"})
+    async def test_disabled_no_action_reasons_are_discarded(self):
+        item = self.queue.claim("p", "g")
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit", "reason": "No spam."},
-                                                   {"rule_id": "r2", "outcome": "no_hit", "reason": "private message"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
-        self.assertEqual(status, "no_action")
-        self.assertEqual(audit["reason"], "r: No spam.; r2: private message")
-        self.assertNotIn("reason_redacted", audit)
-
-    async def test_disabled_no_action_reasons_are_discarded_for_both_strategies(self):
-        for index, strategy in enumerate(("model", "priority")):
-            with self.subTest(strategy=strategy):
-                if index:
-                    self.queue.enqueue(platform_id="p", group_id="g", message_id="second", capacity=10,
-                                       payload={"text": "private message", "sender_id": "u"})
-                item = self.queue.claim("p", "g")
-                async def invoke(**kwargs):
-                    if strategy == "model":
-                        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                               completion_text="NO_ACTION\nUnrequested reason")
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                        tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit", "reason": "Unrequested reason"}]}])
-                result = await LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue,
-                                          strategy=strategy, no_action_reason_enabled=False)(item)
-                detail = json.loads(result.detail)
-                self.assertEqual(result.status, "no_action")
-                self.assertFalse(detail["no_action_reason_enabled"])
-                self.assertNotIn("reason", detail)
-                self.assertNotIn("Unrequested reason", result.detail)
-                self.assertTrue(self.queue.finish(item, status=result.status, detail=result.detail, rule_versions=result.rule_versions))
+            return assess(no_hit(reason="Unrequested reason"))
+        result = await self.decider(invoke, no_action_reason_enabled=False)(item)
+        detail = json.loads(result.detail)
+        self.assertEqual(result.status, "no_action")
+        self.assertFalse(detail["no_action_reason_enabled"])
+        self.assertNotIn("reason", detail)
+        self.assertNotIn("Unrequested reason", result.detail)
+        self.assertTrue(self.queue.finish(item, status=result.status, detail=result.detail, rule_versions=result.rule_versions))
 
     async def test_disabled_no_action_reason_keeps_violation_reason(self):
-        for index, strategy in enumerate(("model", "priority")):
-            with self.subTest(strategy=strategy):
-                if index:
-                    self.queue.enqueue(platform_id="p", group_id="g", message_id="second", capacity=10,
-                                       payload={"text": "private message", "sender_id": "u"})
-                item = self.queue.claim("p", "g")
-                async def invoke(**kwargs):
-                    call = {"rule_id": "r", "severity": "low", "reason": "The rule was violated"}
-                    if strategy == "model":
-                        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                                               tools_call_args=[{**call, "violated": True}])
-                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                                           tools_call_args=[{"assessments": [{**call, "outcome": "hit"}]}])
-                result = await LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300, queue=self.queue,
-                                          strategy=strategy, no_action_reason_enabled=False)(item)
-                self.assertEqual(result.status, "proposed")
-                self.assertEqual(json.loads(result.detail)["proposal"]["reason"], "The rule was violated")
-                self.assertTrue(self.queue.finish(item, status=result.status, detail=result.detail, rule_versions=result.rule_versions))
-
-    async def test_priority_batch_selects_highest_matched_rule(self):
-        self.rules.save(**{**self.rule, "rule_id": "r2", "priority": 10})
+        item = self.queue.claim("p", "g")
         async def invoke(**kwargs):
-            self.assertEqual(kwargs["strategy"], "priority")
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [
-                    {"rule_id": "r", "outcome": "hit", "severity": "low", "reason": "reason one"},
-                    {"rule_id": "r2", "outcome": "hit", "severity": "low", "reason": "reason two"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(hit(reason="The rule was violated"))
+        result = await self.decider(invoke, no_action_reason_enabled=False)(item)
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(json.loads(result.detail)["proposal"]["reason"], "The rule was violated")
+
+    async def test_review_outcome_requires_manual_review(self):
+        async def invoke(**kwargs):
+            return assess({"rule_id": "r", "outcome": "review", "reason": "unclear"})
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "review")
+        self.assertEqual(audit["review_reason"], "uncertain_assessment")
+        self.assertEqual(audit["assessments"], [{"rule_id": "r", "violated": None}])
+        self.assertNotIn("proposals", audit)
+
+    async def test_single_hit_records_one_proposal_and_defaults(self):
+        async def invoke(**kwargs):
+            return assess(hit())
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "proposed")
+        self.assertEqual(audit["selected_rules"], ["r"])
+        self.assertEqual(audit["matched_rules"], ["r"])
+        self.assertEqual(audit["proposals"], [audit["proposal"]])
+        self.assertEqual(audit["equal_priority_policy"], "execute_all")
+        self.assertIs(audit["peer_tie"], False)
+        self.assertEqual(audit["selection_reason"], "highest_priority_match")
+        self.assertNotIn("strategy", audit)
+
+    async def test_higher_priority_hit_wins_alone(self):
+        self.add_rule("r2", priority=10)
+        async def invoke(**kwargs):
+            return assess(hit("r", reason="reason one"), hit("r2", reason="reason two"))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "proposed")
+        self.assertEqual(audit["matched_rules"], ["r", "r2"])
+        self.assertEqual(audit["selected_rules"], ["r2"])
+        self.assertEqual([proposal["rule_id"] for proposal in audit["proposals"]], ["r2"])
         self.assertEqual(audit["proposal"]["rule_id"], "r2")
         self.assertEqual(audit["selection_reason"], "highest_priority_match")
+        self.assertIs(audit["peer_tie"], False)
 
-    async def test_priority_uses_rule_language_and_preserves_summary(self):
+    async def test_equal_priority_execute_all_proposes_every_tied_rule(self):
+        self.add_rule("r2")
+        async def invoke(**kwargs):
+            return assess(hit("r", reason="reason one"), hit("r2", reason="reason two"))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "proposed")
+        self.assertEqual(audit["selected_rules"], ["r", "r2"])
+        self.assertEqual([proposal["rule_id"] for proposal in audit["proposals"]], ["r", "r2"])
+        self.assertEqual([proposal["reason"] for proposal in audit["proposals"]], ["reason one", "reason two"])
+        self.assertEqual(audit["proposal"], audit["proposals"][0])
+        self.assertEqual(audit["selection_reason"], "equal_priority_match")
+        self.assertEqual(audit["equal_priority_policy"], "execute_all")
+        self.assertIs(audit["peer_tie"], False)
+        self.assertNotIn("review_reason", audit)
+
+    async def test_equal_priority_confirm_flags_the_tie(self):
+        self.add_rule("r2")
+        async def invoke(**kwargs):
+            return assess(hit("r2", reason="reason two"), hit("r", reason="reason one"))
+        status, audit = await self.run_worker(invoke, equal_priority_policy="confirm")
+        self.assertEqual(status, "proposed")
+        self.assertEqual(audit["selected_rules"], ["r2", "r"])
+        self.assertEqual(audit["proposal"]["rule_id"], "r2")
+        self.assertEqual(audit["proposal"], audit["proposals"][0])
+        self.assertEqual(audit["equal_priority_policy"], "confirm")
+        self.assertIs(audit["peer_tie"], True)
+        self.assertEqual(audit["selection_reason"], "equal_priority_match")
+
+    async def test_confirm_policy_does_not_flag_a_single_winner(self):
+        self.add_rule("r2", priority=5)
+        async def invoke(**kwargs):
+            return assess(hit("r"), hit("r2"))
+        status, audit = await self.run_worker(invoke, equal_priority_policy="confirm")
+        self.assertEqual(status, "proposed")
+        self.assertEqual(audit["selected_rules"], ["r2"])
+        self.assertIs(audit["peer_tie"], False)
+
+    async def test_invalid_equal_priority_policy_is_rejected_at_construction(self):
+        for policy in ("model", "priority", "", None, True):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                self.decider(lambda **kwargs: None, equal_priority_policy=policy)
+        with self.assertRaises(TypeError):
+            LlmDecider(self.rules, lambda **kwargs: None, model="llm", max_duration_seconds=300,
+                       queue=self.queue, strategy="priority")
+
+    async def test_rule_language_selects_prompt_and_preserves_summary(self):
         self.rules.save(**{**self.rule, "expected_version": 1, "text": "禁止发布广告"})
         async def invoke(**kwargs):
-            self.assertEqual((kwargs["strategy"], kwargs["language"]), ("priority", "zh"))
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [
-                    {"rule_id": "r", "outcome": "hit", "severity": "low", "reason": "发布了推广内容"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
+            self.assertEqual(kwargs["language"], "zh")
+            self.assertNotIn("strategy", kwargs)
+            return assess(hit(reason="发布了推广内容"))
+        worker = DryRunWorker(self.queue, self.decider(invoke), concurrency=1, timeout_seconds=2)
         await worker.drain_group("p", "g")
         events = self.queue.list_events(platform_id="p", group_id="g")
         self.assertEqual([json.loads(event["detail"])["prompt_language"] for event in events], ["zh", "zh"])
         self.assertEqual(json.loads(events[-1]["detail"])["proposal"]["reason"], "发布了推广内容")
 
-    async def test_priority_tie_and_incomplete_batch_require_review(self):
-        self.rules.save(**{**self.rule, "rule_id": "r2"})
+    async def test_missing_rule_requires_review(self):
+        self.add_rule("r2", priority=10)
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [
-                    {"rule_id": "r", "outcome": "hit", "severity": "low", "reason": "reason one"},
-                    {"rule_id": "r2", "outcome": "hit", "severity": "low", "reason": "reason two"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(no_hit("r"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "review")
-        self.assertEqual(audit["selection_reason"], "equal_priority_conflict")
-        self.assertNotIn("proposal", audit)
+        self.assertEqual(audit["selection_reason"], "incomplete_or_duplicate_assessment")
+        self.assertEqual(audit["review_reason"], "incomplete_or_duplicate_assessment")
 
-    async def test_priority_missing_rule_requires_review(self):
-        self.rules.save(**{**self.rule, "rule_id": "r2", "priority": 10})
+    async def test_duplicate_rule_requires_review(self):
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess(no_hit("r"), no_hit("r"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "review")
         self.assertEqual(audit["selection_reason"], "incomplete_or_duplicate_assessment")
 
-    async def test_priority_does_not_ignore_invalid_lower_priority_hit(self):
-        self.rules.save(**{**self.rule, "rule_id": "r2", "priority": 10})
+    async def test_uncertain_lower_priority_rule_blocks_the_higher_hit(self):
+        self.add_rule("r2", priority=10)
         async def invoke(**kwargs):
-            return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
-                tools_call_args=[{"assessments": [
-                    {"rule_id": "r", "outcome": "hit", "severity": "unknown", "reason": "reason one"},
-                    {"rule_id": "r2", "outcome": "hit", "severity": "low", "reason": "reason two"}]}])
-        worker = DryRunWorker(self.queue, LlmDecider(self.rules, invoke, model="llm", max_duration_seconds=300,
-            queue=self.queue, strategy="priority"), concurrency=1, timeout_seconds=2)
-        await worker.drain_group("p", "g")
-        status, audit = self.audit()
+            return assess({"rule_id": "r", "outcome": "review"}, hit("r2"))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "review")
+        self.assertEqual(audit["selection_reason"], "uncertain_assessment")
+        self.assertNotIn("proposals", audit)
+
+    async def test_does_not_ignore_invalid_lower_priority_hit(self):
+        self.add_rule("r2", priority=10)
+        async def invoke(**kwargs):
+            return assess(hit("r", severity="unknown", reason="reason one"), hit("r2", reason="reason two"))
+        status, audit = await self.run_worker(invoke)
         self.assertEqual(status, "rejected")
         self.assertEqual(audit["validation"], "invalid_severity")
         self.assertNotIn("proposal", audit)
+        self.assertNotIn("proposals", audit)
+
+    async def test_invalid_tied_hit_rejects_the_whole_decision(self):
+        self.add_rule("r2")
+        async def invoke(**kwargs):
+            return assess(hit("r"), hit("r2", severity="unknown"))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "rejected")
+        self.assertEqual(audit["validation"], "invalid_severity")
+        self.assertNotIn("proposals", audit)
 
     def enqueue_image(self, text=""):
         with closing(sqlite3.connect(self.path)) as db:

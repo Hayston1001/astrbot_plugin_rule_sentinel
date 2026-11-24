@@ -30,10 +30,10 @@ class ActionDefaultTests(unittest.TestCase):
                            action_execution_enabled=True, decision_backend="llm", llm_provider_id="model")
         self.settings.save(self.config)
         self.fields = {"platform_id": "p", "group_id": "g", "rule_id": "r", "expected_version": 0,
-                       "text": "rule", "enabled": True, "actions": [
-                           {"type": "reply", "mode": "inherit", "template": "notice"},
-                           {"type": "mute", "mode": "inherit", "duration_mode": "strict", "severity_seconds": {"low": 60}},
-                           {"type": "recall", "mode": "confirm"}]}
+                       "text": "rule", "enabled": True, "execution_mode": "inherit", "actions": [
+                           {"type": "reply", "template": "notice"},
+                           {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                           {"type": "recall"}]}
 
     def test_mode_validation_and_migration(self):
         self.assertEqual(resolve_action_mode("inherit", "confirm"), "confirm")
@@ -42,6 +42,8 @@ class ActionDefaultTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 resolve_action_mode("inherit", value)
         self.assertEqual(validate_actions(self.fields["actions"]), self.fields["actions"])
+        legacy = [{**action, "mode": "inherit"} for action in self.fields["actions"]]
+        self.assertEqual(validate_actions(legacy), self.fields["actions"])
         with self.assertRaises(ValueError):
             validate_settings({**self.config, "default_action_mode": "invalid"})
         old = copy.deepcopy(self.config)
@@ -65,7 +67,10 @@ class ActionDefaultTests(unittest.TestCase):
         fresh = manager.preview("admin", self.fields)
         self.assertEqual(fresh["default_action_mode"], "confirm")
         saved = manager.confirm("admin", fresh)
-        self.assertEqual([item["mode"] for item in saved.actions], ["inherit", "inherit", "confirm"])
+        self.assertEqual(saved.execution_mode, "inherit")
+        self.assertTrue(all("mode" not in item for item in saved.actions))
+        explicit = manager.preview("admin", {**self.fields, "rule_id": "other", "execution_mode": "confirm"})
+        self.assertNotIn("default_action_mode", explicit)
 
     def record_plan(self):
         self.rules.save(**self.fields, modified_by="admin")
@@ -77,7 +82,7 @@ class ActionDefaultTests(unittest.TestCase):
                                            "target_sender_id": "sender", "duration_seconds": 60}})
         return item, detail
 
-    def test_inherited_modes_resolve_for_each_action_and_recheck(self):
+    def test_inherited_mode_resolves_once_for_every_action_and_recheck(self):
         self.config["default_action_mode"] = "confirm"
         self.settings.save(self.config)
         item, detail = self.record_plan()
@@ -88,14 +93,34 @@ class ActionDefaultTests(unittest.TestCase):
         self.assertEqual(rows, [("reply", "confirm", "pending_confirm"),
                                 ("mute", "confirm", "pending_confirm"),
                                 ("recall", "confirm", "pending_confirm")])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual({row[0] for row in db.execute("SELECT mode_reason FROM execution_intents")}, {"rule"})
         store = MuteExecutionStore(self.path)
         self.assertIsNone(store.begin_attempt(1, requested_mode="auto"))
         self.assertIsNotNone(store.begin_attempt(1, requested_mode="confirm"))
         self.config["default_action_mode"] = "auto"
         self.settings.save(self.config)
-        self.assertFalse(store.recheck_attempt(1, 1))
+        # A manual intent stays acceptable when the global default becomes automatic; waiting ones are deactivated.
+        self.assertTrue(store.recheck_attempt(1, 1))
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT status FROM execution_intents WHERE id=2").fetchone()[0], "inactive")
+
+    def test_automatic_inherited_intent_is_rejected_after_global_becomes_manual(self):
+        item, detail = self.record_plan()
+        self.queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", 1),),
+                          settings_fingerprint=decision_fingerprint(self.config, "p", "g"))
+        with closing(sqlite3.connect(self.path)) as db:
+            rows = db.execute("SELECT mode, status, mode_reason FROM execution_intents ORDER BY action_index").fetchall()
+        self.assertEqual(rows, [("auto", "pending_auto", None)] * 3)
+        store = MuteExecutionStore(self.path)
+        self.config["default_action_mode"] = "confirm"
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE dashboard_settings SET payload=?", (json.dumps(self.config),))
+            db.commit()
+        self.assertIsNone(store.begin_attempt(3, requested_mode="auto"))
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT status, reason_code FROM execution_intents WHERE id=3").fetchone(),
+                             ("review", "action_not_allowed"))
 
     def test_global_change_during_decision_requires_review(self):
         item, detail = self.record_plan()

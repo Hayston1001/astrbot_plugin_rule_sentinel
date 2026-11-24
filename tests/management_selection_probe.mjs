@@ -23,6 +23,7 @@ function node() {
     setAttribute(name, value) { this.attributes[name] = value; }, scrollIntoView() { this.scrolled = true; },
     addEventListener(type, handler) { (this.handlers[type] ||= []).push(handler); },
     async trigger(type) { await Promise.all((this.handlers[type] || []).map((handler) => handler())); },
+    click() { for (const handler of this.handlers.click || []) handler({}); },
     set innerHTML(value) { throw new Error("untrusted HTML must not be rendered"); },
   };
 }
@@ -34,7 +35,7 @@ elements["panel-rules"].appendChild(elements["current-rules"]);
 elements["panel-rules"].appendChild(elements["rule-form"]);
 elements["group-detail-home"].appendChild(elements["group-detail-panel"]);
 const requests = [];
-const saved = {platform_id: "p1", group_id: "long-group-12345678", active_tab: "records"};
+const saved = {platform_id: "p1", group_id: "long-group-12345678", records_platform_id: "p1", records_group_id: "long-group-12345678", active_tab: "records"};
 let failSave = false;
 let failSummary = false;
 let heldSave = null;
@@ -61,7 +62,12 @@ const groups = [
   {platform_id: "p1", group_id: "other-group-87654321", rule_count: 1},
   {platform_id: "p2", group_id: "separate-group", rule_count: 0},
 ];
-globalThis.window = {addEventListener() {}, AstrBotPluginView: {
+const overviewCalls = {events: 0, refresh: 0, active: [], jump: null, groups: 0};
+globalThis.window = {addEventListener() {}, SentinelOverview: {
+  setFeedback() {}, setJump(callback) { overviewCalls.jump = callback; }, setGroups() { overviewCalls.groups++; },
+  setActive(value) { overviewCalls.active.push(value); }, setLiveState() {}, refresh() { overviewCalls.refresh++; },
+  onEvent() { overviewCalls.events++; },
+}, AstrBotPluginView: {
   async subscribeSSE(endpoint, callbacks) { liveCallbacks = callbacks; return "test"; }, async unsubscribeSSE() {},
   async ready() {},
   async apiGet(endpoint, params) {
@@ -83,13 +89,13 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
         latency_p95_ms: 5, truncated: params.group_id === "other-group-87654321"};
     }
     if (endpoint === "rules") return [savedRules.get(JSON.stringify([params.platform_id, params.group_id, "r"])) || {rule_id: "r", version: 3, enabled: true, text: "<script>",
-      priority: 8, actions: [{type: "mute", mode: "auto", duration_mode: "strict", severity_seconds: JSON.parse('{"low":60,"custom level":90,"__proto__":120}')},
-        {type: "reply", mode: "confirm", template: "<img src=x>"}, {type: "recall", mode: "auto"}]},
+      priority: 8, execution_mode: "confirm", actions: [{type: "mute", duration_mode: "strict", severity_seconds: JSON.parse('{"low":60,"custom level":90,"__proto__":120}')},
+        {type: "reply", template: "<img src=x>"}, {type: "recall"}]},
         ...(createdRule && createdRule.platform_id === params.platform_id && createdRule.group_id === params.group_id ? [createdRule] : [])];
     if (endpoint === "rules/history") {
-      const history = [{version: 1, enabled: false, text: "<img src=x>", modified_by: "admin", created_at: "2026-01-01T00:00:00Z", actions: []},
-        {version: 2, enabled: true, text: "old rule", modified_by: "admin", created_at: "2026-01-02T00:00:00Z", actions: [{type: "recall", mode: "auto"}]},
-        {version: 3, enabled: true, text: "current rule", modified_by: "admin", created_at: "2026-02-01T00:00:00Z", actions: [{type: "mute", mode: "auto", duration_mode: "strict", severity_seconds: {low: 60}}]}];
+      const history = [{version: 1, enabled: false, text: "<img src=x>", modified_by: "admin", created_at: "2026-01-01T00:00:00Z", execution_mode: "inherit", actions: []},
+        {version: 2, enabled: true, text: "old rule", modified_by: "admin", created_at: "2026-01-02T00:00:00Z", execution_mode: "auto", actions: [{type: "recall"}]},
+        {version: 3, enabled: true, text: "current rule", modified_by: "admin", created_at: "2026-02-01T00:00:00Z", execution_mode: "confirm", actions: [{type: "mute", duration_mode: "strict", severity_seconds: {low: 60}}]}];
       return historyMode === "current" ? history.slice(-1) : historyMode === "newer" ? [...history, {...history[2], version: 4}] : history;
     }
     if (endpoint === "message-content") return {content: `content from ${params.platform_id}/${params.group_id}`};
@@ -141,7 +147,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
 const source = await readFile(process.argv[2], "utf8");
 const html = await readFile(process.argv[2].replace(/app\.js$/, "index.html"), "utf8");
 await import("data:text/javascript;base64," + Buffer.from(source + "\nglobalThis.__disclosureTest = {setPanelVisibility, setDetailsOpen, updateVisiblePanel};\n").toString("base64"));
-assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers", "image-model-options"].includes(endpoint)), ["ui-state", "status", "platforms", "groups", "rules", "messages", "summary"]);
+assert.deepEqual(requests.map((request) => request.endpoint).filter((endpoint) => !["settings", "providers", "image-model-options"].includes(endpoint)), ["ui-state", "status", "platforms", "groups", "rules", "messages", "summary", "summary"]);
 assert.equal(elements["group-select"].value, JSON.stringify(["p1", "long-group-12345678"]));
 assert.equal(elements["group-detail-panel"].parentNode, elements["group-detail-home"]);
 assert.deepEqual(elements["groups-list"].children.map((row) => row.children[3].attributes["aria-expanded"]), ["false", "false", "false"]);
@@ -157,7 +163,9 @@ assert.equal(elements["group-alias"].value, "技术交流群");
 assert.equal(elements["group-policy-inherit"].textContent, "全局(不发言)");
 assert.equal(elements["group-quote-inherit"].textContent, "全局(引用)");
 assert.equal(elements["group-model-inherit"].textContent, "全局(default-model)");
-assert.equal(elements["group-strategy-inherit"].textContent, "全局(按规则优先级)");
+assert.ok(!html.includes('id="group-strategy"'));
+assert.ok(!html.includes("rule_selection_strategy"));
+assert.ok(html.includes('id="setting-equal_priority_policy"'));
 assert.equal(elements["group-reason-language-inherit"].textContent, "全局(中文)");
 assert.equal(elements["group-reason-language-mode"].value, "");
 assert.equal(elements["group-reason-language-label"].hidden, true);
@@ -165,7 +173,7 @@ assert.equal(elements["group-context-inherit"].textContent, "全局(关闭)");
 assert.equal(elements["group-context-mode"].value, "");
 assert.equal(elements["group-context-label"].hidden, true);
 assert.equal(elements["group-execution-inherit"].textContent, "全局(允许执行)");
-assert.match(elements["group-defaults"].textContent, /按规则优先级/);
+assert.match(elements["group-defaults"].textContent, /default-model/);
 assert.equal(elements["group-template-label"].hidden, true);
 assert.equal(elements["group-template-preview"].textContent, "global rule-1: member-1 mute");
 assert.match(elements["group-protected-state"].textContent, /选择不发言时不会在群里发言/);
@@ -183,9 +191,10 @@ assert.equal(ruleCard.children[0].children[0].children.length, 2);
 const currentConfig = ruleCard.children[0].children[2];
 assert.equal(currentConfig.children[0].children[0].textContent, "当前配置");
 assert.equal(currentConfig.children[0].children[1].textContent, "优先级: 8");
+assert.equal(currentConfig.children[0].children[2].textContent, "执行方式: 人工确认");
 assert.deepEqual(currentConfig.children[1].children.map((item) => [item.children[0].textContent, item.children[1].textContent]), [
-  ["1", "禁言 / 自动 (low: 1分钟, custom level: 1分钟 30秒, __proto__: 2分钟)"],
-  ["2", "发言 / 人工确认 / 全局(引用) / 全局(不自动 @) (<img src=x>)"], ["3", "撤回 / 自动"]]);
+  ["1", "禁言 (low: 1分钟, custom level: 1分钟 30秒, __proto__: 2分钟)"],
+  ["2", "发言 / 全局(引用) / 全局(不自动 @) (<img src=x>)"], ["3", "撤回"]]);
 await ruleCard.children[1].trigger("click");
 assert.deepEqual(requests.at(-1), {endpoint: "rules/history", params: {platform_id: "p1", group_id: "long-group-12345678", rule_id: "r"}});
 const history = ruleCard.children[3];
@@ -193,6 +202,9 @@ assert.equal(ruleCard.children[1].attributes["aria-expanded"], "true");
 assert.match(history.children[0].textContent, /修改记录仅供查看/);
 assert.equal(history.children[1].children[0].children[0].textContent, "修改规则");
 assert.equal(history.children[1].children[1].children[1].textContent, "已启用");
+assert.equal(history.children[1].children[1].children[3].textContent, "执行方式: 人工确认");
+assert.equal(history.children[3].children[1].children[3].textContent, "执行方式: 全局(自动)");
+assert.equal(history.children[2].children[1].children[3].textContent, "执行方式: 自动");
 assert.equal(history.children[1].children[2].children[2].textContent, "处理动作");
 assert.equal(history.children[3].children[0].children[0].textContent, "创建规则");
 assert.equal(history.children[3].children[1].children[1].textContent, "已停用");
@@ -234,7 +246,7 @@ assert.equal(elements.version.value, "3");
 assert.equal(elements.priority.value, "8");
 assert.equal(elements.text.value, "<script>");
 assert.equal(elements["action-list"].children[0].children[1].value, "mute");
-const severityRow = elements["action-list"].children[0].children[5].children[1].children[0];
+const severityRow = elements["action-list"].children[0].children[4].children[1].children[0];
 assert.equal(severityRow.children[0].children[0].value, "low");
 assert.equal(severityRow.children[1].children[0].value, "1");
 assert.equal(severityRow.children[2].children[0].value, "60");
@@ -253,7 +265,7 @@ assert.equal(requests.filter((request) => request.endpoint === "rules/confirm").
 assert.equal(ruleCard.children[2].disabled, false);
 await ruleCard.children[2].trigger("click");
 await ruleCard.children[2].trigger("click");
-const secondLevel = elements["action-list"].children[0].children[5].children[1].children[1].children[0].children[0];
+const secondLevel = elements["action-list"].children[0].children[4].children[1].children[1].children[0].children[0];
 secondLevel.value = "low";
 await secondLevel.trigger("input");
 assert.equal(elements.preview.disabled, false);
@@ -264,7 +276,7 @@ assert.match(latestFeedback().children[0].textContent, /级别名称不能重复
 assert.equal(elements.preview.disabled, false);
 secondLevel.value = "custom level";
 await secondLevel.trigger("input");
-const severityEditor = elements["action-list"].children[0].children[5];
+const severityEditor = elements["action-list"].children[0].children[4];
 await severityEditor.children[2].trigger("click");
 assert.equal(elements.preview.disabled, false);
 const newLevel = severityEditor.children[1].children[3];
@@ -282,7 +294,11 @@ assert.equal(elements.preview.disabled, false);
 assert.equal(elements.enabled.checked, true);
 assert.equal(ruleCard.scrolled, true);
 assert.equal(elements["action-list"].children[0].children.find(node => node.className === "action-type-label").textContent, "动作类型");
-assert.equal(elements["action-list"].children[0].children.find(node => node.className === "action-mode-label").textContent, "执行方式");
+assert.ok(!elements["action-list"].children[0].children.some(node => node.className === "action-mode-label"));
+assert.ok(!elements["action-list"].children[0].children.some(node => node.className === "action-mode"));
+assert.ok(html.includes('id="rule-execution-mode"'));
+assert.equal(requests.findLast((request) => request.endpoint === "rules/preview").body.execution_mode, "confirm");
+assert.ok(requests.findLast((request) => request.endpoint === "rules/preview").body.actions.every((action) => !Object.hasOwn(action, "mode")));
 const cells = elements["records-body"].children[0].children;
 assert.equal(cells.length, 5);
 assert.equal(elements["records-body"].children[0].attributes["aria-label"], "查看消息 ROBOT1.0_12345678901234567890abcdef 的详情");
@@ -292,8 +308,12 @@ const pad = (value) => String(value).padStart(2, "0");
 assert.equal(cells[0].textContent, `${pad(time.getMonth()+1)}-${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`);
 assert.equal(cells[0].title, "2026-11-01 20:34:56");
 assert.equal(cells[0].textContent, "11-01 20:34");
+const messageRequestsBeforeGroupChange = requests.filter((request) => request.endpoint === "messages").length;
+const summaryRequestsBeforeGroupChange = requests.filter((request) => request.endpoint === "summary").length;
 elements["group-select"].value = JSON.stringify(["p1", "other-group-87654321"]);
 await elements["group-select"].trigger("change");
+assert.equal(requests.filter((request) => request.endpoint === "messages").length, messageRequestsBeforeGroupChange);
+assert.equal(requests.filter((request) => request.endpoint === "summary").length, summaryRequestsBeforeGroupChange);
 assert.equal(elements["rule-form"].parentNode, elements["panel-rules"]);
 assert.equal(ruleCard.children[2].textContent, "编辑");
 assert.equal(elements["rule-form"].hidden, false);
@@ -305,16 +325,17 @@ const beforeWrongScope = requests.filter((request) => request.endpoint === "rule
 await elements.preview.trigger("click");
 assert.equal(requests.filter((request) => request.endpoint === "rules/preview").length, beforeWrongScope);
 assert.match(latestFeedback().children[0].textContent, /返回原群/);
-assert.deepEqual(requests.filter((request) => request.endpoint === "rules" || request.endpoint === "messages").slice(-2).map((request) => [request.endpoint, request.params.group_id]),
-  [["rules", "other-group-87654321"], ["messages", "other-group-87654321"]]);
+assert.deepEqual(requests.filter((request) => request.endpoint === "rules").slice(-1).map((request) => [request.endpoint, request.params.group_id]),
+  [["rules", "other-group-87654321"]]);
 assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
   {platform_id: "p1", group_id: "other-group-87654321"});
 assert.equal(elements["group-select"].children.length, 4);
 assert.equal(elements["group-select"].children[3].value, JSON.stringify(["p2", "separate-group"]));
 elements["group-select"].value = JSON.stringify(["p2", "separate-group"]);
 await elements["group-select"].trigger("change");
-assert.deepEqual(requests.filter((request) => request.endpoint === "rules" || request.endpoint === "messages").slice(-2).map((request) => [request.endpoint, request.params.platform_id, request.params.group_id]),
-  [["rules", "p2", "separate-group"], ["messages", "p2", "separate-group"]]);
+assert.deepEqual(requests.filter((request) => request.endpoint === "rules").slice(-1).map((request) => [request.endpoint, request.params.platform_id, request.params.group_id]),
+  [["rules", "p2", "separate-group"]]);
+assert.equal(requests.filter((request) => request.endpoint === "messages").length, messageRequestsBeforeGroupChange);
 assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
   {platform_id: "p2", group_id: "separate-group"});
 failSave = true;
@@ -326,12 +347,11 @@ assert.equal(elements["group-model-backend"].value, "");
 elements["group-model-backend"].value = "llm";
 await elements["group-model-backend"].trigger("change");
 elements["group-model"].value = "model-override";
-elements["group-strategy"].value = "priority";
 elements["group-execution"].value = "record";
 await elements["group-settings-save"].trigger("click");
 assert.deepEqual(requests.findLast((request) => request.endpoint === "group-settings").body, {
   platform_id: "p2", group_id: "separate-group", overrides: {
-    model: {backend: "llm", model: "model-override"}, strategy: "priority", execution_mode: "record"}});
+    model: {backend: "llm", model: "model-override"}, execution_mode: "record"}});
 elements["group-select"].value = JSON.stringify(["p1", "long-group-12345678"]);
 await elements["group-select"].trigger("change");
 assert.match(elements["save-status"].textContent, /草稿仍未保存/);
@@ -339,7 +359,6 @@ assert.equal(elements["rule-form"].parentNode, elements["current-rules"].childre
 assert.equal(elements["current-rules"].children[0].children[2].textContent, "收起");
 assert.equal(elements["new-rule"].textContent, "新建规则");
 assert.equal(elements["group-model-backend"].value, "");
-assert.equal(elements["group-strategy"].value, "");
 assert.equal(elements["monitor-group"].checked, true);
 elements["monitor-group"].checked = false;
 await elements["monitor-group"].trigger("change");
@@ -347,11 +366,8 @@ assert.deepEqual(settings.monitoring_groups, []);
 failSummary = true;
 await elements["tab-status"].trigger("click");
 await new Promise((resolve) => setImmediate(resolve));
-assert.equal(elements["status-groups-total"].textContent, "1");
-assert.equal(elements["groups-status-body"].children.length, 1);
-elements["group-select"].value = "";
-await elements["group-select"].trigger("change");
 assert.equal(elements["status-groups-total"].textContent, "3");
+assert.equal(elements["groups-status-body"].children.length, 3);
 assert.equal(elements["status-groups-enabled"].textContent, "0");
 assert.equal(elements["groups-status-body"].children.length, 3);
 const disabledStatus = elements["groups-status-body"].children[0].children[1];
@@ -758,10 +774,16 @@ assert.equal(elements.text.value, "draft retained after toggle");
 await toggleCard.children[2].trigger("click");
 
 await elements["tab-records"].trigger("click");
-elements["group-select"].value = "";
-await elements["group-select"].trigger("change");
-assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
-  {platform_id: "", group_id: ""});
+assert.equal(elements["group-picker"].hidden, true);
+assert.equal(elements["records-group-filter"].value, JSON.stringify(["p1", "long-group-12345678"]));
+assert.deepEqual(elements["records-group-filter"].children.map((option) => option.textContent), ["全部群", "新的备注", "平台群名 (1)", "平台群名 (2)"]);
+const rulesGroupWrites = requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).length;
+elements["records-group-filter"].value = "";
+await elements["records-group-filter"].trigger("change");
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "records_group_id")).at(-1).body,
+  {records_platform_id: "", records_group_id: ""});
+assert.equal(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).length, rulesGroupWrites);
+assert.equal(requests.findLast((request) => request.endpoint === "messages").params.all_groups, "true");
 assert.equal(elements["group-select"].children[0].textContent, "所有群");
 assert.equal(elements["records-body"].children.length, 4);
 assert.equal(elements["stat-latency"].textContent, "200 ms");
@@ -780,6 +802,10 @@ liveCallbacks.onMessage({parsed: {id: 6, platform_id: "p2", group_id: "separate-
 assert.equal(elements["records-body"].children.length, 4);
 assert.equal(elements["stat-latency"].textContent, "300 ms");
 await elements["tab-rules"].trigger("click");
+elements["group-select"].value = "";
+await elements["group-select"].trigger("change");
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "platform_id")).at(-1).body,
+  {platform_id: "", group_id: ""});
 assert.equal(elements["current-rules"].children.length, 3);
 assert.match(elements["current-rules"].children[0].children[0].textContent, /新的备注/);
 await elements["tab-groups"].trigger("click");
@@ -793,6 +819,8 @@ assert.equal(elements["tab-rules"].attributes["aria-selected"], "true");
 await elements["tab-settings"].trigger("click");
 assert.equal(elements["group-picker"].hidden, true);
 await elements["tab-status"].trigger("click");
+assert.equal(elements["group-picker"].hidden, true);
+await elements["tab-rules"].trigger("click");
 assert.equal(elements["group-picker"].hidden, false);
 
 assert.ok(!html.includes('id="platform-select"'));
@@ -879,6 +907,48 @@ setPanelVisibility(animatedPanel, true);
 setPanelVisibility(animatedPanel, false);
 assert.equal(animatedPanel.hidden, true);
 assert.equal(animatedPanel.animations.length, 4);
+
+// Live events reach the overview badge on every tab, and rows outside the records filter are ignored.
+await elements["tab-settings"].trigger("click");
+const eventsBefore = overviewCalls.events;
+liveCallbacks.onMessage({parsed: {id: 90, platform_id: "p2", group_id: "separate-group", message_id: "live-1", status: "no_action",
+  detail: "{}", created_at: "2026-11-01T12:40:00Z"}});
+assert.equal(overviewCalls.events, eventsBefore + 1);
+assert.ok(overviewCalls.active.includes(false));
+await elements["tab-records"].trigger("click");
+elements["records-group-filter"].value = JSON.stringify(["p1", "other-group-87654321"]);
+await elements["records-group-filter"].trigger("change");
+const idsInBody = () => elements["records-body"].children.filter((_, index) => index % 2 === 0)
+  .map((row) => row.attributes["aria-label"]);
+const inScopeBefore = idsInBody().length;
+liveCallbacks.onMessage({parsed: {id: 91, platform_id: "p2", group_id: "separate-group", message_id: "live-2", status: "no_action",
+  detail: "{}", created_at: "2026-11-01T12:41:00Z"}});
+assert.equal(idsInBody().length, inScopeBefore);
+assert.equal(overviewCalls.events, eventsBefore + 2);
+liveCallbacks.onMessage({parsed: {id: 92, platform_id: "p1", group_id: "other-group-87654321", message_id: "live-3", status: "no_action",
+  detail: "{}", created_at: "2026-11-01T12:42:00Z"}});
+assert.equal(idsInBody().length, inScopeBefore + 1);
+
+// Jumping from a review card sets and saves the records group filter, then locates the record.
+assert.equal(typeof overviewCalls.jump, "function");
+await elements["tab-status"].trigger("click");
+const writesBeforeJump = requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "records_group_id")).length;
+await overviewCalls.jump({platform_id: "p1", group_id: "long-group-12345678", message_id: "ROBOT1.0_12345678901234567890abcdef"});
+assert.equal(elements["tab-records"].attributes["aria-selected"], "true");
+assert.equal(elements["records-group-filter"].value, JSON.stringify(["p1", "long-group-12345678"]));
+assert.deepEqual(requests.findLast((request) => request.endpoint === "messages").params, {platform_id: "p1", group_id: "long-group-12345678", limit: 50});
+await new Promise((resolve) => setImmediate(resolve));
+const jumpWrites = requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "records_group_id"));
+assert.equal(jumpWrites.length, writesBeforeJump + 1);
+assert.deepEqual(jumpWrites.at(-1).body, {records_platform_id: "p1", records_group_id: "long-group-12345678"});
+assert.equal(elements["records-body"].children[0].classList.contains("is-located"), true);
+assert.equal(elements["records-body"].children[0].scrolled, true);
+
+// A saved filter for a group that is not known stays selected with its raw identifier.
+elements["records-group-filter"].value = JSON.stringify(["gone", "removed-group"]);
+await elements["records-group-filter"].trigger("change");
+assert.equal(elements["records-group-filter"].value, JSON.stringify(["gone", "removed-group"]));
+assert.equal(elements["records-group-filter"].children.at(-1).textContent, "未命名群 (removed-group)");
 
 reducedMotion = false;
 const changingPanel = animatedNode();

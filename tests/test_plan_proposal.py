@@ -5,9 +5,9 @@ from sentinel.sentinel_core import RuleSnapshot, validate_plan_proposal
 
 class PlanProposalTests(unittest.TestCase):
     def setUp(self):
-        actions = ({"type": "recall", "mode": "auto"},
-                   {"type": "reply", "mode": "auto", "template": "notice"},
-                   {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 60}})
+        actions = ({"type": "recall"},
+                   {"type": "reply", "template": "notice"},
+                   {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}})
         self.rule = RuleSnapshot("r", 3, True, frozenset({"recall", "reply", "mute"}), "strict", {"low": 60}, actions)
 
     def validate(self, call):
@@ -29,7 +29,7 @@ class PlanProposalTests(unittest.TestCase):
         self.assertEqual(self.validate({"rule_id": "r", "severity": "high", "reason": "violation"}).reason,
                          "invalid_severity")
         self.rule = RuleSnapshot("r", 3, True, frozenset({"mute"}), "strict", {},
-                                 ({"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 301}},))
+                                 ({"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 301}},))
         self.assertEqual(self.validate({"rule_id": "r", "severity": "low", "reason": "violation"}).reason,
                          "invalid_duration")
 

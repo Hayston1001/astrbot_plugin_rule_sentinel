@@ -16,6 +16,9 @@ from unittest.mock import AsyncMock, patch
 from test_message_entry import CommandFilter, CommandGroupFilter, RegexFilter, modules as command_modules
 
 
+NO_RECORDS_FILTER = {"records_platform_id": "", "records_group_id": ""}
+
+
 class MainManagementTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -81,7 +84,12 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
 
     async def test_routes_and_confirmed_rule(self):
-        self.assertEqual(len(self.context.routes), 38)
+        self.assertEqual(len(self.context.routes), 40)
+        names = {route[3] for route in self.context.routes}
+        self.assertTrue({"pending-reviews", "review-close", "execute-action", "execute-mute",
+                         "execute-rule", "confirm-pending-mute"} <= names)
+        self.assertEqual([route[2] for route in self.context.routes if route[3] == "execute-rule"], [["POST"]])
+        self.assertNotIn("pending-confirmations", names)
         self.assertEqual((await self.plugin.list_platforms())["data"], [{"id": "qq1", "type": "qq_official"}])
         fields = dict(platform_id="p", group_id="g", rule_id="r", expected_version=0,
                       text="rule", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -161,44 +169,65 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_action_rules_and_execution_status(self):
         fields = {"platform_id": "p", "group_id": "g", "rule_id": "reply", "expected_version": 0,
-                  "text": "rule", "enabled": True, "actions": [
-                      {"type": "reply", "mode": "auto", "template": "{sender_id}: {rule_id}"},
-                      {"type": "recall", "mode": "confirm"}]}
+                  "text": "rule", "enabled": True, "execution_mode": "confirm", "actions": [
+                      {"type": "reply", "template": "{sender_id}: {rule_id}"},
+                      {"type": "recall"}]}
         self.raw_body = json.dumps(fields).encode()
         preview = await self.plugin.preview_rule()
         self.assertIn("data", preview)
+        self.assertEqual(preview["data"]["fields"]["execution_mode"], "confirm")
+        self.assertNotIn("default_action_mode", preview["data"])
         self.raw_body = json.dumps(preview["data"]).encode()
         saved = await self.plugin.confirm_rule()
         self.assertEqual(saved["data"]["actions"], fields["actions"])
+        self.assertEqual(saved["data"]["execution_mode"], "confirm")
+        self.request.query = {"platform_id": "p", "group_id": "g"}
+        self.assertEqual((await self.plugin.list_rules())["data"][0]["execution_mode"], "confirm")
+        self.request.query = {"platform_id": "p", "group_id": "g", "rule_id": "reply"}
+        self.assertEqual((await self.plugin.rule_history())["data"][0]["execution_mode"], "confirm")
+        legacy = {**fields, "rule_id": "legacy", "actions": [
+            {"type": "reply", "mode": "auto", "template": "x"}, {"type": "recall", "mode": "confirm"}]}
+        legacy.pop("execution_mode")
+        self.raw_body = json.dumps(legacy).encode()
+        legacy_preview = (await self.plugin.preview_rule())["data"]
+        self.raw_body = json.dumps(legacy_preview).encode()
+        migrated = (await self.plugin.confirm_rule())["data"]
+        self.assertEqual(migrated["execution_mode"], "confirm")
+        self.assertEqual(migrated["actions"], [{"type": "reply", "template": "x"}, {"type": "recall"}])
+        bad = {**fields, "rule_id": "bad", "execution_mode": "sometimes"}
+        self.raw_body = json.dumps(bad).encode()
+        self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
         status = (await self.plugin.status())["data"]
         self.assertTrue(status["dry_run_only"])
         self.assertTrue(status["action_execution_enabled"])
         self.assertFalse(status["action_execution_available"])
-        fields["actions"] = [{"type": "mute", "mode": "auto", "duration_mode": "strict",
+        fields["actions"] = [{"type": "mute", "duration_mode": "strict",
                               "severity_seconds": {"low": 2592001}}]
         self.raw_body = json.dumps(fields).encode()
         self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
 
     async def test_save_cumulative_rule_with_explicit_minute_tiers(self):
         actions = [
-            {"type": "recall", "mode": "auto"},
-            {"type": "mute", "mode": "inherit", "duration_mode": "cumulative",
+            {"type": "recall"},
+            {"type": "mute", "duration_mode": "cumulative",
              "window_seconds": 30 * 86400, "window_unit": 86400,
              "tiers_seconds": [60, 600, 3600], "tier_units": [60, 60, 60]},
         ]
         fields = {"platform_id": "p", "group_id": "g", "rule_id": "r", "expected_version": 0,
-                  "text": "No advertising", "enabled": True, "actions": actions}
+                  "text": "No advertising", "enabled": True, "execution_mode": "inherit", "actions": actions}
         self.raw_body = json.dumps(fields).encode()
         preview = await self.plugin.preview_rule()
         self.assertIn("data", preview)
+        self.assertEqual(preview["data"]["default_action_mode"], "auto")
         self.raw_body = json.dumps(preview["data"]).encode()
         result = await self.plugin.confirm_rule()
         self.assertEqual(result["data"]["actions"], actions)
+        self.assertEqual(result["data"]["execution_mode"], "inherit")
         self.request.query = {"platform_id": "p", "group_id": "g"}
         self.assertEqual((await self.plugin.list_rules())["data"][0]["actions"], actions)
 
-    async def test_mute_confirmation_accepts_only_id_and_dashboard_user(self):
-        host = types.SimpleNamespace(mute_executor=object(), confirm_mute=AsyncMock(return_value="succeeded"))
+    async def test_action_confirmation_accepts_only_id_and_dashboard_user(self):
+        host = types.SimpleNamespace(mute_executor=object(), confirm_action=AsyncMock(return_value="succeeded"))
         self.plugin.host = host
         self.plugin.config["action_execution_enabled"] = True
         try:
@@ -209,8 +238,9 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.request.username = "api_key:synthetic"
             self.assertEqual((await self.plugin.execute_mute())["status_code"], 403)
             self.request.username = "admin"
-            self.assertEqual((await self.plugin.execute_mute())["data"]["status"], "succeeded")
-            host.confirm_mute.assert_awaited_once_with(2)
+            result = (await self.plugin.execute_mute())["data"]
+            self.assertEqual(result, {"status": "succeeded", "current_status": None, "reason_code": None})
+            host.confirm_action.assert_awaited_once_with(2)
         finally:
             self.plugin.host = None
 
@@ -262,7 +292,10 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.plugin.save_group_alias())["status_code"], 403)
             self.assertEqual((await self.plugin.get_group_name())["status_code"], 403)
             self.assertEqual((await self.plugin.list_messages())["status_code"], 403)
-            self.assertEqual((await self.plugin.pending_confirmations())["status_code"], 403)
+            self.assertEqual((await self.plugin.pending_reviews())["status_code"], 403)
+            self.assertEqual((await self.plugin.close_review_item())["status_code"], 403)
+            self.assertEqual((await self.plugin.execute_mute())["status_code"], 403)
+            self.assertEqual((await self.plugin.revoke_violation_count())["status_code"], 403)
             self.assertEqual((await self.plugin.confirm_pending_mute())["status_code"], 403)
             self.assertEqual((await self.plugin.stream_events())["status_code"], 403)
             self.assertEqual((await self.plugin.get_ui_state())["status_code"], 403)
@@ -306,7 +339,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = json.dumps({"platform_id": "p1", "group_id": "g"}).encode()
         self.assertEqual((await self.plugin.register_group())["data"]["alias"], "group")
         self.raw_body = json.dumps({"platform_id": "p2", "group_id": "g", "overrides": {
-            "model": {"backend": "llm", "model": "local"}, "strategy": "priority", "execution_mode": "record",
+            "model": {"backend": "llm", "model": "local"}, "execution_mode": "record",
             "llm_reason_language": "English", "context_messages": 6}}).encode()
         result = (await self.plugin.save_group_settings())["data"]["settings"]
         self.assertEqual(result["group_overrides"]["p2/g"]["model"]["model"], "local")
@@ -458,11 +491,11 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = json.dumps(second).encode()
         self.assertEqual((await self.plugin.save_ui_state())["data"], second)
         self.request.username = "admin"
-        self.assertEqual((await self.plugin.get_ui_state())["data"], {**first, "active_tab": "status"})
+        self.assertEqual((await self.plugin.get_ui_state())["data"], {**first, "active_tab": "status", **NO_RECORDS_FILTER})
         other_plugin = self.module.RuleSentinel(self.context, {})
         await other_plugin.initialize()
         try:
-            self.assertEqual((await other_plugin.get_ui_state())["data"], {**first, "active_tab": "status"})
+            self.assertEqual((await other_plugin.get_ui_state())["data"], {**first, "active_tab": "status", **NO_RECORDS_FILTER})
         finally:
             await other_plugin.terminate()
 
@@ -478,19 +511,19 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.plugin.save_overview_layout())["status_code"], 400)
         self.assertEqual((await self.plugin.get_overview_layout())["data"], saved)
         self.request.query = {"all_groups": "true"}
-        self.assertEqual((await self.plugin.pending_confirmations())["data"]["total_actions"], 0)
+        self.assertEqual((await self.plugin.pending_reviews())["data"]["total_actions"], 0)
         self.request.query = {"all_groups": "true", "group_id": "g"}
-        self.assertEqual((await self.plugin.pending_confirmations())["status_code"], 400)
+        self.assertEqual((await self.plugin.pending_reviews())["status_code"], 400)
 
     async def test_ui_tab_and_group_choices_are_independent_and_user_scoped(self):
         self.raw_body = b'{"active_tab":"settings"}'
         self.assertEqual((await self.plugin.save_ui_state())["data"], {"active_tab": "settings"})
         self.assertEqual((await self.plugin.get_ui_state())["data"],
-                         {"platform_id": "", "group_id": "", "active_tab": "settings"})
+                         {"platform_id": "", "group_id": "", "active_tab": "settings", **NO_RECORDS_FILTER})
         self.raw_body = b'{"platform_id":"p","group_id":"g"}'
         self.assertEqual((await self.plugin.save_ui_state())["data"], {"platform_id": "p", "group_id": "g"})
         self.assertEqual((await self.plugin.get_ui_state())["data"],
-                         {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
+                         {"platform_id": "p", "group_id": "g", "active_tab": "settings", **NO_RECORDS_FILTER})
         self.request.username = "other"
         self.assertIsNone((await self.plugin.get_ui_state())["data"])
         self.raw_body = b'{"active_tab":"rules"}'
@@ -500,7 +533,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         await other_plugin.initialize()
         try:
             self.assertEqual((await other_plugin.get_ui_state())["data"],
-                             {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
+                             {"platform_id": "p", "group_id": "g", "active_tab": "settings", **NO_RECORDS_FILTER})
         finally:
             await other_plugin.terminate()
 
@@ -712,7 +745,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = b'{"platform_id":"","group_id":""}'
         self.assertEqual((await self.plugin.save_ui_state())["data"], {"platform_id": "", "group_id": ""})
         self.assertEqual((await self.plugin.get_ui_state())["data"],
-                         {"platform_id": "", "group_id": "", "active_tab": "status"})
+                         {"platform_id": "", "group_id": "", "active_tab": "status", **NO_RECORDS_FILTER})
 
     async def test_all_groups_records_keep_scope_pagination_and_exclude_system(self):
         queue = self.plugin.management.queue
@@ -777,7 +810,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_list_includes_monitoring_and_override_only_groups(self):
         self.plugin.config["monitoring_groups"] = ["p1/monitor-only"]
-        self.plugin.config["group_overrides"] = {"p2/override-only": {"strategy": "priority"}}
+        self.plugin.config["group_overrides"] = {"p2/override-only": {"execution_mode": "record"}}
         groups = (await self.plugin.list_groups())["data"]
         self.assertEqual({(item["platform_id"], item["group_id"]) for item in groups},
                          {("p1", "monitor-only"), ("p2", "override-only")})
@@ -1040,8 +1073,9 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                 if kwargs["message"] == "first message":
                     started.set()
                     await release.wait()
-                return types.SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                                             completion_text="NO_ACTION\nNo violation.")
+                return types.SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit", "reason": "No violation."}]}],
+                    completion_text="")
             def make(*route):
                 decider = make_decider(*route)
                 for enabled in (False, True):
@@ -1062,7 +1096,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([event["status"] for event in events], ["no_action", "no_action"])
             first, second = [json.loads(event["detail"]) for event in events]
             self.assertTrue(first["no_action_reason_enabled"])
-            self.assertEqual(first["reason"], "No violation.")
+            self.assertEqual(first["reason"], "r: No violation.")
             self.assertFalse(second["no_action_reason_enabled"])
             self.assertNotIn("reason", second)
         finally:
@@ -1070,6 +1104,332 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             if drain is not None and not drain.done():
                 await asyncio.gather(drain, return_exceptions=True)
             await self.plugin._stop_monitoring()
+
+    def seed_review(self, message, *, action="mute", status="pending_confirm", group="g", event_status="proposed",
+                    mode="confirm", mode_reason="rule", index=0, event=None, rule="r"):
+        path = self.plugin._queue.path
+        with closing(sqlite3.connect(path)) as db:
+            if event is None:
+                event = db.execute("""INSERT INTO dry_run_events (platform_id, group_id, message_id, status, detail)
+                    VALUES ('p', ?, ?, ?, ?)""", (group, message, event_status, json.dumps({"review_reason": "why"}))).lastrowid
+            intent = db.execute("""INSERT INTO execution_intents
+                (source_event_id, source_attempt_id, platform_id, group_id, message_id, rule_id, rule_version,
+                 action, target_sender_id, mode, duration_seconds, expires_at, status, created_at, updated_at,
+                 plan_id, action_index, mode_reason)
+                VALUES (?, 'attempt', 'p', ?, ?, ?, 1, ?, 'sender', ?, NULL, NULL, ?,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?, ?)""",
+                (event, group, message, rule, action, mode, status, f"event:{event}", index, mode_reason)).lastrowid
+            db.commit()
+        return event, intent
+
+    async def review_totals(self, **query):
+        self.request.query = {"all_groups": "true", **query}
+        result = (await self.plugin.pending_reviews())["data"]
+        return result["total_messages"], result["total_actions"], result["total_checks"]
+
+    async def test_pending_reviews_lists_every_action_type_and_checks_with_scope_and_pagination(self):
+        self.seed_review("a", action="mute")
+        self.seed_review("a", action="reply", index=1, event=1)
+        self.seed_review("b", action="recall")
+        self.seed_review("c", action="mute", status="unknown")
+        self.seed_review("d", action="reply", status="pending_auto", mode="auto", mode_reason=None)
+        self.seed_review("e", action="mute", group="other")
+        self.seed_review("f", event_status="review", status="succeeded")
+        self.assertEqual(await self.review_totals(), (5, 3 + 1, 2))
+        self.request.query = {"all_groups": "true", "limit": "2"}
+        first = (await self.plugin.pending_reviews())["data"]
+        self.assertEqual(len(first["messages"]), 2)
+        self.assertIsNotNone(first["next_before_id"])
+        self.request.query = {"all_groups": "true", "limit": "10", "before_id": str(first["next_before_id"])}
+        rest = (await self.plugin.pending_reviews())["data"]
+        keys = {(item["group_id"], item["message_id"]) for item in first["messages"] + rest["messages"]}
+        self.assertEqual(keys, {("g", "a"), ("g", "b"), ("g", "c"), ("other", "e"), ("g", "f")})
+        self.assertEqual(await self.review_totals(), await self.review_totals())
+        self.request.query = {"platform_id": "p", "group_id": "other"}
+        scoped = (await self.plugin.pending_reviews())["data"]
+        self.assertEqual([item["message_id"] for item in scoped["messages"]], ["e"])
+        by_message = {item["message_id"]: item for item in first["messages"] + rest["messages"]}
+        self.assertEqual(sorted(action["action"] for action in by_message["a"]["actions"]), ["mute", "reply"])
+        self.assertEqual(by_message["a"]["actions"][0]["mode_reason"], "rule")
+        self.assertEqual(by_message["c"]["checks"][0]["kind"], "intent")
+        self.assertEqual(by_message["f"]["checks"][0], {"kind": "event", "event_id": by_message["f"]["checks"][0]["event_id"],
+                                                        "status": "review", "review_reason": "why",
+                                                        "created_at": by_message["f"]["checks"][0]["created_at"]})
+        for query in ({"all_groups": "true", "limit": "0"}, {"all_groups": "true", "limit": "x"},
+                      {"all_groups": "true", "before_id": "0"}, {"all_groups": "true", "before_id": "z"},
+                      {"all_groups": "true", "group_id": "g"}):
+            with self.subTest(query=query):
+                self.request.query = query
+                self.assertEqual((await self.plugin.pending_reviews())["status_code"], 400)
+        for query in ({"platform_id": "p"}, {}):
+            with self.subTest(query=query):
+                self.request.query = query
+                self.assertEqual((await self.plugin.pending_reviews())["status_code"], 403)
+
+    async def test_review_close_gives_up_actions_and_checks_without_calling_the_platform(self):
+        host = types.SimpleNamespace(mute_executor=object(), confirm_action=AsyncMock(), confirm_single_mute=AsyncMock())
+        self.plugin.host = host
+        try:
+            event, action = self.seed_review("a", action="reply")
+            _, check = self.seed_review("b", status="unknown")
+            event_check, _ = self.seed_review("c", event_status="review", status="succeeded")
+            self.assertEqual(await self.review_totals(), (3, 1, 2))
+            self.raw_body = json.dumps({"target": "action", "intent_id": action}).encode()
+            result = (await self.plugin.close_review_item())["data"]
+            self.assertEqual((result["closed"], result["already_closed"], result["closed_by"]), (True, False, "admin"))
+            self.assertEqual(await self.review_totals(), (2, 0, 2))
+            self.assertEqual((await self.plugin.close_review_item())["data"]["already_closed"], True)
+            self.assertEqual(self.plugin._queue.confirmation_state(action), {"status": "dismissed", "reason_code": "dismissed"})
+            self.raw_body = json.dumps({"target": "intent_check", "intent_id": check}).encode()
+            self.assertTrue((await self.plugin.close_review_item())["data"]["closed"])
+            self.raw_body = json.dumps({"target": "event_check", "event_id": event_check}).encode()
+            self.assertTrue((await self.plugin.close_review_item())["data"]["closed"])
+            self.assertEqual(await self.review_totals(), (0, 0, 0))
+            host.confirm_action.assert_not_awaited()
+            host.confirm_single_mute.assert_not_awaited()
+            with closing(sqlite3.connect(self.plugin._queue.path)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM execution_intents").fetchone()[0], 3)
+                self.assertEqual(db.execute("SELECT count(*) FROM dry_run_events").fetchone()[0], 3)
+                self.assertEqual(db.execute("SELECT count(*) FROM execution_attempts").fetchone()[0], 0)
+                closures = db.execute("SELECT closed_by FROM review_closures").fetchall()
+            self.assertEqual(closures, [("admin",)] * 3)
+        finally:
+            self.plugin.host = None
+
+    async def test_review_close_rejects_bad_requests_and_wrong_item_states(self):
+        _, waiting = self.seed_review("a")
+        _, running = self.seed_review("b", status="pending_auto", mode="auto", mode_reason=None)
+        _, unknown = self.seed_review("c", status="unknown")
+        event, _ = self.seed_review("d", event_status="review", status="succeeded")
+        bad = ({}, {"target": "action"}, {"target": "other", "intent_id": waiting},
+               {"target": "action", "intent_id": True}, {"target": "action", "intent_id": 0},
+               {"target": "action", "intent_id": waiting, "event_id": event},
+               {"target": "event_check", "intent_id": waiting}, {"target": "action", "intent_id": waiting, "actor": "x"},
+               {"target": "action", "intent_id": 9999}, {"target": "action", "intent_id": running},
+               {"target": "action", "intent_id": unknown}, {"target": "intent_check", "intent_id": waiting},
+               {"target": "event_check", "event_id": 9999}, {"target": "event_check", "event_id": waiting})
+        for body in bad:
+            with self.subTest(body=body):
+                self.raw_body = json.dumps(body).encode()
+                self.assertEqual((await self.plugin.close_review_item())["status_code"], 400)
+        self.raw_body = b'{"target":"action","target":"action","intent_id":1}'
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 400)
+        self.assertEqual(await self.review_totals(), (3, 1, 2))
+        self.request.username = "api_key:synthetic"
+        self.raw_body = json.dumps({"target": "action", "intent_id": waiting}).encode()
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 403)
+        self.request.username = ""
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 403)
+        self.request.username = "admin"
+        self.assertEqual(await self.review_totals(), (3, 1, 2))
+
+    async def test_only_the_latest_review_event_of_a_message_can_be_marked_checked(self):
+        older, _ = self.seed_review("a", event_status="review", status="succeeded")
+        newer, _ = self.seed_review("a", event_status="review", status="succeeded")
+        self.assertEqual(await self.review_totals(), (1, 0, 1))
+        self.raw_body = json.dumps({"target": "event_check", "event_id": older}).encode()
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 400)
+        self.raw_body = json.dumps({"target": "event_check", "event_id": newer}).encode()
+        self.assertTrue((await self.plugin.close_review_item())["data"]["closed"])
+        self.assertEqual(await self.review_totals(), (0, 0, 0))
+
+    async def test_closing_works_while_real_execution_is_off_but_confirming_does_not(self):
+        _, action = self.seed_review("a")
+        self.plugin.config["action_execution_enabled"] = False
+        self.raw_body = json.dumps({"intent_id": action}).encode()
+        self.assertEqual((await self.plugin.execute_mute())["status_code"], 503)
+        self.assertEqual((await self.plugin.confirm_pending_mute())["status_code"], 503)
+        self.assertEqual(await self.review_totals(), (1, 1, 0))
+        self.raw_body = json.dumps({"target": "action", "intent_id": action}).encode()
+        self.assertTrue((await self.plugin.close_review_item())["data"]["closed"])
+        self.assertEqual(await self.review_totals(), (0, 0, 0))
+        self.request.query = {"all_groups": "true"}
+        row = (await self.plugin.list_messages())["data"][0]
+        self.assertEqual(row["executions"][0]["closure"]["closed_by"], "admin")
+        self.assertEqual(row["execution_summary"], "dismissed")
+
+    async def test_execute_action_runs_one_action_and_never_schedules_the_plan(self):
+        host = types.SimpleNamespace(mute_executor=object(), confirm_action=AsyncMock(return_value="succeeded"))
+        self.plugin.host = host
+        self.plugin.config["action_execution_enabled"] = True
+        try:
+            self.raw_body = b'{"intent_id": 5}'
+            self.assertEqual((await self.plugin.execute_mute())["data"]["status"], "succeeded")
+            host.confirm_action.assert_awaited_once_with(5)
+            self.assertFalse(any(name.startswith("_schedule") or name == "confirm_mute" for name in vars(host)))
+            host.confirm_action.return_value = "not_claimed"
+            _, action = self.seed_review("a", action="recall")
+            self.raw_body = json.dumps({"intent_id": action}).encode()
+            result = (await self.plugin.execute_mute())["data"]
+            self.assertEqual(result, {"status": "not_claimed", "current_status": "pending_confirm", "reason_code": None})
+            host.confirm_action.side_effect = ValueError("unknown intent")
+            self.assertEqual((await self.plugin.execute_mute())["status_code"], 400)
+            host.confirm_action.side_effect = RuntimeError("boom")
+            self.assertEqual((await self.plugin.execute_mute())["status_code"], 500)
+        finally:
+            self.plugin.host = None
+
+    def rule_scope(self, **changes):
+        return {"platform_id": "p", "group_id": "g", "message_id": "a", "rule_id": "r", **changes}
+
+    async def enable_execution(self):
+        self.plugin.config["action_execution_enabled"] = True
+
+    async def test_execute_rule_requires_execution_and_a_valid_scope(self):
+        host = types.SimpleNamespace(mute_executor=object(),
+                                     confirm_rule_actions=AsyncMock(return_value={"actions": [], "stopped": False, "remaining": 0}),
+                                     confirm_action=AsyncMock(return_value="succeeded"))
+        self.plugin.host = host
+        try:
+            self.plugin.config["action_execution_enabled"] = False
+            self.raw_body = json.dumps(self.rule_scope()).encode()
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 503)
+            self.raw_body = b"{"
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 400)
+            await self.enable_execution()
+            for body in ({}, {"platform_id": "p", "group_id": "g", "message_id": "a"},
+                         {**self.rule_scope(), "intent_id": 1}, {**self.rule_scope(), "rule_id": ""},
+                         {**self.rule_scope(), "group_id": " "}, {**self.rule_scope(), "message_id": None},
+                         {**self.rule_scope(), "message_id": 1}, {**self.rule_scope(), "rule_id": "x" * 513}):
+                with self.subTest(body=body):
+                    self.raw_body = json.dumps(body).encode()
+                    self.assertEqual((await self.plugin.execute_rule())["status_code"], 400)
+            self.raw_body = b'{"platform_id":"p","platform_id":"p","group_id":"g","message_id":"a","rule_id":"r"}'
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 400)
+            self.raw_body = b"x" * (self.module.MAX_BODY_BYTES + 1)
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 400)
+            host.confirm_rule_actions.assert_not_awaited()
+            for actor in ("api_key:synthetic", "", None):
+                self.request.username = actor
+                self.raw_body = json.dumps(self.rule_scope()).encode()
+                self.assertEqual((await self.plugin.execute_rule())["status_code"], 403)
+            self.request.username = "admin"
+            host.confirm_rule_actions.assert_not_awaited()
+            self.request.username = "member"
+            self.raw_body = json.dumps(self.rule_scope()).encode()
+            self.assertEqual((await self.plugin.execute_rule())["data"], {"actions": [], "stopped": False, "remaining": 0})
+            host.confirm_rule_actions.assert_awaited_once_with(**self.rule_scope())
+            self.request.username = "admin"
+            host.confirm_rule_actions.side_effect = PermissionError("not authorized")
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 403)
+            host.confirm_rule_actions.side_effect = ValueError("no review action")
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 400)
+            host.confirm_rule_actions.side_effect = RuntimeError("boom")
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 500)
+            self.plugin.host = None
+            self.assertEqual((await self.plugin.execute_rule())["status_code"], 503)
+        finally:
+            self.plugin.host = None
+
+    async def test_execute_rule_returns_the_host_result_and_never_confirms_other_actions(self):
+        host = types.SimpleNamespace(mute_executor=object(),
+            confirm_rule_actions=AsyncMock(return_value={"actions": [{"intent_id": 1, "status": "succeeded"},
+                                                                     {"intent_id": 2, "status": "unknown"}],
+                                                         "stopped": True, "remaining": 1}),
+            confirm_action=AsyncMock(return_value="succeeded"))
+        self.plugin.host = host
+        await self.enable_execution()
+        try:
+            _, first = self.seed_review("a", action="mute")
+            _, second = self.seed_review("a", action="reply", index=1)
+            _, other = self.seed_review("a", action="recall", index=2, rule="other")
+            self.raw_body = json.dumps(self.rule_scope()).encode()
+            result = (await self.plugin.execute_rule())["data"]
+            self.assertEqual(result["actions"], [{"intent_id": 1, "status": "succeeded"},
+                                                 {"intent_id": 2, "status": "unknown"}])
+            self.assertTrue(result["stopped"])
+            self.assertEqual(result["remaining"], 1)
+            host.confirm_rule_actions.assert_awaited_once_with(**self.rule_scope())
+            host.confirm_action.assert_not_awaited()
+            with closing(sqlite3.connect(self.plugin._queue.path)) as db:
+                statuses = dict(db.execute("SELECT id, status FROM execution_intents").fetchall())
+            self.assertEqual(statuses, {first: "pending_confirm", second: "pending_confirm", other: "pending_confirm"})
+        finally:
+            self.plugin.host = None
+
+    async def test_close_review_item_accepts_a_rule_scope_and_validates_it(self):
+        _, first = self.seed_review("a", action="mute")
+        _, second = self.seed_review("a", action="reply", index=1)
+        _, other = self.seed_review("a", action="recall", index=2, rule="other")
+        self.raw_body = json.dumps({"target": "rule_actions", **self.rule_scope()}).encode()
+        self.assertEqual((await self.plugin.close_review_item())["data"]["closed"], 2)
+        with closing(sqlite3.connect(self.plugin._queue.path)) as db:
+            statuses = dict(db.execute("SELECT id, status FROM execution_intents").fetchall())
+        self.assertEqual(statuses, {first: "dismissed", second: "dismissed", other: "pending_confirm"})
+        self.request.query = {"all_groups": "true"}
+        data = (await self.plugin.pending_reviews())["data"]
+        self.assertEqual([(item["message_id"], [action["id"] for action in item["actions"]]) for item in data["messages"]],
+                         [("a", [other])])
+        for body in ({"target": "rule_actions", **self.rule_scope(), "intent_id": first},
+                     {"target": "rule_actions", "platform_id": "p", "group_id": "g", "rule_id": "r"},
+                     {"target": "rule_actions", **self.rule_scope(), "event_id": 1},
+                     {"target": "action", "intent_id": first, "kind": "checked"}):
+            with self.subTest(body=body):
+                self.raw_body = json.dumps(body).encode()
+                self.assertEqual((await self.plugin.close_review_item())["status_code"], 400)
+        self.request.username = "api_key:synthetic"
+        self.raw_body = json.dumps({"target": "rule_actions", **self.rule_scope(rule_id="other")}).encode()
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 403)
+        self.request.username = "admin"
+        self.raw_body = json.dumps({"target": "rule_actions", **self.rule_scope(rule_id="missing")}).encode()
+        self.assertEqual((await self.plugin.close_review_item())["status_code"], 400)
+
+    async def test_records_filter_is_saved_per_user_and_separate_from_the_rules_group(self):
+        self.raw_body = b'{"platform_id":"p","group_id":"g"}'
+        await self.plugin.save_ui_state()
+        self.raw_body = b'{"records_platform_id":"rp","records_group_id":"rg"}'
+        self.assertEqual((await self.plugin.save_ui_state())["data"], {"records_platform_id": "rp", "records_group_id": "rg"})
+        self.assertEqual((await self.plugin.get_ui_state())["data"],
+                         {"platform_id": "p", "group_id": "g", "active_tab": "status",
+                          "records_platform_id": "rp", "records_group_id": "rg"})
+        self.request.username = "other"
+        self.assertIsNone((await self.plugin.get_ui_state())["data"])
+        self.raw_body = b'{"records_platform_id":"q","records_group_id":"h"}'
+        await self.plugin.save_ui_state()
+        self.request.username = "admin"
+        self.assertEqual((await self.plugin.get_ui_state())["data"]["records_group_id"], "rg")
+        self.raw_body = b'{"platform_id":"p2","group_id":"g2"}'
+        await self.plugin.save_ui_state()
+        state = (await self.plugin.get_ui_state())["data"]
+        self.assertEqual((state["platform_id"], state["records_platform_id"], state["records_group_id"]), ("p2", "rp", "rg"))
+        self.raw_body = b'{"records_platform_id":"","records_group_id":""}'
+        self.assertEqual((await self.plugin.save_ui_state())["data"], NO_RECORDS_FILTER)
+        self.assertEqual((await self.plugin.get_ui_state())["data"]["platform_id"], "p2")
+        reopened = self.module.RuleSentinel(self.context, {})
+        await reopened.initialize()
+        try:
+            self.raw_body = b'{"records_platform_id":"keep","records_group_id":"me"}'
+            await self.plugin.save_ui_state()
+            self.assertEqual((await reopened.get_ui_state())["data"]["records_group_id"], "me")
+        finally:
+            await reopened.terminate()
+
+    async def test_records_filter_rejects_invalid_payloads(self):
+        bodies = ({"records_platform_id": "p"}, {"records_group_id": "g"},
+                  {"records_platform_id": "p", "records_group_id": ""}, {"records_platform_id": "", "records_group_id": "g"},
+                  {"records_platform_id": " ", "records_group_id": "g"}, {"records_platform_id": None, "records_group_id": "g"},
+                  {"records_platform_id": "p" * 129, "records_group_id": "g"},
+                  {"records_platform_id": "p", "records_group_id": "g" * 129},
+                  {"records_platform_id": "p", "records_group_id": "g", "username": "other"},
+                  {"records_platform_id": "p", "records_group_id": "g", "platform_id": "p", "group_id": "g"},
+                  {"records_platform_id": "p", "records_group_id": "g", "active_tab": "records"})
+        for body in bodies:
+            with self.subTest(body=body):
+                self.raw_body = json.dumps(body).encode()
+                self.assertEqual((await self.plugin.save_ui_state())["status_code"], 400)
+        self.assertIsNone((await self.plugin.get_ui_state())["data"])
+        self.raw_body = json.dumps({"records_platform_id": "p" * 128, "records_group_id": "g" * 128}).encode()
+        self.assertEqual((await self.plugin.save_ui_state())["data"]["records_group_id"], "g" * 128)
+
+    async def test_revoke_violation_count_validates_the_optional_count_id(self):
+        base = {"platform_id": "p", "group_id": "g", "message_id": "m"}
+        for body in ({**base, "count_id": "1"}, {**base, "count_id": 0}, {**base, "count_id": True},
+                     {**base, "count_id": 1, "extra": 1}, {"platform_id": "p", "group_id": "g"}):
+            with self.subTest(body=body):
+                self.raw_body = json.dumps(body).encode()
+                self.assertEqual((await self.plugin.revoke_violation_count())["status_code"], 400)
+        self.raw_body = json.dumps({**base, "count_id": 7}).encode()
+        self.assertEqual((await self.plugin.revoke_violation_count())["status_code"], 400)
 
     async def test_invalid_or_oversized_body_is_rejected(self):
         for body in (b"not json", b"x" * (self.module.MAX_BODY_BYTES + 1), b'{"x":1,"x":2}',
@@ -1341,8 +1701,8 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
             self.context.get_config = lambda *, umo: {"wake_prefix": ["/"]}
             async def invoke(**kwargs):
                 seen_messages.append(kwargs["message"])
-                return types.SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                    tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
+                return types.SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low", "reason": "spam"}]}])
             router = plugin.host.runtime.worker.decide.decide
             make_decider = router.make_decider
             def fake_decider(*args):

@@ -39,8 +39,11 @@ class RuleManagement:
 
     @staticmethod
     def _inherits_action_mode(fields):
-        actions = fields.get("actions")
-        return isinstance(actions, list) and any(isinstance(item, dict) and item.get("mode") == "inherit" for item in actions)
+        from .action_config import rule_mode_for_fields
+        try:
+            return rule_mode_for_fields(fields.get("execution_mode"), fields.get("actions")) == "inherit"
+        except ValueError:
+            return False
 
     def preview(self, actor: str, fields: dict) -> dict:
         if not isinstance(fields, dict):

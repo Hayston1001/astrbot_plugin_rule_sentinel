@@ -203,14 +203,49 @@ class DryRunHost:
             task.add_done_callback(done)
         return task
 
-    async def confirm_mute(self, intent_id):
-        plan = await self._schedule_plan(intent_id)
-        await asyncio.shield(plan)
+    async def confirm_action(self, intent_id):
+        """Confirm only this action; never dispatch other actions in its plan."""
         return await asyncio.shield(self._start_mute(intent_id, "confirm"))
 
     async def confirm_single_mute(self, intent_id):
         """Confirm only this mute; do not dispatch other actions in its plan."""
         return await asyncio.shield(self._start_mute(intent_id, "confirm", required_action="mute"))
+
+    async def confirm_rule_actions(self, *, platform_id, group_id, message_id, rule_id):
+        """Confirm one rule's pending actions for one message, in action order.
+
+        An unknown or unclear result stops the sequence so the remaining
+        actions stay pending for a human. Actions of other rules are untouched.
+        """
+        ids = await run_sync_safely(self.queue.pending_rule_actions, platform_id=platform_id,
+                                    group_id=group_id, message_id=message_id, rule_id=rule_id)
+        results = []
+        stopped = False
+        for intent_id in ids:
+            if self.closed or self.mute_executor is None:
+                raise RuntimeError("mute executor unavailable")
+            try:
+                status = await asyncio.shield(self._start_mute(intent_id, "confirm"))
+            except Exception:
+                stopped = True
+                results.append({"intent_id": intent_id, "status": "unknown"})
+                break
+            if status == "not_claimed":
+                # The claim was refused; report the persisted state instead so a
+                # refusal that needs review stops the remaining actions.
+                state = await run_sync_safely(self.queue.confirmation_state, intent_id)
+                current = state.get("status") if isinstance(state, dict) else None
+                if current in ("unknown", "review"):
+                    results.append({"intent_id": intent_id, "status": current})
+                    stopped = True
+                    break
+            results.append({"intent_id": intent_id, "status": status})
+            if status in ("unknown", "review"):
+                stopped = True
+                break
+        remaining = await run_sync_safely(self.queue.pending_rule_actions, platform_id=platform_id,
+                                          group_id=group_id, message_id=message_id, rule_id=rule_id)
+        return {"actions": results, "stopped": stopped, "remaining": len(remaining)}
 
     async def _close_resources(self):
         # Do not release the lock until the intake and runtime have drained.

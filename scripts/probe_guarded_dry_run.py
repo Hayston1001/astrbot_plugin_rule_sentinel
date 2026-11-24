@@ -56,46 +56,41 @@ def main():
                 if message == "private context":
                     return httpx.Response(400, json={"error": {"code": "context_length_exceeded",
                                                                "message": "private context and synthetic secret"}})
-                tool_name = body["tools"][0]["function"]["name"]
-                if tool_name == "assess_rules":
-                    output = {"role": "assistant", "content": None, "tool_calls": [{"id": "batch",
-                        "type": "function", "function": {"name": "assess_rules", "arguments": json.dumps({
-                            "assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low", "reason": "spam"},
-                                            {"rule_id": "s", "outcome": "hit", "severity": "low", "reason": "spam"}]})}}]}
-                    reason = "tool_calls"
-                elif message == "private proposal":
-                    output = {"role": "assistant", "content": None, "tool_calls": [{"id": "call",
-                        "type": "function", "function": {"name": "propose_action", "arguments":
-                        json.dumps({"violated": True, "rule_id": "r", "severity": "low", "reason": "spam pattern"})}}]}
-                    reason = "tool_calls"
-                else:
-                    output, reason = {"role": "assistant", "content": "NO_ACTION"}, "stop"
+                assert body["tools"][0]["function"]["name"] == "assess_rules"
+                rule_ids = [rule["rule_id"] for rule in json.loads(body["messages"][1]["content"])["rules"]]
+                matching = message in ("private proposal", "private priority", "private tie", "private confirm")
+                assessments = [{"rule_id": rule_id, "outcome": "hit", "severity": "low", "reason": "spam pattern"}
+                               if matching else {"rule_id": rule_id, "outcome": "no_hit"} for rule_id in rule_ids]
+                output = {"role": "assistant", "content": None, "tool_calls": [{"id": "batch",
+                    "type": "function", "function": {"name": "assess_rules",
+                                                     "arguments": json.dumps({"assessments": assessments})}}]}
+                reason = "tool_calls"
                 return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 0,
                     "model": "synthetic", "choices": [{"index": 0, "finish_reason": reason, "message": output}]})
             parser = object.__new__(ProviderOpenAIOfficial)
             parser.reasoning_key = "reasoning_content"
-            async def parse(completion, strategy):
-                return await parser._parse_openai_completion(completion, make_tool_set(strategy))
+            async def parse(completion):
+                return await parser._parse_openai_completion(completion, make_tool_set())
             guarded = GuardedOpenAIInvoker(provider_id="synthetic", resolved_model="synthetic", endpoint=endpoint,
                 api_key="synthetic", transport_factory=lambda: httpx.MockTransport(handler),
                 parse_response=parse, timeout_seconds=10)
-            async def invoke(*, model, message, rules, strategy, language):
+            async def invoke(*, model, message, rules, language):
                 assert language == "en"
                 if message != "private tamper":
-                    return await guarded(model=model, message=message, rules=rules, strategy=strategy)
-                request = build_openai_request(model=model, message=message, rules=rules, strategy=strategy)
+                    return await guarded(model=model, message=message, rules=rules)
+                request = build_openai_request(model=model, message=message, rules=rules)
                 guard = SingleRequestGuard(endpoint=endpoint, expected=request)
                 transport = make_guarded_transport(delegate=httpx.MockTransport(handler), guard=guard, api_key="synthetic")
                 http = httpx.AsyncClient(transport=transport)
                 client = AsyncOpenAI(api_key="synthetic", base_url="https://example.invalid/v1", http_client=http, max_retries=0)
                 try:
                     completion = await client.chat.completions.create(**request, extra_body={"tools": []})
-                    return await parse(completion, strategy)
+                    return await parse(completion)
                 finally:
                     await client.close()
 
             try:
-                await guarded(model="changed", message="private", rules=[], strategy="model")
+                await guarded(model="changed", message="private", rules=[])
             except GuardedModelCallError:
                 pass
             else:
@@ -155,7 +150,7 @@ def main():
                        for event in events)
             assert queue.claim("p", "g") is None
 
-            for group, second_priority in (("priority", 1), ("tie", 3)):
+            for group, second_priority in (("priority", 1), ("tie", 3), ("confirm", 3)):
                 for rule_id, priority in (("r", 3), ("s", second_priority)):
                     rules.save(platform_id="p", group_id=group, rule_id=rule_id, expected_version=0,
                         text="no spam", enabled=True, allowed_actions=["mute"], duration_mode="strict",
@@ -164,17 +159,29 @@ def main():
                     payload={"text": "private " + group, "sender_id": "trigger-sender",
                              "session_origin": f"p:GroupMessage:{group}"})
             priority_worker = DryRunWorker(queue, LlmDecider(rules, invoke, model="synthetic",
-                max_duration_seconds=300, queue=queue, strategy="priority"), concurrency=1, timeout_seconds=10)
+                max_duration_seconds=300, queue=queue), concurrency=1, timeout_seconds=10)
+            confirm_worker = DryRunWorker(queue, LlmDecider(rules, invoke, model="synthetic",
+                max_duration_seconds=300, queue=queue, equal_priority_policy="confirm"),
+                concurrency=1, timeout_seconds=10)
             assert await priority_worker.drain_group("p", "priority") == 1
             assert await priority_worker.drain_group("p", "tie") == 1
+            assert await confirm_worker.drain_group("p", "confirm") == 1
             priority_events = queue.list_events(platform_id="p", group_id="priority")
             tie_events = queue.list_events(platform_id="p", group_id="tie")
-            assert [event["status"] for event in priority_events] == ["started", "proposed"]
-            assert json.loads(priority_events[-1]["detail"])["proposal"]["rule_id"] == "r"
-            assert [event["status"] for event in tie_events] == ["started", "review"]
-            assert json.loads(tie_events[-1]["detail"])["selection_reason"] == "equal_priority_conflict"
+            confirm_events = queue.list_events(platform_id="p", group_id="confirm")
+            for events_for_group in (priority_events, tie_events, confirm_events):
+                assert [event["status"] for event in events_for_group] == ["started", "proposed"]
+            priority_detail = json.loads(priority_events[-1]["detail"])
+            assert priority_detail["selected_rules"] == ["r"] and priority_detail["peer_tie"] is False
+            assert priority_detail["proposal"]["rule_id"] == "r"
+            tie_detail = json.loads(tie_events[-1]["detail"])
+            assert tie_detail["selected_rules"] == ["r", "s"] and tie_detail["peer_tie"] is False
+            assert tie_detail["selection_reason"] == "equal_priority_match"
+            confirm_detail = json.loads(confirm_events[-1]["detail"])
+            assert confirm_detail["selected_rules"] == ["r", "s"] and confirm_detail["peer_tie"] is True
             assert all("private priority" not in event["detail"] for event in priority_events)
             assert all("private tie" not in event["detail"] for event in tie_events)
+            assert all("private confirm" not in event["detail"] for event in confirm_events)
 
             rules.save(platform_id="p", group_id="bound", rule_id="r", expected_version=0,
                 text="no spam", enabled=True, allowed_actions=["mute"], duration_mode="strict",

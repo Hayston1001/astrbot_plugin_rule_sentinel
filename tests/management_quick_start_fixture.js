@@ -2,7 +2,7 @@ const scenario = new URLSearchParams(location.search).get("scenario") || "empty"
 const testGroup = {platform_id: "p", group_id: "g", alias: "测试群", rule_count: 0};
 const settings = {
   action_execution_enabled: false, monitoring_mode: "allowlist", monitoring_groups: [],
-  decision_backend: "llm", llm_provider_id: "", rule_selection_strategy: "model",
+  decision_backend: "llm", llm_provider_id: "", equal_priority_policy: "execute_all",
   default_execution_mode: "record", default_action_mode: "auto", message_retention_days: 30, audit_retention_days: 90, diagnostic_capture: false,
   reply_quote: true, reply_mention_sender: false,
   llm_reason_language: "", llm_no_action_reason_enabled: true, context_messages: 0, group_overrides: {},
@@ -38,10 +38,10 @@ if (scenario === "save-stability") {
   groups.push({...testGroup, rule_count: 1});
   groups.push({platform_id: "p", group_id: "other", alias: "另一个群", rule_count: 1});
   rules.push({platform_id: "p", group_id: "g", rule_id: "rule-a", version: 1, enabled: true, text: "original rule", priority: 0,
-    actions: [{type: "recall", mode: "auto"},
-      {type: "mute", mode: "auto", duration_mode: "strict", severity_seconds: {low: 60}}]});
+    execution_mode: "auto", actions: [{type: "recall"},
+      {type: "mute", duration_mode: "strict", severity_seconds: {low: 60}}]});
   rules.push({platform_id: "p", group_id: "other", rule_id: "rule-b", version: 1, enabled: true,
-    text: "other group rule", priority: 0, actions: []});
+    text: "other group rule", priority: 0, execution_mode: "inherit", actions: []});
   settings.llm_provider_id = "model-a";
   settings.monitoring_groups = ["p/g"];
   settings.quick_start_completed = true;
@@ -58,18 +58,24 @@ if (scenario === "scope") groups.push({platform_id: "p", group_id: "other", alia
 if (scenario === "state-error") settings.quick_start_completed = null;
 if (scenario === "model-missing") settings.llm_provider_id = "";
 window.quickStartMock = {settings, groups, rules, requests: [], uiStateReturned: false, uiStateWrites: [],
-  failLayoutRead: scenario === "layout-read-error", failLayoutSave: false, failPending: false, confirmationPosts: []};
+  failLayoutRead: scenario === "layout-read-error", failLayoutSave: false, failPending: false, confirmationPosts: [], closePosts: [],
+  ruleConfirmationPosts: [], ruleConfirmResult: null, failRuleConfirmation: false};
 const layoutKey = `fixture-layout-${scenario}`;
-const mockAction = (id) => ({id, action: "mute", mode: "confirm", status: "pending_confirm", rule_id: "no-ads",
-  rule_version: 2, duration_seconds: 600, expires_at: "2099-01-01T00:00:00Z", message_time: null,
-  created_at: "2025-01-01T00:00:00Z", detail: JSON.stringify({proposal: {reason: "重复推广"}})});
+const mockAction = (id, action = "mute", ruleId = "no-ads") => ({id, action, mode: "confirm", mode_reason: "rule", status: "pending_confirm",
+  rule_id: ruleId, rule_version: 2, duration_seconds: action === "mute" ? 600 : null, expires_at: "2099-01-01T00:00:00Z",
+  message_time: null, action_index: 0, reason_code: null, created_at: "2025-01-01T00:00:00Z",
+  detail: JSON.stringify({proposal: {reason: "重复推广"}})});
+const mockCheck = (id) => ({kind: "intent", intent_id: id, action: "mute", status: "unknown", rule_id: "no-ads",
+  reason_code: null, updated_at: "2025-01-01T00:00:00Z", event_id: null});
 window.quickStartMock.pending = scenario === "overview" ? Array.from({length: 23}, (_, index) => ({
   platform_id: "p", group_id: "g", message_id: index === 0 ? "same" : `m${index}`,
   cursor: 200 - index, content: index === 0 ? "<script>示例消息</script>" : null,
-  content_truncated: false, actions: index === 0 ? [mockAction(1), mockAction(2)] : [mockAction(index + 2)],
+  content_truncated: false, execution_allowed: true,
+  actions: index === 0 ? [mockAction(1), mockAction(2, "recall", "no-links")] : [mockAction(index + 2)],
+  checks: index === 0 ? [mockCheck(500)] : [],
 })) : [];
 if (scenario === "overview") window.quickStartMock.pending.push({platform_id: "p2", group_id: "g", message_id: "same",
-  cursor: 100, content: "另一个群的消息", content_truncated: false, actions: [mockAction(99)]});
+  cursor: 100, content: "另一个群的消息", content_truncated: false, execution_allowed: true, actions: [mockAction(99)], checks: []});
 window.quickStartMock.holdNextRuleRead = () => {
   let release;
   const promise = new Promise((resolve) => { release = resolve; });
@@ -117,14 +123,15 @@ window.AstrBotPluginView = {
       if (window.quickStartMock.failLayoutRead) throw new Error("unavailable");
       return JSON.parse(sessionStorage.getItem(layoutKey) || '{"cards":[]}');
     }
-    if (endpoint === "pending-confirmations") {
+    if (endpoint === "pending-reviews") {
       if (window.quickStartMock.failPending) throw new Error("unavailable");
-      const matching = window.quickStartMock.pending.filter((item) => params.all_groups ||
-        (item.platform_id === params.platform_id && item.group_id === params.group_id));
+      const matching = window.quickStartMock.pending;
       const rows = matching.filter((item) => params.before_id === undefined || item.cursor < params.before_id);
       const limit = params.limit || 20;
       return structuredClone({messages: rows.slice(0, limit), total_messages: matching.length,
         total_actions: matching.reduce((sum, item) => sum + item.actions.length, 0),
+        total_checks: matching.reduce((sum, item) => sum + item.checks.length, 0),
+        oldest_at: matching.length ? "2025-01-01T00:00:00Z" : null,
         next_before_id: rows.length > limit ? rows[limit - 1].cursor : null});
     }
     if (endpoint === "rules" && window.quickStartMock.heldRuleRead) {
@@ -189,12 +196,41 @@ window.AstrBotPluginView = {
       sessionStorage.setItem(layoutKey, JSON.stringify(body));
       return structuredClone(body);
     }
-    if (endpoint === "confirm-pending-mute") {
+    if (endpoint === "execute-action") {
       window.quickStartMock.confirmationPosts.push(structuredClone(body));
       if (window.quickStartMock.failConfirmation) throw new Error("unavailable");
       for (const item of window.quickStartMock.pending) item.actions = item.actions.filter((action) => action.id !== body.intent_id);
-      window.quickStartMock.pending = window.quickStartMock.pending.filter((item) => item.actions.length);
-      return structuredClone(window.quickStartMock.confirmationResult || {status: "succeeded"});
+      window.quickStartMock.pending = window.quickStartMock.pending.filter((item) => item.actions.length || item.checks.length);
+      return structuredClone(window.quickStartMock.confirmationResult || {status: "succeeded", current_status: "succeeded", reason_code: null});
+    }
+    if (endpoint === "execute-rule") {
+      window.quickStartMock.ruleConfirmationPosts.push(structuredClone(body));
+      if (window.quickStartMock.failRuleConfirmation) throw new Error("unavailable");
+      const target = window.quickStartMock.pending.find((item) => item.platform_id === body.platform_id
+        && item.group_id === body.group_id && item.message_id === body.message_id);
+      const ids = target ? target.actions.filter((action) => action.rule_id === body.rule_id).map((action) => action.id) : [];
+      if (target) target.actions = target.actions.filter((action) => action.rule_id !== body.rule_id);
+      window.quickStartMock.pending = window.quickStartMock.pending.filter((item) => item.actions.length || item.checks.length);
+      return structuredClone(window.quickStartMock.ruleConfirmResult
+        || {actions: ids.map((id) => ({intent_id: id, status: "succeeded"})), stopped: false, remaining: 0});
+    }
+    if (endpoint === "review-close") {
+      window.quickStartMock.closePosts.push(structuredClone(body));
+      if (window.quickStartMock.failClose) throw new Error("unavailable");
+      let closed = 0;
+      for (const item of window.quickStartMock.pending) {
+        const keep = item.actions.filter((action) => body.target === "rule_actions"
+          ? !(action.rule_id === body.rule_id && item.platform_id === body.platform_id
+            && item.group_id === body.group_id && item.message_id === body.message_id)
+          : !(body.target === "action" && action.id === body.intent_id));
+        closed += item.actions.length - keep.length;
+        item.actions = keep;
+        item.checks = item.checks.filter((check) => !((body.target === "intent_check" && check.kind === "intent" && check.intent_id === body.intent_id)
+          || (body.target === "event_check" && check.kind === "event" && check.event_id === body.event_id)));
+      }
+      window.quickStartMock.pending = window.quickStartMock.pending.filter((item) => item.actions.length || item.checks.length);
+      if (body.target === "rule_actions") return {closed, already_closed: 0, closed_by: "admin", closed_at: "2026-01-01T00:00:00Z"};
+      return {closed: true, already_closed: false, closed_by: "admin", closed_at: "2026-01-01T00:00:00Z"};
     }
     if (endpoint === "settings") {
       Object.assign(settings, body);

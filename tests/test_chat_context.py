@@ -24,9 +24,10 @@ def message(message_id, text, *, platform="p", group="g", sender="member", recei
                            received_at=time.monotonic() if received is None else received)
 
 
-def completion(text="NO_ACTION"):
-    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[], tools_call_args=[],
-                           completion_text=text)
+def completion(outcome="no_hit"):
+    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                           tools_call_args=[{"assessments": [{"rule_id": "rule", "outcome": outcome}]}],
+                           completion_text="")
 
 
 class ContextSnapshotTests(unittest.TestCase):
@@ -133,7 +134,7 @@ class ContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.store.save(self.config)
         for platform, group in (("p", "g"), ("q", "g"), ("p", "other")):
             self.rules.save(platform_id=platform, group_id=group, rule_id="rule", text="No abuse",
-                            enabled=True, actions=[{"type": "recall", "mode": "auto"}],
+                            enabled=True, execution_mode="auto", actions=[{"type": "recall"}],
                             expected_version=0, modified_by="test")
 
     def runtime(self, invoke, **kwargs):
@@ -161,7 +162,7 @@ class ContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 entered.set()
                 await release.wait()
             if request["message_untrusted"] == "target":
-                return completion("NEEDS_REVIEW")
+                return completion("review")
             return completion()
 
         async def gate(message):
@@ -198,7 +199,7 @@ class ContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT status, detail FROM dry_run_events WHERE message_id='target' ORDER BY id DESC LIMIT 1"
             ).fetchone()
             self.assertEqual(status, "review")
-            self.assertEqual(json.loads(detail)["review_reason"], "context_evidence_insufficient")
+            self.assertEqual(json.loads(detail)["review_reason"], "uncertain_assessment")
             self.assertEqual(json.loads(detail)["chat_context"]["count"], 1)
             self.assertNotIn("PRIOR_TEXT_ONLY", detail)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM execution_intents WHERE message_id='target'").fetchone()[0], 0)

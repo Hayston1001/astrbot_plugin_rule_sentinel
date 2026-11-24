@@ -59,8 +59,9 @@ async def run(root):
 
     async def stub(**kwargs):
         assert kwargs["chat_provider_id"] == "local-stub"
-        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                               tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "spam"}])
+        return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                               tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit",
+                                                                  "severity": "low", "reason": "spam"}]}])
 
     def no_network(*args, **kwargs):
         raise RuntimeError("network disabled by smoke probe")

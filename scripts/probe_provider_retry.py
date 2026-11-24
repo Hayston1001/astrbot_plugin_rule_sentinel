@@ -24,7 +24,7 @@ def main():
         from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
         import httpx
         from openai import AsyncOpenAI
-        from sentinel.llm_protocol import normalize_response
+        from sentinel.llm_protocol import normalize_assessment_response
 
         class FakeTools:
             def empty(self):
@@ -51,12 +51,13 @@ def main():
                 attempts.append((copy.deepcopy(payloads), tools, kwargs))
                 if len(attempts) == 1:
                     raise ValueError(error)
-                return LLMResponse(role="assistant", completion_text="NO_ACTION")
+                return LLMResponse(role="tool", tools_call_name=["assess_rules"],
+                                   tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
             provider._prepare_chat_payload = prepare
             provider._query = query
             result = await provider.text_chat(prompt="synthetic", func_tool=FakeTools(),
                                               contexts=[], request_max_retries=0)
-            assert normalize_response(result).status == "no_action"
+            assert normalize_assessment_response(result).status == "assessments"
             assert len(attempts) == 2 and all(item[2]["request_max_retries"] == 0 for item in attempts)
             return attempts
 
@@ -73,7 +74,7 @@ def main():
                 requests.append(json.loads(request.content))
                 return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 0,
                     "model": "synthetic", "choices": [{"index": 0, "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "NO_ACTION"}}]})
+                    "message": {"role": "assistant", "content": "done"}}]})
             http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             client = AsyncOpenAI(api_key="synthetic", base_url="https://example.invalid/v1", http_client=http,
                                  max_retries=0)
@@ -89,7 +90,7 @@ def main():
                     FakeTools(), request_max_retries=1)
             finally:
                 await client.close()
-            assert normalize_response(result).status == "no_action"
+            assert normalize_assessment_response(result).status == "rejected"
             assert len(requests) == 1
             assert requests[0]["messages"] == [{"role": "system", "content": "replacement"}]
             assert requests[0]["tools"] == []

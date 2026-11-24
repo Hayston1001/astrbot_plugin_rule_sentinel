@@ -8,17 +8,16 @@ audit, endpoint, authorization and the final transport boundary.
 import copy
 import json
 
-from .astrbot_llm import PRIORITY_SYSTEM_PROMPT, PRIORITY_TOOL_PARAMETERS, SYSTEM_PROMPT, TOOL_PARAMETERS
+from .astrbot_llm import SYSTEM_PROMPT, TOOL_PARAMETERS
 from .action_config import validate_actions
 from .prompts import PROMPTS
 from .dry_run_ingest import MAX_MESSAGE_CHARS
 from .openai_request_guard import RequestBodyGuard, RequestIntegrityError
 
 
-def build_openai_request(*, model: str, message: str, rules: list, strategy: str) -> dict:
+def build_openai_request(*, model: str, message: str, rules: list) -> dict:
     if (not isinstance(model, str) or not model.strip() or not isinstance(message, str) or not message.strip()
-            or len(message) > MAX_MESSAGE_CHARS or not isinstance(rules, list) or not rules
-            or strategy not in ("model", "priority")):
+            or len(message) > MAX_MESSAGE_CHARS or not isinstance(rules, list) or not rules):
         raise RequestIntegrityError("invalid request inputs")
     rule_ids = set()
     for rule in rules:
@@ -67,13 +66,11 @@ def build_openai_request(*, model: str, message: str, rules: list, strategy: str
         rule_ids.add(rule["rule_id"])
     try:
         prompt = json.dumps({"rules": rules, "message_untrusted": message}, ensure_ascii=False, allow_nan=False)
-        name = "assess_rules" if strategy == "priority" else "propose_action"
-        description = PROMPTS["en"]["tool_priority" if strategy == "priority" else "tool_model"]
         request = {"model": model, "messages": [
-            {"role": "system", "content": PRIORITY_SYSTEM_PROMPT if strategy == "priority" else SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}],
-            "tools": [{"type": "function", "function": {"name": name, "description": description,
-                "parameters": copy.deepcopy(PRIORITY_TOOL_PARAMETERS if strategy == "priority" else TOOL_PARAMETERS)}}],
+            "tools": [{"type": "function", "function": {"name": "assess_rules", "description": PROMPTS["en"]["tool"],
+                "parameters": copy.deepcopy(TOOL_PARAMETERS)}}],
             "tool_choice": "auto", "stream": False}
         RequestBodyGuard(request)
         return request

@@ -11,7 +11,7 @@ class GuardedInvokerTests(unittest.IsolatedAsyncioTestCase):
         def factory():
             self.created.append(True)
             self.fail("transport should not be created")
-        async def parse(response, strategy):
+        async def parse(response):
             return response
         self.config = {"provider_id": "provider", "resolved_model": "model",
                        "endpoint": "https://example.invalid/v1/chat/completions", "api_key": "synthetic",
@@ -23,6 +23,12 @@ class GuardedInvokerTests(unittest.IsolatedAsyncioTestCase):
         invoke = GuardedOpenAIInvoker(**self.config)
         with self.assertRaises(GuardedModelCallError):
             await invoke(model="other", message="private", rules=self.rules)
+        self.assertEqual(self.created, [])
+
+    async def test_strategy_argument_is_not_accepted(self):
+        invoke = GuardedOpenAIInvoker(**self.config)
+        with self.assertRaises(TypeError):
+            await invoke(model="provider", message="private", rules=self.rules, strategy="priority")
         self.assertEqual(self.created, [])
 
     async def test_context_limit_requires_explicit_structured_error_code(self):

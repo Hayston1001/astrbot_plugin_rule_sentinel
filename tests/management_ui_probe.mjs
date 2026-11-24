@@ -32,7 +32,9 @@ function makeNode(tag) {
       this.children.splice(index, 0, child);
     },
     remove() { if (this.parent) { this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; } },
+    replaceChildren(...nodes) { for (const child of this.children) child.parent = null; this.children = []; for (const child of nodes) this.appendChild(child); },
     setAttribute(name, value) { this.attributes[name] = value; },
+    getAttribute(name) { return this.attributes[name] ?? null; },
     addEventListener(type, handler) { this.handlers[type] = handler; },
     focus(options) { this.focusOptions = options; },
     scrollIntoView(options) { this.scrollOptions = options; },
@@ -72,6 +74,8 @@ let initializing = true;
 let immediateRuleLoad = false;
 let delayConfirm = false;
 let actionStatus = "succeeded";
+let ruleResult = {actions: [{intent_id: 21, status: "succeeded"}, {intent_id: 22, status: "succeeded"}], stopped: false, remaining: 0};
+let closeResult = {closed: 2, already_closed: 0, closed_by: "admin", closed_at: "2026-01-01T00:00:00Z"};
 let reduceMotion = false;
 const windowHandlers = {};
 globalThis.window = {innerWidth: 800, innerHeight: 600, scrollY: 0,
@@ -106,6 +110,8 @@ globalThis.window = {innerWidth: 800, innerHeight: 600, scrollY: 0,
       return {fields: malformedPreview ? {platform_id: "p"} : body, expires: 1, signature: "synthetic"};
     }
     if (endpoint === "execute-action") return {status: actionStatus};
+    if (endpoint === "execute-rule") return ruleResult;
+    if (endpoint === "review-close") return closeResult;
     if (endpoint === "ui-state") return body;
     if (endpoint === "rules/confirm") {
       if (!Array.isArray(body?.fields?.actions)) throw new Error("invalid preview");
@@ -118,13 +124,13 @@ globalThis.window = {innerWidth: 800, innerHeight: 600, scrollY: 0,
 const source = await readFile(process.argv[2]);
 await import("data:text/javascript;base64," + source.toString("base64"));
 initializing = false;
+elements["rule-execution-mode"].value = "inherit";
 assert.equal(elements["new-rule"].disabled, false);
 assert.equal(elements["records-empty"].hidden, false);
 assert.match(elements["records-empty"].textContent, /还没有判定记录/);
 elements["group-select"].value = JSON.stringify(["p", "g"]);
 const initialSelection = elements["group-select"].handlers.change();
 delayed.rules.resolve([]);
-delayed.messages.resolve([]);
 await initialSelection;
 elements.rule.value = " r ";
 elements["audit-next"].disabled = false;
@@ -152,7 +158,6 @@ const nextSelection = elements["group-select"].handlers.change();
 staleRules.resolve([{rule_id: "stale"}]);
 await oldRules;
 delayed.rules.resolve([]);
-delayed.messages.resolve([]);
 await nextSelection;
 assert.equal(elements.output.textContent, "");
 assert.equal(elements["audit-next"].disabled, true);
@@ -173,18 +178,18 @@ assert.deepEqual(elements["action-list"].children.map((item) => item.children[0]
 assert.equal(reply.children[0].children[0].children[0].textContent, "动作");
 assert.equal(reply.style["--action-hue"], firstAction.style["--action-hue"]);
 assert.equal(firstAction.children[1].value, "");
-assert.equal(firstAction.children[2].value, "inherit");
-assert.equal(firstAction.children[2].children[0].textContent, "全局(自动)");
+assert.ok(!firstAction.children.some((node) => node.className === "action-mode"));
+assert.ok(!firstAction.children.some((node) => node.className === "action-mode-label"));
 await elements.preview.handlers.click();
 assert.match(latestFeedback().children[0].textContent, /请选择动作类型/);
 firstAction.children[1].value = "mute";
 firstAction.children[1].handlers.change();
-assert.equal(firstAction.children[5].children[1].children.length, 0);
-firstAction.children[5].children[2].handlers.click();
-const level = firstAction.children[5].children[1].children[0].children[0].children[0];
+assert.equal(firstAction.children[4].children[1].children.length, 0);
+firstAction.children[4].children[2].handlers.click();
+const level = firstAction.children[4].children[1].children[0].children[0].children[0];
 level.value = "low";
 level.handlers.change();
-firstAction.children[5].children[1].children[0].children[1].children[0].value = "60";
+firstAction.children[4].children[1].children[0].children[1].children[0].value = "60";
 const initialMuteHue = firstAction.style["--action-hue"];
 level.value = "high";
 level.handlers.input();
@@ -197,19 +202,16 @@ assert.equal(firstAction.style["--action-hue"], initialMuteHue);
 reply.children[1].value = "reply";
 reply.children[1].handlers.change();
 assert.notEqual(reply.style["--action-hue"], initialMuteHue);
-const automaticReplyHue = reply.style["--action-hue"];
-reply.children[2].value = "confirm";
-reply.children[2].handlers.change();
 const initialReplyHue = reply.style["--action-hue"];
-assert.notEqual(initialReplyHue, automaticReplyHue);
-reply.children[3].children[0].value = "{sender_id} / {rule_id}";
-reply.children[3].children[0].handlers.input();
+reply.children[2].children[0].value = "{sender_id} / {rule_id}";
+reply.children[2].children[0].handlers.input();
 assert.equal(reply.style["--action-hue"], initialReplyHue);
-reply.children[3].children[0].handlers.change();
+reply.children[2].children[0].handlers.change();
 const replyHue = reply.style["--action-hue"];
 assert.notEqual(replyHue, initialReplyHue);
   await elements.preview.handlers.click();
-  assert.deepEqual(requests.findLast((request) => request.endpoint === "rules/preview").body.actions[1], {type: "reply", mode: "confirm", template: "{sender_id} / {rule_id}"});
+  assert.deepEqual(requests.findLast((request) => request.endpoint === "rules/preview").body.actions[1], {type: "reply", template: "{sender_id} / {rule_id}"});
+  assert.equal(requests.findLast((request) => request.endpoint === "rules/preview").body.execution_mode, "inherit");
   const replyOptions = reply.children.find(node => node.className === "reply-options");
   assert.equal(replyOptions.hidden, false);
   assert.equal(firstAction.children.find(node => node.className === "reply-options").hidden, true);
@@ -221,7 +223,7 @@ assert.notEqual(replyHue, initialReplyHue);
   mention.handlers.change();
   await elements.preview.handlers.click();
   assert.deepEqual(requests.findLast((request) => request.endpoint === "rules/preview").body.actions[1],
-    {type: "reply", mode: "confirm", template: "{sender_id} / {rule_id}", quote: false, mention_sender: true});
+    {type: "reply", template: "{sender_id} / {rule_id}", quote: false, mention_sender: true});
   const handle = reply.children[0].children[1];
   const pointer = (clientY) => ({pointerId: 7, pointerType: "mouse", isPrimary: true, button: 0,
     clientX: 100, clientY, preventDefault() {}});
@@ -349,17 +351,18 @@ assert.equal(elements["action-list"].children.length, 1);
 assert.equal(elements["action-list"].children[0].children[0].children[1].disabled, true);
 elements["action-list"].children[0].children[1].value = "recall";
 elements["action-list"].children[0].children[1].handlers.change();
+assert.equal(elements["action-list"].children[0].children[2].hidden, true);
 assert.equal(elements["action-list"].children[0].children[3].hidden, true);
 assert.equal(elements["action-list"].children[0].children[4].hidden, true);
 assert.equal(elements["action-list"].children[0].children[5].hidden, true);
 await elements.preview.handlers.click();
-assert.deepEqual(requests.findLast((request) => request.endpoint === "rules/preview").body.actions, [{type: "recall", mode: "inherit"}]);
+assert.deepEqual(requests.findLast((request) => request.endpoint === "rules/preview").body.actions, [{type: "recall"}]);
 elements["action-list"].children[0].children[1].value = "mute";
 elements["action-list"].children[0].children[1].handlers.change();
 await elements.preview.handlers.click();
 assert.equal(requests.findLast((request) => request.endpoint === "rules/preview").body.actions.length, 1);
 assert.match(latestFeedback().children[0].textContent, /规则已保存/);
-const severityEditor = elements["action-list"].children[0].children[5];
+const severityEditor = elements["action-list"].children[0].children[4];
 severityEditor.children[2].handlers.click();
 assert.equal(elements.preview.disabled, false);
 const beforeEmptyLevel = requests.length;
@@ -378,14 +381,17 @@ await elements.preview.handlers.click();
 assert.equal(requests.findLast((request) => request.endpoint === "rules/preview").body.actions[0].severity_seconds.high, 300);
 assert.match(latestFeedback().children[0].textContent, /规则已保存/);
 await elements.preview.handlers.click();
-const recordRequest = elements["refresh-group"].handlers.click();
+elements["records-group-filter"].value = JSON.stringify(["p", "other"]);
+const recordRequest = elements["records-group-filter"].handlers.change();
 assert.deepEqual(requests.filter((request) => request.endpoint === "messages").at(-1), {endpoint: "messages", params: {platform_id: "p", group_id: "other", limit: 50}});
-delayed.rules.resolve([]);
 delayed.messages.resolve([{id: 1, created_at: "2026-11-01", status: "proposed", message_id: "m",
   execution: {id: 8, action: "mute", mode: "confirm", status: "pending_confirm", history: []},
   detail: JSON.stringify({proposal: {rule_id: "r", rule_version: 2, action: "mute", duration_seconds: 60,
     reason: "<img src=x>"}, model_latency_ms: 12})}]);
 await recordRequest;
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(requests.filter((request) => request.endpoint === "ui-state" && Object.hasOwn(request.body || {}, "records_group_id")).at(-1).body,
+  {records_platform_id: "p", records_group_id: "other"});
 const [record, detailRow] = elements["records-body"].children;
 const section = (row, title) => row.children[0].children[0].children.flatMap((item) => item.children).find((item) => item.children[0]?.textContent === title);
 const actionItems = (row) => section(row, "处理动作").children[1].children;
@@ -403,7 +409,7 @@ assert.equal(section(detailRow, "判定理由").children[1].textContent, "<img s
 assert.equal(section(detailRow, "消息标识").children[1].textContent, "m");
 assert.equal(actionItems(detailRow)[0].children[0].children[0].textContent, "1. 禁言 1分钟");
 await actionButton(actionItems(detailRow)[0]).handlers.click();
-assert.deepEqual(requests.at(-1), {endpoint: "execute-action", body: {intent_id: 8}});
+assert.deepEqual(requests.findLast((request) => request.endpoint === "execute-action"), {endpoint: "execute-action", body: {intent_id: 8}});
 assert.equal(latestFeedback().children[0].textContent, "动作已执行");
 assert.equal(latestFeedback().attributes["data-tone"], "success");
 actionStatus = "unknown";
@@ -425,7 +431,7 @@ stream.onMessage({parsed: {id: 1, created_at: "2026-11-01", status: "proposed", 
   detail: JSON.stringify({proposal: {rule_id: "r", rule_version: 2, action: "recall"}})}});
 assert.equal(actionButton(actionItems(elements["records-body"].children[1])[0]).textContent, "执行撤回");
 await actionButton(actionItems(elements["records-body"].children[1])[0]).handlers.click();
-assert.deepEqual(requests.at(-1), {endpoint: "execute-action", body: {intent_id: 9}});
+assert.deepEqual(requests.findLast((request) => request.endpoint === "execute-action"), {endpoint: "execute-action", body: {intent_id: 9}});
 const multiRow = {id: 1, created_at: "2026-11-01", status: "proposed", message_id: "m",
   execution_summary: "pending_confirm", executions: [
     {id: 10, action_index: 0, action: "recall", status: "blocked", reason_code: "protected_target", platform_code: "40062003", trace_id: "trace-a"},
@@ -443,7 +449,7 @@ const multiRaw = multiDetail.children[0].children[0].children.find((item) => ite
 assert.match(multiRaw.children[1].textContent, /trace-a/);
 assert.equal(actionButton(multiActions[1]).textContent, "执行发言");
 await actionButton(multiActions[1]).handlers.click();
-assert.deepEqual(requests.at(-1), {endpoint: "execute-action", body: {intent_id: 11}});
+assert.deepEqual(requests.findLast((request) => request.endpoint === "execute-action"), {endpoint: "execute-action", body: {intent_id: 11}});
 stream.onMessage({parsed: {...multiRow, executions: multiRow.executions.map((item) => item.id === 12
   ? {...item, status: "failed", reason_code: "invalid_message"} : item)}});
 const updatedMultiDetail = elements["records-body"].children[1];
@@ -499,3 +505,60 @@ failPreview = true;
 await elements.preview.handlers.click();
 assert.match(latestFeedback().children[0].textContent, /preview unavailable/);
 assert.equal(elements.preview.disabled, false);
+
+// Record detail groups pending actions by rule and offers the same rule-level controls.
+const groupedRow = (executions) => ({id: 2, platform_id: "p", group_id: "other", message_id: "grp", created_at: "2026-11-02",
+  status: "proposed", execution_summary: "pending_confirm", executions,
+  detail: JSON.stringify({proposal: {rule_id: "alpha", rule_version: 2}})});
+const groupedExecutions = [
+  {id: 20, action_index: 0, action: "mute", rule_id: "alpha", mode: "confirm", status: "pending_confirm", duration_seconds: 60},
+  {id: 21, action_index: 1, action: "reply", rule_id: "alpha", mode: "confirm", status: "pending_confirm"},
+  {id: 22, action_index: 2, action: "recall", rule_id: "beta", mode: "confirm", status: "pending_confirm"}];
+stream.onMessage({parsed: groupedRow(groupedExecutions)});
+const groupedRecord = elements["records-body"].children.find((item) => item.attributes["aria-label"]?.includes("grp"));
+assert.ok(groupedRecord);
+const groupedDetail = elements["records-body"].children[elements["records-body"].children.indexOf(groupedRecord) + 1];
+groupedRecord.handlers.click();
+assert.equal(groupedDetail.hidden, false);
+const groupedSection = section(groupedDetail, "处理动作");
+const groupItems = groupedSection.children[1].children;
+const ruleGroups = groupItems.filter((item) => item.className === "record-action-group");
+assert.equal(ruleGroups.length, 2);
+assert.equal(ruleGroups[0].children[0].children[0].textContent, "规则: alpha");
+assert.equal(ruleGroups[0].children[0].children[1].textContent, "2 项待确认");
+assert.equal(ruleGroups[1].children[0].children[0].textContent, "规则: beta");
+assert.equal(ruleGroups[1].children[0].children[1].textContent, "1 项待确认");
+// A rule with a single pending action still gets the rule-level controls.
+assert.deepEqual(ruleGroups[1].children[1].children.map((item) => item.textContent), ["确认本规则全部 (1 项)", "放弃本规则剩余"]);
+assert.equal(ruleGroups[0].children[1].children[0].textContent, "确认本规则全部 (2 项)");
+assert.equal(ruleGroups[0].children[1].children[0].attributes["aria-label"], "确认规则 alpha 的全部 2 项待确认动作");
+assert.equal(ruleGroups[0].children[1].children[1].attributes["aria-label"], "放弃规则 alpha 的剩余 2 项待确认动作");
+assert.equal(groupItems.filter((item) => item.className === "record-action").length, 3);
+await ruleGroups[0].children[1].children[0].handlers.click();
+assert.deepEqual(requests.findLast((request) => request.endpoint === "execute-rule"),
+  {endpoint: "execute-rule", body: {platform_id: "p", group_id: "other", message_id: "grp", rule_id: "alpha"}});
+assert.equal(latestFeedback().children[0].textContent, "本规则的 2 项动作已执行");
+assert.equal(latestFeedback().attributes["data-tone"], "success");
+ruleResult = {actions: [{intent_id: 20, status: "succeeded"}, {intent_id: 21, status: "unknown"}], stopped: true, remaining: 0};
+await ruleGroups[0].children[1].children[0].handlers.click();
+assert.equal(latestFeedback().children[0].textContent, "已执行 1 项, 另有 1 项需复核, 请查看记录");
+assert.equal(latestFeedback().attributes["data-tone"], "warning");
+ruleResult = {actions: [{intent_id: 20, status: "succeeded"}, {intent_id: 21, status: "succeeded"}], stopped: false, remaining: 0};
+const betaControls = ruleGroups[1].children[1];
+betaControls.children[1].handlers.click();
+assert.match(betaControls.children[0].textContent, /无法恢复/);
+assert.match(betaControls.children[0].textContent, /不会调用平台/);
+assert.equal(betaControls.children[0].attributes["role"], "alert");
+betaControls.children[2].handlers.click();
+assert.deepEqual(betaControls.children.map((item) => item.textContent), ["确认本规则全部 (1 项)", "放弃本规则剩余"]);
+betaControls.children[1].handlers.click();
+await betaControls.children[1].handlers.click();
+assert.deepEqual(requests.findLast((request) => request.endpoint === "review-close"),
+  {endpoint: "review-close", body: {target: "rule_actions", platform_id: "p", group_id: "other", message_id: "grp", rule_id: "beta"}});
+assert.equal(latestFeedback().children[0].textContent, "已放弃该规则的剩余动作, 未调用平台");
+assert.equal(latestFeedback().attributes["data-tone"], "success");
+closeResult = {closed: 0, already_closed: 2, closed_by: "admin", closed_at: "2026-01-01T00:00:00Z"};
+ruleGroups[0].children[1].children[1].handlers.click();
+await ruleGroups[0].children[1].children[1].handlers.click();
+assert.equal(latestFeedback().children[0].textContent, "该规则的动作已被处理");
+assert.equal(latestFeedback().attributes["data-tone"], "warning");

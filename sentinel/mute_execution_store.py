@@ -9,7 +9,7 @@ from .mute_validation import revalidate_mute
 from .recall_validation import revalidate_recall
 from .plugin_settings import read_settings
 from .rule_store import RuleStore
-from .action_config import resolve_action_mode, resolve_reply_options, validate_actions
+from .action_config import intent_mode_allowed, resolve_reply_options, validate_actions
 from .mute_validation import MuteCheck
 from .group_settings import execution_allowed, resolve_group_settings
 from .violation_store import count_cumulative_mute
@@ -46,10 +46,7 @@ class MuteExecutionStore:
                 action = next((item for item in validate_actions(rule.actions) if item["type"] == "reply"), None)
             except (ValueError, TypeError):
                 return MuteCheck(False, "invalid_rule_actions")
-            try:
-                allowed = bool(action and resolve_action_mode(action["mode"], default_action_mode) == intent.get("mode"))
-            except ValueError:
-                allowed = False
+            allowed = bool(action and intent_mode_allowed(rule.execution_mode, intent.get("mode"), default_action_mode))
             return MuteCheck(allowed, "validated" if allowed else "action_not_allowed")
         if intent.get("action") == "recall":
             return revalidate_recall(intent, rule=rule, default_action_mode=default_action_mode)
@@ -61,18 +58,12 @@ class MuteExecutionStore:
     def _counted_duration(db, intent):
         if intent["action"] != "mute":
             return None
-        row = db.execute("""SELECT duration_seconds FROM violation_counts WHERE source_event_id=?
-            AND platform_id=? AND group_id=? AND message_id=? AND rule_id=? AND sender_id=? AND revoked_at_us IS NULL""",
+        row = db.execute("""SELECT duration_seconds FROM violation_counts AS c WHERE source_event_id=?
+            AND platform_id=? AND group_id=? AND message_id=? AND sender_id=? AND revoked_at_us IS NULL
+            AND ? IN (SELECT value FROM json_each(c.owner))""",
             (intent["source_event_id"], intent["platform_id"], intent["group_id"], intent["message_id"],
-             intent["rule_id"], intent["target_sender_id"])).fetchone()
+             intent["target_sender_id"], intent["rule_id"])).fetchone()
         return row[0] if row else None
-
-    @staticmethod
-    def _recall_expired(intent):
-        created = datetime.fromisoformat(intent["message_time"])
-        if created.tzinfo is None or created > datetime.now(timezone.utc):
-            raise ValueError("invalid recall timestamp")
-        return (datetime.now(timezone.utc) - created).total_seconds() > 110
 
     def begin_attempt(self, intent_id, *, requested_mode, allow_retry=False, required_action=None):
         """Atomically claim an intent and persist an attempt before any HTTP call.
@@ -141,24 +132,21 @@ class MuteExecutionStore:
                     reason = "invalid_reply_options"
                 else:
                     intent["template"] = action["template"]
-            if intent["action"] != "reply":
+            if intent["action"] == "mute":
                 try:
                     expires = datetime.fromisoformat(intent["expires_at"])
-                    created = datetime.fromisoformat(intent["message_time"] if intent["action"] == "recall" else intent["created_at"])
-                    duration = 110 if intent["action"] == "recall" else intent["duration_seconds"]
+                    created = datetime.fromisoformat(intent["created_at"])
+                    duration = intent["duration_seconds"]
                     if (expires.tzinfo is None or created.tzinfo is None or type(duration) is not int
                             or abs((expires - (created + timedelta(seconds=duration))).total_seconds()) >= 1):
                         reason = reason or "invalid_expiry"
-                    elif intent["action"] == "recall" and self._recall_expired(intent):
-                        reason = reason or "recall_expired"
-                    elif intent["action"] != "recall" and expires <= datetime.now(timezone.utc):
+                    elif expires <= datetime.now(timezone.utc):
                         reason = reason or "intent_expired"
                 except (TypeError, ValueError, OverflowError):
                     reason = reason or "invalid_expiry"
             if reason:
-                state = "blocked" if reason == "recall_expired" else "review"
-                db.execute("UPDATE execution_intents SET status=?, reason_code=?, updated_at=? WHERE id=?",
-                           (state, reason, datetime.now(timezone.utc).isoformat(timespec="milliseconds"), intent_id))
+                db.execute("UPDATE execution_intents SET status='review', reason_code=?, updated_at=? WHERE id=?",
+                           (reason, datetime.now(timezone.utc).isoformat(timespec="milliseconds"), intent_id))
                 db.commit()
                 self._notify(intent_id)
                 return None
@@ -259,8 +247,7 @@ class MuteExecutionStore:
             intent, config = dict(row), json.loads(setting["payload"])
             if not execution_allowed(config, intent["platform_id"], intent["group_id"]):
                 return False
-            if (MuteExecutionStore._recall_expired(intent) if intent["action"] == "recall"
-                    else intent["action"] != "reply" and datetime.fromisoformat(intent["expires_at"]) <= datetime.now(timezone.utc)):
+            if intent["action"] == "mute" and datetime.fromisoformat(intent["expires_at"]) <= datetime.now(timezone.utc):
                 return False
             settings = read_settings(config)
             key = (intent["platform_id"], intent["group_id"])
@@ -293,10 +280,6 @@ class MuteExecutionStore:
         try:
             db.execute("BEGIN IMMEDIATE")
             if not self._recheck_in_transaction(db, intent_id, attempt, expected_reply_options=expected_reply_options):
-                row = db.execute("SELECT * FROM execution_intents WHERE id=? AND status='executing' AND attempts=?", (intent_id, attempt)).fetchone()
-                if row and row["action"] == "recall" and self._recall_expired(dict(row)):
-                    db.close()
-                    return "recall_expired"
                 db.close()
                 return None
             current = db.execute("""SELECT a.id, i.platform_id, i.group_id, i.target_sender_id

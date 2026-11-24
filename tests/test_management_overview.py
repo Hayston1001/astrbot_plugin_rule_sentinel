@@ -43,11 +43,23 @@ class ManagementOverviewTests(unittest.TestCase):
         self.page.close()
         self.assertEqual(self.errors, [])
 
-    def test_pending_grouping_pagination_scope_and_single_action_confirmation(self):
+    COUNT_ALL = "24 条消息待复核 (25 个可确认动作, 1 项需核查)"
+
+    def test_pending_grouping_pagination_all_groups_and_single_action_confirmation(self):
         from playwright.sync_api import expect
         page = self.page
+        page.evaluate("""() => {
+          const api = window.AstrBotPluginView.apiGet;
+          window.reviewReads = [];
+          window.AstrBotPluginView.apiGet = (endpoint, params) => {
+            if (endpoint === 'pending-reviews') window.reviewReads.push(structuredClone(params));
+            return api(endpoint, params);
+          };
+        }""")
+        page.evaluate("window.SentinelOverview.refresh()")
         expect(page.locator("#page-title")).to_have_text("总览")
-        expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        expect(page.locator("#overview-pending-scope")).to_have_text("需要人工处理的事项, 固定统计全部群.")
         expect(page.locator(".overview-pending-message")).to_have_count(5)
         expect(page.locator("#overview-pending-more")).to_be_visible()
         for count in (10, 15, 20, 24):
@@ -60,17 +72,243 @@ class ManagementOverviewTests(unittest.TestCase):
         expect(first).to_contain_text("<script>示例消息</script>")
         expect(first).to_contain_text("重复推广")
         expect(first).to_contain_text("执行结果尚未产生")
+        expect(first).to_contain_text("确认原因: 规则设置为人工确认")
+        expect(first).to_contain_text("2 个动作, 1 项核查")
+        expect(first.locator(".action-progress").first.locator("li")).to_have_count(3)
+        expect(first.locator(".overview-pending-check")).to_have_count(1)
         self.assertEqual(first.locator("script").count(), 0)
-        first.get_by_role("button", name=re.compile("确认并尝试禁言")).first.click()
+        first.get_by_role("button", name=re.compile("确认执行禁言")).first.click()
         expect(page.locator("#feedback-region")).to_contain_text("禁言已执行")
-        expect(page.locator("#overview-pending-count")).to_have_text("24 个动作, 涉及 24 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text("24 条消息待复核 (24 个可确认动作, 1 项需核查)")
         self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
+        self.assertEqual(page.evaluate("window.quickStartMock.closePosts"), [])
+        # The card never follows the group selector: it always reads every group.
         page.evaluate("""() => { const node = document.querySelector('#group-select');
             node.value = JSON.stringify(['p2', 'g']); node.dispatchEvent(new Event('change', {bubbles: true})); }""")
-        expect(page.locator("#overview-pending-count")).to_have_text("1 个动作, 涉及 1 条消息")
-        expect(page.locator("#overview-pending-scope")).to_have_text("另一个群")
-        page.locator(".overview-pending-message summary").click()
-        expect(page.locator(".overview-pending-message")).to_contain_text("另一个群的消息")
+        page.evaluate("window.SentinelOverview.refresh()")
+        expect(page.locator("#overview-pending-count")).to_have_text("24 条消息待复核 (24 个可确认动作, 1 项需核查)")
+        expect(page.locator("#overview-pending-scope")).to_have_text("需要人工处理的事项, 固定统计全部群.")
+        reads = page.evaluate("window.reviewReads")
+        self.assertTrue(reads)
+        self.assertTrue(all(read.get("all_groups") == "true" and "platform_id" not in read and "group_id" not in read
+                            for read in reads), reads)
+        other = page.locator(".overview-pending-message", has_text="另一个群")
+        expect(other).to_have_count(1)
+        other.locator("summary").click()
+        expect(other).to_contain_text("另一个群的消息")
+
+    def test_pending_cards_name_every_group_and_jump_to_the_message_group(self):
+        from playwright.sync_api import expect
+        page = self.page
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        for _ in range(4):
+            page.locator("#overview-pending-more").click()
+        expect(page.locator(".overview-pending-message")).to_have_count(24)
+        groups = page.locator(".overview-pending-group").all_inner_texts()
+        self.assertEqual(groups.count("测试群"), 23)
+        self.assertEqual(groups.count("另一个群"), 1)
+        other = page.locator(".overview-pending-message", has_text="另一个群")
+        other.get_by_role("button", name=re.compile("在判定记录中查看")).click()
+        expect(page.locator("#tab-records")).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#records-group-filter")).to_have_value('["p2","g"]')
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.records_group_id === 'g')")
+        writes = page.evaluate("window.quickStartMock.uiStateWrites")
+        self.assertIn({"records_platform_id": "p2", "records_group_id": "g"}, writes)
+        expect(page.locator("#feedback-region")).to_contain_text("没有找到这条消息的判定记录")
+
+    def test_review_items_can_be_given_up_or_marked_checked_without_confirming(self):
+        from playwright.sync_api import expect
+        page = self.page
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        first = page.locator(".overview-pending-message").first
+        first.locator("summary").click()
+        first.get_by_role("button", name=re.compile("放弃执行禁言")).click()
+        expect(first.get_by_role("alert").first).to_contain_text("不会调用平台")
+        first.get_by_role("button", name=re.compile("取消, 禁言")).click()
+        self.assertEqual(page.evaluate("window.quickStartMock.closePosts"), [])
+        first.get_by_role("button", name=re.compile("放弃执行禁言")).click()
+        first.get_by_role("button", name=re.compile("确认放弃, 禁言")).click()
+        expect(page.locator("#feedback-region")).to_contain_text("已放弃执行, 未调用平台")
+        expect(page.locator("#overview-pending-count")).to_have_text("24 条消息待复核 (24 个可确认动作, 1 项需核查)")
+        first.get_by_role("button", name=re.compile("标记已核查")).click()
+        first.get_by_role("button", name=re.compile("确认标记")).click()
+        expect(page.locator("#feedback-region")).to_contain_text("已标记为已核查")
+        expect(page.locator("#overview-pending-count")).to_have_text("24 条消息待复核 (24 个可确认动作, 0 项需核查)")
+        self.assertEqual(page.evaluate("window.quickStartMock.closePosts"),
+                         [{"target": "action", "intent_id": 1}, {"target": "intent_check", "intent_id": 500}])
+        self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [])
+        first = page.locator(".overview-pending-message").first
+        expect(first).to_have_attribute("open", "")
+        first.get_by_role("button", name=re.compile("放弃执行撤回")).click()
+        first.get_by_role("button", name=re.compile("确认放弃, 撤回")).click()
+        expect(page.locator("#overview-pending-count")).to_have_text("23 条消息待复核 (23 个可确认动作, 0 项需核查)")
+
+    def test_close_failures_keep_the_item_and_report_the_error(self):
+        from playwright.sync_api import expect
+        page = self.page
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        page.evaluate("window.quickStartMock.failClose = true")
+        first = page.locator(".overview-pending-message").first
+        first.locator("summary").click()
+        first.get_by_role("button", name=re.compile("放弃执行禁言")).click()
+        first.get_by_role("button", name=re.compile("确认放弃, 禁言")).click()
+        expect(page.locator("#feedback-region")).to_contain_text("无法放弃执行, 请刷新后重试")
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+
+    def test_actions_without_real_execution_can_only_be_given_up(self):
+        from playwright.sync_api import expect
+        page = self.page
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        page.evaluate("""async () => {
+          for (const item of window.quickStartMock.pending) item.execution_allowed = false;
+          await window.SentinelOverview.refresh();
+        }""")
+        first = page.locator(".overview-pending-message").first
+        first.locator("summary").click()
+        expect(first.locator(".overview-pending-blocked")).to_contain_text("只能放弃执行")
+        for button in first.get_by_role("button", name=re.compile("确认执行")).all():
+            expect(button).to_be_disabled()
+        expect(first.get_by_role("button", name=re.compile("放弃执行禁言"))).to_be_enabled()
+        expect(first.get_by_role("button", name=re.compile("标记已核查"))).to_be_enabled()
+
+    def test_nav_badge_counts_messages_in_every_group_on_every_tab(self):
+        from playwright.sync_api import expect
+        page = self.page
+        badge, tab = page.locator("#tab-status-badge"), page.locator("#tab-status")
+        page.wait_for_function("Boolean(window.quickStartMock.stream)")
+        expect(badge).to_have_text("24")
+        expect(tab).to_have_attribute("aria-label", "总览, 24 项待复核")
+        self.assertEqual(badge.get_attribute("aria-hidden"), "true")
+        page.locator("#tab-settings").click()
+        page.evaluate("""() => { window.quickStartMock.pending.splice(0, 1);
+          window.quickStartMock.stream.onMessage({parsed: {message_id: 'same', id: 999}}); }""")
+        expect(badge).to_have_text("23")
+        expect(tab).to_have_attribute("aria-label", "总览, 23 项待复核")
+        page.evaluate("""() => { window.quickStartMock.pending = window.quickStartMock.pending.slice(0, 1);
+          window.quickStartMock.stream.onMessage({parsed: {message_id: 'x', id: 1000}}); }""")
+        expect(badge).to_have_text("1")
+        page.evaluate("""() => { window.quickStartMock.pending = [];
+          window.quickStartMock.stream.onMessage({parsed: {message_id: 'x', id: 1001}}); }""")
+        expect(badge).to_be_hidden()
+        self.assertIsNone(tab.get_attribute("aria-label"))
+        page.evaluate("""() => { window.quickStartMock.failPending = true;
+          window.quickStartMock.stream.onMessage({parsed: {message_id: 'x', id: 1002}}); }""")
+        expect(badge).to_be_hidden()
+        expect(tab).to_have_attribute("aria-label", "总览, 待复核数量不可用")
+        page.evaluate("""() => { window.quickStartMock.failPending = false;
+          window.quickStartMock.pending = Array.from({length: 120}, (_, index) => ({platform_id: 'p', group_id: 'g',
+            message_id: `big${index}`, cursor: 5000 - index, content: null, content_truncated: false,
+            execution_allowed: true, actions: [], checks: [{kind: 'intent', intent_id: 9000 + index, action: 'mute',
+              status: 'unknown', rule_id: 'r', reason_code: null, updated_at: '2025-01-01T00:00:00Z', event_id: null}]}));
+          window.quickStartMock.stream.onMessage({parsed: {message_id: 'x', id: 1003}}); }""")
+        expect(badge).to_have_text("99+")
+        expect(tab).to_have_attribute("aria-label", "总览, 120 项待复核")
+
+    def record_reads(self):
+        self.page.evaluate("""() => {
+          const api = window.AstrBotPluginView.apiGet;
+          window.reads = [];
+          window.AstrBotPluginView.apiGet = (endpoint, params) => {
+            window.reads.push({endpoint, params: structuredClone(params || {})});
+            return api(endpoint, params);
+          };
+        }""")
+
+    def reads(self, endpoint):
+        return [item["params"] for item in self.page.evaluate("window.reads") if item["endpoint"] == endpoint]
+
+    def test_group_selector_is_only_on_the_rules_page(self):
+        from playwright.sync_api import expect
+        page = self.page
+        for tab, shown in (("status", False), ("records", False), ("rules", True), ("settings", False), ("groups", False)):
+            with self.subTest(tab=tab):
+                page.locator(f"#tab-{tab}").click()
+                expect(page.locator(f"#tab-{tab}")).to_have_attribute("aria-selected", "true")
+                if shown:
+                    expect(page.locator("#group-picker")).to_be_visible()
+                else:
+                    expect(page.locator("#group-picker")).to_be_hidden()
+
+    def test_records_default_to_every_group_and_the_group_filter_is_remembered(self):
+        from playwright.sync_api import expect
+        page = self.page
+        self.record_reads()
+        page.locator("#tab-records").click()
+        expect(page.locator("#records-group-filter")).to_have_value("")
+        expect(page.locator("#records-group-filter option")).to_have_text(["全部群", "测试群", "另一个群"])
+        page.wait_for_function("window.reads.some(item => item.endpoint === 'messages')")
+        self.assertTrue(all(read.get("all_groups") == "true" and "platform_id" not in read for read in self.reads("messages")))
+        page.evaluate("window.reads = []")
+        page.locator("#records-group-filter").select_option('["p2","g"]')
+        page.wait_for_function("window.reads.some(item => item.endpoint === 'messages')")
+        read = self.reads("messages")[-1]
+        self.assertEqual((read.get("platform_id"), read.get("group_id"), read.get("all_groups")), ("p2", "g", None))
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.records_group_id === 'g')")
+        writes = page.evaluate("window.quickStartMock.uiStateWrites")
+        self.assertIn({"records_platform_id": "p2", "records_group_id": "g"}, writes)
+        self.assertFalse(any("platform_id" in item or "group_id" in item for item in writes), writes)
+        page.reload()
+        page.locator("#tab-records").click()
+        expect(page.locator("#records-group-filter")).to_have_value('["p2","g"]')
+        page.locator("#records-group-filter").select_option("")
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.records_group_id === '')")
+        page.reload()
+        page.locator("#tab-records").click()
+        expect(page.locator("#records-group-filter")).to_have_value("")
+
+    def test_records_filter_does_not_change_the_rules_group_or_overview_scope(self):
+        from playwright.sync_api import expect
+        page = self.page
+        page.locator("#tab-records").click()
+        page.locator("#records-group-filter").select_option('["p2","g"]')
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.records_group_id === 'g')")
+        page.locator("#tab-rules").click()
+        expect(page.locator("#group-select")).to_have_value("")
+        page.locator("#tab-status").click()
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        page.evaluate("""() => { const node = document.querySelector('#group-select');
+            node.value = JSON.stringify(['p', 'g']); node.dispatchEvent(new Event('change', {bubbles: true})); }""")
+        page.wait_for_function("window.quickStartMock.uiStateWrites.some(item => item.group_id === 'g')")
+        page.locator("#tab-records").click()
+        expect(page.locator("#records-group-filter")).to_have_value('["p2","g"]')
+
+    def test_a_saved_records_filter_for_an_unknown_group_is_kept(self):
+        from playwright.sync_api import expect
+        page = self.page
+        page.evaluate("""() => sessionStorage.setItem('fixture-ui-overview', JSON.stringify({platform_id: '', group_id: '',
+          active_tab: 'records', records_platform_id: 'p', records_group_id: 'deleted'}))""")
+        page.reload()
+        expect(page.locator("#tab-records")).to_have_attribute("aria-selected", "true")
+        select = page.locator("#records-group-filter")
+        expect(select).to_have_value('["p","deleted"]')
+        expect(select.locator("option:checked")).to_have_text("未命名群 (deleted)")
+        self.assertEqual(page.evaluate("window.quickStartMock.uiStateWrites.filter(item => 'records_group_id' in item)"), [])
+
+    def test_unreadable_saved_state_leaves_every_group_selected_and_writes_nothing(self):
+        from playwright.sync_api import expect
+        page = self.page
+        page.goto(self.url + "?scenario=ui-state-error")
+        expect(page.locator("#selection-status")).to_have_text("无法读取上次选择.")
+        page.locator("#tab-records").click()
+        expect(page.locator("#records-group-filter")).to_have_value("")
+        self.assertEqual(page.evaluate("window.quickStartMock.uiStateWrites.filter(item => 'records_group_id' in item)"), [])
+
+    def test_overview_summaries_always_read_every_group(self):
+        page = self.page
+        self.record_reads()
+        page.evaluate("window.SentinelOverview.refresh()")
+        page.locator("#tab-records").click()
+        page.locator("#tab-status").click()
+        page.evaluate("""() => { const node = document.querySelector('#group-select');
+            node.value = JSON.stringify(['p2', 'g']); node.dispatchEvent(new Event('change', {bubbles: true})); }""")
+        page.locator("#refresh-group").evaluate("node => node.click()")
+        page.wait_for_function("window.reads.some(item => item.endpoint === 'summary')")
+        reads = self.reads("pending-reviews")
+        self.assertTrue(reads)
+        self.assertTrue(all(read.get("all_groups") == "true" and "group_id" not in read for read in reads), reads)
+        self.assertIn({"all_groups": "true"}, self.reads("summary"))
+        # Per-group summaries feed the groups card; none of them follows the selector.
+        self.assertTrue(all(read.get("all_groups") == "true" or "pending" not in read for read in self.reads("summary")))
 
     def test_layout_control_is_next_to_title_and_tables_center_on_desktop(self):
         from playwright.sync_api import expect
@@ -102,15 +340,15 @@ class ManagementOverviewTests(unittest.TestCase):
         empty = page.locator("#overview-pending-empty")
         count = page.locator("#overview-pending-count")
         expect(empty).to_be_hidden()
-        expect(count).to_contain_text("25 个动作")
+        expect(count).to_contain_text("25 个可确认动作")
         page.evaluate("""async () => {
           window.pendingSample = structuredClone(window.quickStartMock.pending[0]);
           window.quickStartMock.pending = [];
           await window.SentinelOverview.refresh();
         }""")
         expect(empty).to_be_visible()
-        expect(empty).to_contain_text("暂无待确认禁言")
-        expect(empty).to_contain_text("需要确认的禁言会显示在这里.")
+        expect(empty).to_contain_text("暂无待复核事项")
+        expect(empty).to_contain_text("需要确认, 放弃或核查的事项会显示在这里.")
         expect(count).to_be_hidden()
         self.assertEqual(empty.get_attribute("role"), "status")
         self.assertEqual(empty.locator("svg").get_attribute("aria-hidden"), "true")
@@ -125,24 +363,24 @@ class ManagementOverviewTests(unittest.TestCase):
         page.evaluate("""async () => { window.quickStartMock.failPending = true; await window.SentinelOverview.refresh(); }""")
         expect(empty).to_be_hidden()
         expect(count).to_be_visible()
-        expect(count).to_have_text("待确认列表不可用.")
+        expect(count).to_have_text("待复核列表不可用.")
         page.evaluate("""async () => {
           window.quickStartMock.failPending = false;
           window.quickStartMock.pending = [window.pendingSample];
           await window.SentinelOverview.refresh();
         }""")
         expect(empty).to_be_hidden()
-        expect(count).to_contain_text("2 个动作")
+        expect(count).to_have_text("1 条消息待复核 (2 个可确认动作, 1 项需核查)")
 
         page.evaluate("""async () => {
           const api = window.AstrBotPluginView.apiGet;
-          window.AstrBotPluginView.apiGet = (endpoint, params) => endpoint === 'pending-confirmations'
+          window.AstrBotPluginView.apiGet = (endpoint, params) => endpoint === 'pending-reviews'
             ? Promise.resolve({messages: [], total_messages: 1, total_actions: 0, next_before_id: null})
             : api(endpoint, params);
           await window.SentinelOverview.refresh();
         }""")
         expect(empty).to_be_hidden()
-        expect(count).to_have_text("待确认列表不可用.")
+        expect(count).to_have_text("待复核列表不可用.")
 
     def test_pending_empty_load_fades_through_loading_state(self):
         from playwright.sync_api import expect
@@ -161,7 +399,7 @@ class ManagementOverviewTests(unittest.TestCase):
             if (window.capturePending) requestAnimationFrame(capture);
           };
           requestAnimationFrame(capture);
-          window.SentinelOverview.setScope({all_groups: 'true'});
+          window.SentinelOverview.setActive(true);
         }""")
         expect(page.locator("#overview-pending-count")).to_have_text("正在读取...")
         expect(page.locator("#overview-pending-empty")).to_be_visible()
@@ -242,7 +480,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         start = page.evaluate("""() => {
           const card = document.querySelector('[data-card="overall"]');
@@ -291,7 +529,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         original = page.locator('[data-card="overall"]').bounding_box()
         page.locator('[data-card="overall"] .overview-width').evaluate("button => button.click()")
@@ -436,7 +674,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         page.locator('[data-card="overall"] .overview-width').evaluate("button => button.click()")
         page.wait_for_timeout(70)
@@ -456,7 +694,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 850})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         page.locator('[data-card="overall"] .overview-width').evaluate("button => button.click()")
         page.set_viewport_size({"width": 390, "height": 850})
@@ -473,7 +711,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         first = page.locator('.overview-pending-message').first
         first.locator('summary').click()
@@ -496,7 +734,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         page.locator('[data-card="overall"] .overview-width').evaluate("button => button.click()")
         page.wait_for_timeout(100)
@@ -525,7 +763,7 @@ class ManagementOverviewTests(unittest.TestCase):
         for card in ("pending", "overall", "recent", "groups"):
             page.reload()
             page.wait_for_function("!document.querySelector('#overview-customize').disabled")
-            page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+            page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
             page.locator("#overview-customize").click()
             for direction in range(2):
                 with self.subTest(card=card, direction=direction):
@@ -646,7 +884,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         for card in ("pending", "groups"):
             page.locator(f'[data-card="{card}"] .overview-width').click()
@@ -693,7 +931,7 @@ class ManagementOverviewTests(unittest.TestCase):
             with self.subTest(source=source, target=target):
                 page.reload()
                 page.wait_for_function("!document.querySelector('#overview-customize').disabled")
-                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
                 page.locator("#overview-customize").click()
                 result = page.evaluate("""async ({source, target, xpart, ypart}) => {
                   const grid = document.querySelector('#overview-grid');
@@ -725,7 +963,7 @@ class ManagementOverviewTests(unittest.TestCase):
     def test_touch_drag_scrolls_at_the_edge_and_pointercancel_restores_the_draft(self):
         page = self.page
         page.set_viewport_size({"width": 390, "height": 700})
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         before = page.evaluate("""() => {
           for (const card of document.querySelectorAll('#overview-grid > [data-card]')) card.style.minHeight = '400px';
@@ -772,7 +1010,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1000})
         page.emulate_media(reduced_motion="no-preference")
-        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+        page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
         page.locator("#overview-customize").click()
         for card in ("overall", "recent"):
             page.locator(f'[data-card="{card}"] .overview-width').click()
@@ -824,7 +1062,7 @@ class ManagementOverviewTests(unittest.TestCase):
                 page.emulate_media(reduced_motion=reduced_motion)
                 page.reload()
                 page.wait_for_function("!document.querySelector('#overview-customize').disabled")
-                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
                 page.locator("#overview-customize").click()
                 for card in ("overall", "recent"):
                     page.locator(f'[data-card="{card}"] .overview-width').click()
@@ -963,7 +1201,7 @@ class ManagementOverviewTests(unittest.TestCase):
                 page.emulate_media(reduced_motion=reduced)
                 page.reload()
                 page.wait_for_function("!document.querySelector('#overview-customize').disabled")
-                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个动作')")
+                page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
                 page.locator("#overview-customize").click()
                 result = page.evaluate("""() => {
                   const card = document.querySelector('[data-card="overall"]');
@@ -1134,11 +1372,14 @@ class ManagementOverviewTests(unittest.TestCase):
         page.locator("#overview-cancel").click()
         expect(page.locator('[data-card="pending"]')).to_be_visible()
         page.evaluate("window.quickStartMock.failPending = true; window.SentinelOverview.refresh()")
-        expect(page.locator("#overview-pending-count")).to_have_text("待确认列表不可用.")
+        expect(page.locator("#overview-pending-count")).to_have_text("待复核列表不可用.")
         expect(page.locator("#overview-pending-status")).to_contain_text("无法读取")
+        expect(page.locator("#tab-status-badge")).to_be_hidden()
+        expect(page.locator("#tab-status")).to_have_attribute("aria-label", "总览, 待复核数量不可用")
         self.assertEqual(page.locator(".overview-pending-message").count(), 0)
         page.evaluate("window.quickStartMock.failPending = false; window.SentinelOverview.refresh()")
-        expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
+        expect(page.locator("#tab-status-badge")).to_have_text("24")
         expect(page.locator("#overview-pending-status")).to_have_text("")
 
     def test_confirmation_failures_and_expired_actions_report_their_actual_state(self):
@@ -1153,22 +1394,22 @@ class ManagementOverviewTests(unittest.TestCase):
         for result, message in cases:
             with self.subTest(result=result):
                 page.reload()
-                expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
+                expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
                 page.evaluate("value => { window.quickStartMock.confirmationResult = value; }", result)
                 first = page.locator(".overview-pending-message").first
                 first.locator("summary").click()
-                first.get_by_role("button", name=re.compile("确认并尝试禁言")).first.click()
+                first.get_by_role("button", name=re.compile("确认执行禁言")).first.click()
                 expect(page.locator("#feedback-region")).to_contain_text(message)
-                expect(page.locator("#overview-pending-count")).to_have_text("24 个动作, 涉及 24 条消息")
+                expect(page.locator("#overview-pending-count")).to_have_text("24 条消息待复核 (24 个可确认动作, 1 项需核查)")
                 self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
         page.reload()
-        expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
         page.evaluate("window.quickStartMock.failConfirmation = true")
         first = page.locator(".overview-pending-message").first
         first.locator("summary").click()
-        first.get_by_role("button", name=re.compile("确认并尝试禁言")).first.click()
+        first.get_by_role("button", name=re.compile("确认执行禁言")).first.click()
         expect(page.locator("#feedback-region")).to_contain_text("无法确认动作结果, 请查看判定记录后再操作")
-        expect(page.locator("#overview-pending-count")).to_have_text("25 个动作, 涉及 24 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
         self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
 
     def test_touch_drag_shows_no_placeholder_in_original_position_and_escape_cancels(self):
@@ -1230,7 +1471,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page.locator("#overview-layout-retry").click()
         expect(page.locator("#overview-customize")).to_be_enabled()
 
-    def test_realtime_status_and_updates_follow_the_selected_scope(self):
+    def test_realtime_status_and_updates_cover_every_group(self):
         from playwright.sync_api import expect
         page = self.page
         page.wait_for_function("Boolean(window.quickStartMock.stream)")
@@ -1240,7 +1481,7 @@ class ManagementOverviewTests(unittest.TestCase):
           window.quickStartMock.pending.splice(0, 1);
           window.quickStartMock.stream.onMessage({parsed: {message_id: 'same', id: 999}});
         }""")
-        expect(page.locator("#overview-pending-count")).to_have_text("23 个动作, 涉及 23 条消息")
+        expect(page.locator("#overview-pending-count")).to_have_text("23 条消息待复核 (23 个可确认动作, 0 项需核查)")
         page.evaluate("window.oldStream = window.quickStartMock.stream; window.oldStream.onError()")
         expect(page.locator("#overview-pending-live")).to_have_text("实时 · 重连中")
         page.wait_for_function("window.quickStartMock.stream !== window.oldStream")
@@ -1262,7 +1503,7 @@ class ManagementOverviewTests(unittest.TestCase):
         from playwright.sync_api import expect
         page = self.page
         page.locator(".overview-pending-message summary").first.click()
-        expect(page.locator(".overview-pending-message").first.locator(".action-progress li")).to_have_count(6)
+        expect(page.locator(".overview-pending-message").first.locator(".overview-pending-action").first.locator(".action-progress li")).to_have_count(3)
         for selector in ("#status-label", ".action-progress li"):
             before = page.locator(selector).first.evaluate("node => getComputedStyle(node, '::before').content")
             self.assertIn(before, ("none", "normal"))

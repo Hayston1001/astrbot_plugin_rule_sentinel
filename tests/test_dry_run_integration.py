@@ -41,13 +41,13 @@ class DryRunIntegrationTests(unittest.IsolatedAsyncioTestCase):
             admission = DryRunAdmission(queue, rules, policy=policy, capacity=10, model="synthetic", session_gate=gate)
             started, release = asyncio.Event(), asyncio.Event()
             calls = []
-            async def invoke(*, model, message, rules, strategy, language):
+            async def invoke(*, model, message, rules, language):
                 calls.append(message)
                 if message == "first private message":
                     started.set()
                     await release.wait()
-                return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
-                                       tools_call_name=[], tools_call_args=[])
+                return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                                       tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
             decider = LlmDecider(rules, invoke, model="synthetic", max_duration_seconds=300, queue=queue)
             worker = DryRunWorker(queue, PolicyGuard(decider, lambda: policy, session_gate=gate),
                                   concurrency=1, timeout_seconds=5)
@@ -100,8 +100,9 @@ class DryRunIntegrationTests(unittest.IsolatedAsyncioTestCase):
                        text="No spam", enabled=True, allowed_actions=["mute"], duration_mode="strict",
                        severity_seconds={"low": 60}, modified_by="admin")
             async def invoke(**kwargs):
-                return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["propose_action"],
-                    tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "violates rule"}])
+                return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low",
+                                                       "reason": "violates rule"}]}])
             policy = MonitoringPolicy("allowlist", frozenset({("qq", "g")}))
             admission = DryRunAdmission(queue, rules, policy=policy, capacity=100, model="model")
             decider = LlmDecider(rules, invoke, model="model", max_duration_seconds=600, queue=queue)

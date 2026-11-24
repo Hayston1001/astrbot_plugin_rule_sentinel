@@ -11,8 +11,9 @@ from .dry_run_worker import Decision
 from .decision_errors import AuditSnapshotTooLarge, AuditUnavailable
 from .dry_run_queue import MAX_AUDIT_DETAIL_CHARS
 from .async_io import run_sync_safely
-from .llm_protocol import normalize_priority_response, normalize_response
-from .rule_selection import RuleAssessment, select_rule
+from .action_config import validate_equal_priority_policy
+from .llm_protocol import normalize_assessment_response
+from .rule_selection import RuleAssessment, select_rules
 from .sentinel_core import RuleSnapshot, validate_plan_proposal
 from .rule_snapshot_guard import snapshot_is_current
 from .audit_safety import safe_resolved_model
@@ -90,8 +91,8 @@ class LlmDecider:
     class does not provide any platform action or ordinary chat tool.
     """
 
-    def __init__(self, rules, invoke, *, model: str, max_duration_seconds: int, queue, strategy: str = "model",
-                 no_action_reason_enabled: bool = True, image_enabled: bool = False,
+    def __init__(self, rules, invoke, *, model: str, max_duration_seconds: int, queue,
+                 equal_priority_policy: str = "execute_all", no_action_reason_enabled: bool = True, image_enabled: bool = False,
                  image_model: str | None = None, image_mode: str = "direct",
                  caption_prompt: str = "", fetcher=None, prefetcher=None, chat_context=None,
                  diagnostic_capture: bool = False):
@@ -99,8 +100,7 @@ class LlmDecider:
             raise ValueError("model must be explicitly selected")
         if type(max_duration_seconds) is not int or max_duration_seconds <= 0:
             raise ValueError("invalid duration limit")
-        if strategy not in ("model", "priority"):
-            raise ValueError("invalid rule selection strategy")
+        validate_equal_priority_policy(equal_priority_policy)
         if type(no_action_reason_enabled) is not bool:
             raise ValueError("invalid no-action reason setting")
         if type(image_enabled) is not bool or image_mode not in ("caption", "direct"):
@@ -116,7 +116,7 @@ class LlmDecider:
         self.model = model
         self.max_duration_seconds = max_duration_seconds
         self.queue = queue
-        self.strategy = strategy
+        self.equal_priority_policy = equal_priority_policy
         self.no_action_reason_enabled = no_action_reason_enabled
         self.image_enabled = image_enabled
         self.image_model = image_model
@@ -221,7 +221,7 @@ class LlmDecider:
             model_rules.append(data)
         language = select_prompt_language([rule.text for rule in enabled], message or caption or "")
         context_prompt = context.prompt_data() if context is not None else None
-        input_material = {"message": message, "rules": model_rules, "strategy": self.strategy,
+        input_material = {"message": message, "rules": model_rules,
                           "language": language, "prompt_version": PROMPT_VERSION}
         if caption:
             input_material["caption"] = caption
@@ -231,7 +231,7 @@ class LlmDecider:
             input_material["image_count"] = image_count
             input_material["image_bytes"] = image_bytes
         input_hash = _input_hash(input_material)
-        start_detail = {"backend": "llm", "model": judge_model, "strategy": self.strategy, "rules": rule_data,
+        start_detail = {"backend": "llm", "model": judge_model, "rules": rule_data,
                         "sender_id": sender, "prompt_language": language, "prompt_version": PROMPT_VERSION}
         if input_hash is not None:
             start_detail["input_hash"] = input_hash
@@ -250,7 +250,7 @@ class LlmDecider:
             raise AuditUnavailable("evaluation audit unavailable") from None
         started = time.monotonic()
         invoke_kwargs = {"model": judge_model, "message": message, "rules": model_rules,
-                         "strategy": self.strategy, "language": language}
+                         "language": language}
         if context_prompt is not None:
             invoke_kwargs["chat_context"] = context_prompt
         if images and self.image_mode == "direct":
@@ -259,10 +259,9 @@ class LlmDecider:
             invoke_kwargs["image_caption"] = caption
         response = await self.invoke(**invoke_kwargs)
         elapsed_ms = round((time.monotonic() - started) * 1000, 3)
-        normalized = (normalize_priority_response(response) if self.strategy == "priority" else
-                      normalize_response(response, allow_context_review=context is not None))
+        normalized = normalize_assessment_response(response)
         detail = {"backend": "llm", "model": judge_model, "rules": rule_data,
-                  "strategy": self.strategy, "prompt_language": language, "prompt_version": PROMPT_VERSION,
+                  "prompt_language": language, "prompt_version": PROMPT_VERSION,
                   "response_status": normalized.reason, "model_latency_ms": elapsed_ms,
                   "message_chars": len(message)}
         if input_hash is not None:
@@ -295,8 +294,6 @@ class LlmDecider:
             if tokens:
                 detail["usage"] = tokens
         status = normalized.status
-        if status == "no_action" and self.no_action_reason_enabled and normalized.explanation:
-            detail["reason"] = normalized.explanation
         if status == "assessments":
             assessments, proposals, non_hit_reasons = [], {}, {}
             for assessment in normalized.calls:
@@ -323,27 +320,23 @@ class LlmDecider:
                     return Decision("rejected", json.dumps({**detail, "validation": validated.reason}, ensure_ascii=False))
                 assessments.append(RuleAssessment(rule_id, True))
                 proposals[rule_id] = validated.proposal
-            selection = select_rule(enabled_priorities={rule.rule_id: rule.priority for rule in enabled},
-                                    assessments=assessments, strategy="priority")
+            selection = select_rules(enabled_priorities={rule.rule_id: rule.priority for rule in enabled},
+                                     assessments=assessments, equal_priority_policy=self.equal_priority_policy)
             detail["selection_reason"] = selection.reason
             detail["assessments"] = [{"rule_id": item.rule_id, "violated": item.violated} for item in assessments]
+            detail["matched_rules"] = [item.rule_id for item in assessments if item.violated is True]
+            detail["equal_priority_policy"] = self.equal_priority_policy
             status = "proposed" if selection.status == "selected" else selection.status
             if status == "no_action" and non_hit_reasons:
                 detail["reason"] = "; ".join(f"{rule_id}: {reason}" for rule_id, reason in non_hit_reasons.items())
-            if selection.rule_id is not None:
-                proposal = asdict(proposals[selection.rule_id])
-                detail["proposal"] = proposal
-        if status == "proposed":
-            if normalized.status != "assessments":
-                validated = validate_plan_proposal(normalized.calls[0], sender_id=sender, rules=snapshots,
-                    max_duration_seconds=self.max_duration_seconds, decision_backend="llm")
-                detail["validation"] = validated.reason
-                status = validated.status
-                if validated.proposal:
-                    detail["proposal"] = asdict(validated.proposal)
-                else:
-                    detail["rejected_call"] = _audit_rejected_call(
-                        normalized.calls[0], max_duration_seconds=self.max_duration_seconds)
+            if selection.rule_ids:
+                selected = [asdict(proposals[rule_id]) for rule_id in selection.rule_ids]
+                detail["selected_rules"] = list(selection.rule_ids)
+                detail["proposals"] = selected
+                detail["proposal"] = selected[0]
+                detail["peer_tie"] = selection.peer_tie
+            elif status == "review":
+                detail["review_reason"] = selection.reason
         if status == "no_action":
             detail["no_action_reason_enabled"] = self.no_action_reason_enabled
         if status in ("proposed", "no_action"):

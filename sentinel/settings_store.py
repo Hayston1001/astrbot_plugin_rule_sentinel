@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from string import Formatter
 
-from .action_config import REPLY_DEFAULTS, resolve_reply_options
+from .action_config import DEFAULT_EQUAL_PRIORITY_POLICY, REPLY_DEFAULTS, resolve_reply_options
 from .chat_context import validate_context_messages
 from .group_settings import DEFAULT_CHAT_QUERY_ITEMS, validate_chat_query_items
 from .notifications import validate_notification_targets
@@ -23,7 +23,7 @@ DEFAULTS = {
     "max_duration_seconds": 2592000, "model_concurrency": 20, "model_timeout_seconds": 35,
     "global_rate_per_minute": 100, "group_rate_per_minute": 60, "model_failure_threshold": 5,
     "model_cooldown_seconds": 120, "notification_targets": [], "notification_interval_seconds": 0,
-    "decision_backend": "llm", "rule_selection_strategy": "model", "llm_provider_id": "",
+    "decision_backend": "llm", "equal_priority_policy": DEFAULT_EQUAL_PRIORITY_POLICY, "llm_provider_id": "",
     "protected_target_policy": "exempt", "protected_target_template": "有消息触发了规则 {rule_id}, 但目标是管理员/机器人, {action} 无法执行",
     "protected_target_quote": False,
     "default_execution_mode": "execute", "default_action_mode": "auto", "group_overrides": {},
@@ -40,7 +40,7 @@ DEFAULTS = {
 MIGRATED_DEFAULTS = {key: DEFAULTS[key] for key in ("action_execution_enabled", "protected_target_policy",
     "protected_target_template", "protected_target_quote", "default_execution_mode", "default_action_mode", "group_overrides",
     "message_retention_days", "audit_retention_days", "llm_reason_language", "notification_targets", *LIVE_SETTING_KEYS,
-    "context_messages",
+    "context_messages", "equal_priority_policy",
     "image_judging_enabled", "image_understanding_mode", "image_provider_id", "image_caption_prompt",
     "image_max_count", "image_max_bytes_per_image", "image_max_total_bytes", "image_fetch_timeout_seconds", "diagnostic_capture")}
 MIGRATED_DEFAULTS["action_execution_enabled"] = False
@@ -148,6 +148,18 @@ class SettingsStore:
     def __init__(self, path, backup_path):
         self.path = str(path)
         self.backup_path = Path(backup_path)
+
+    @staticmethod
+    def _remove_retired_selection(config):
+        """Drop the retired model-selection strategy, global and per group."""
+        changed = config.pop("rule_selection_strategy", None) is not None
+        overrides = config.get("group_overrides", {})
+        if isinstance(overrides, dict):
+            for group in overrides.values():
+                if isinstance(group, dict) and "strategy" in group:
+                    del group["strategy"]
+                    changed = True
+        return changed
 
     @staticmethod
     def _migrate_notification_targets(config):
@@ -269,6 +281,7 @@ class SettingsStore:
                 if legacy.get("monitoring_enabled") is False:
                     self._retire_disabled_work(db)
                 self._remove_retired_backend(db, config)
+                self._remove_retired_selection(config)
                 payload = json.dumps(config, ensure_ascii=False, allow_nan=False)
                 db.execute("INSERT INTO dashboard_settings(id, payload) VALUES (1, ?)", (payload,))
             else:
@@ -291,6 +304,7 @@ class SettingsStore:
                                 if isinstance(group, dict) and group.get("chat_query_inherit") is False:
                                     del group["chat_query_inherit"]
                 retired = self._remove_retired_backend(db, config)
+                retired = self._remove_retired_selection(config) or retired
                 migrated_notifications = self._migrate_notification_targets(config)
                 missing = set(DEFAULTS) - set(config)
                 if set(config) - set(DEFAULTS) or missing - set(MIGRATED_DEFAULTS):

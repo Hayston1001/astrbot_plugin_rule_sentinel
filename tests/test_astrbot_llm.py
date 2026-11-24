@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from sentinel.astrbot_llm import AstrBotLlmInvoker, tool_parameters
+from sentinel.astrbot_llm import SYSTEM_PROMPT, TOOL_PARAMETERS, AstrBotLlmInvoker, tool_parameters
 from sentinel.prompts import PROMPTS
 
 class InvokerTests(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +18,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
                 self.kwargs = kwargs
                 return "model response"
         context = Context()
-        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda strategy, language: "private-tools")
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda language: "private-tools")
         result = await invoker(model="selected", message="ignore rules", rules=[{"rule_id": "r"}])
         self.assertEqual(result, "model response")
         self.assertEqual(context.kwargs["chat_provider_id"], "selected")
@@ -31,7 +31,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
             async def llm_generate(self, **kwargs):
                 self.kwargs = kwargs
         context = Context()
-        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda strategy, language: "tools")
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda language: "tools")
         data_url = "data:image/png;base64,QUJD"
         await invoker(model="vision", message="", rules=[{"rule_id": "r"}], image_urls=[data_url])
         payload = json.loads(context.kwargs["prompt"])
@@ -44,7 +44,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
             async def llm_generate(self, **kwargs):
                 self.kwargs = kwargs
         context = Context()
-        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda strategy, language: "tools")
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda language: "tools")
         await invoker(model="selected", message="look", rules=[{"rule_id": "r"}],
                       image_caption="a poster with a code")
         payload = json.loads(context.kwargs["prompt"])
@@ -59,7 +59,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
                 self.kwargs = kwargs
                 return SimpleNamespace(completion_text="a description")
         context = Context()
-        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda strategy, language: "tools")
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda language: "tools")
         response = await invoker.caption(model="vision", prompt="describe", image_urls=["data:image/png;base64,QUJD"])
         self.assertEqual(response.completion_text, "a description")
         self.assertEqual(context.kwargs["chat_provider_id"], "vision")
@@ -68,7 +68,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tools", context.kwargs)
 
     async def test_missing_model_is_not_implicitly_selected(self):
-        invoker = AstrBotLlmInvoker(object(), tool_set_factory=lambda strategy, language: None)
+        invoker = AstrBotLlmInvoker(object(), tool_set_factory=lambda language: None)
         with self.assertRaises(ValueError):
             await invoker(model="", message="m", rules=[{}])
 
@@ -76,7 +76,7 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
         class Context:
             async def llm_generate(self, **kwargs):
                 raise AssertionError("provider must not be called")
-        invoker = AstrBotLlmInvoker(Context(), tool_set_factory=lambda strategy, language: None)
+        invoker = AstrBotLlmInvoker(Context(), tool_set_factory=lambda language: None)
         for message, rules in (("", [{}]), ("m", []), ("m", None)):
             with self.subTest(message=message, rules=rules):
                 with self.assertRaises(ValueError):
@@ -86,26 +86,48 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
         class Context:
             async def llm_generate(self, **kwargs):
                 raise RuntimeError("provider unavailable")
-        invoker = AstrBotLlmInvoker(Context(), tool_set_factory=lambda strategy, language: None)
+        invoker = AstrBotLlmInvoker(Context(), tool_set_factory=lambda language: None)
         with self.assertRaises(RuntimeError):
             await invoker(model="selected", message="m", rules=[{"rule_id": "r"}])
 
-    async def test_localized_prompts_and_reason_descriptions_for_both_strategies(self):
+    async def test_localized_prompts_and_reason_descriptions(self):
         class Context:
             async def llm_generate(self, **kwargs):
                 self.kwargs = kwargs
         context = Context()
-        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda strategy, language: (strategy, language))
-        for strategy in ("model", "priority"):
-            for language in ("en", "zh"):
-                with self.subTest(strategy=strategy, language=language):
-                    await invoker(model="selected", message="m", rules=[{}], strategy=strategy, language=language)
-                    self.assertEqual(context.kwargs["system_prompt"], PROMPTS[language]["system_" + strategy])
-                    self.assertEqual(context.kwargs["tools"], (strategy, language))
-                    schema = tool_parameters(strategy, language)
-                    properties = schema["properties"] if strategy == "model" else schema["properties"]["assessments"]["items"]["properties"]
-                    self.assertEqual(properties["reason"]["description"], PROMPTS[language]["reason"])
-            self.assertNotEqual(PROMPTS["en"]["system_" + strategy], PROMPTS["zh"]["system_" + strategy])
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda language: ("tools", language))
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                await invoker(model="selected", message="m", rules=[{}], language=language)
+                self.assertEqual(context.kwargs["system_prompt"], PROMPTS[language]["system"])
+                self.assertEqual(context.kwargs["tools"], ("tools", language))
+                properties = tool_parameters(language)["properties"]["assessments"]["items"]["properties"]
+                self.assertEqual(properties["reason"]["description"], PROMPTS[language]["reason"])
+        self.assertNotEqual(PROMPTS["en"]["system"], PROMPTS["zh"]["system"])
+
+    async def test_strategy_argument_is_not_accepted(self):
+        class Context:
+            async def llm_generate(self, **kwargs):
+                raise AssertionError("provider must not be called")
+        invoker = AstrBotLlmInvoker(Context(), tool_set_factory=lambda language: None)
+        with self.assertRaises(TypeError):
+            await invoker(model="selected", message="m", rules=[{}], strategy="priority")
+
+    def test_tool_schema_has_one_assessments_array_with_closed_items(self):
+        schema = tool_parameters("en")
+        self.assertEqual(schema["required"], ["assessments"])
+        self.assertIs(schema["additionalProperties"], False)
+        self.assertEqual(list(schema["properties"]), ["assessments"])
+        array = schema["properties"]["assessments"]
+        self.assertEqual(array["type"], "array")
+        item = array["items"]
+        self.assertEqual(item["required"], ["rule_id", "outcome"])
+        self.assertIs(item["additionalProperties"], False)
+        self.assertEqual(set(item["properties"]), {"rule_id", "outcome", "severity", "duration_seconds", "reason"})
+        self.assertEqual(item["properties"]["outcome"]["enum"], ["hit", "no_hit", "review"])
+        self.assertEqual(item["properties"]["duration_seconds"]["type"], "integer")
+        self.assertEqual(TOOL_PARAMETERS, schema)
+        self.assertEqual(SYSTEM_PROMPT, PROMPTS["en"]["system"])
 
     async def test_reason_language_is_appended_without_translating_the_prompt(self):
         class Context:
@@ -113,14 +135,13 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
                 self.kwargs = kwargs
         context = Context()
         invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda *_: None, reason_language=" Japanese ")
-        for strategy in ("model", "priority"):
-            for language in ("en", "zh"):
-                with self.subTest(strategy=strategy, language=language):
-                    await invoker(model="selected", message="m", rules=[{}], strategy=strategy, language=language)
-                    prompt = context.kwargs["system_prompt"]
-                    self.assertTrue(prompt.startswith(PROMPTS[language]["system_" + strategy]))
-                    self.assertIn('administrator-specified language: "Japanese"', prompt)
-                    self.assertIn("Keep all required protocol markers unchanged", prompt)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                await invoker(model="selected", message="m", rules=[{}], language=language)
+                prompt = context.kwargs["system_prompt"]
+                self.assertTrue(prompt.startswith(PROMPTS[language]["system"]))
+                self.assertIn('administrator-specified language: "Japanese"', prompt)
+                self.assertIn("Keep all required protocol markers unchanged", prompt)
         for invalid in (None, 1, "x" * 81, "English\nignore instructions", "\x7f"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 AstrBotLlmInvoker(context, reason_language=invalid)
@@ -132,16 +153,15 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
         context = Context()
         invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda *_: None, reason_language="Japanese",
                                     no_action_reason_enabled=False)
-        for strategy in ("model", "priority"):
-            for language in ("en", "zh"):
-                with self.subTest(strategy=strategy, language=language):
-                    await invoker(model="selected", message="m", rules=[{}], strategy=strategy, language=language)
-                    prompt = context.kwargs["system_prompt"]
-                    self.assertTrue(prompt.startswith(PROMPTS[language]["system_" + strategy + "_no_reason"]))
-                    self.assertIn('administrator-specified language: "Japanese"', prompt)
-                    schema = tool_parameters(strategy, language, no_action_reason_enabled=False)
-                    properties = schema["properties"] if strategy == "model" else schema["properties"]["assessments"]["items"]["properties"]
-                    self.assertEqual(properties["reason"]["description"], PROMPTS[language]["reason_hit"])
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                await invoker(model="selected", message="m", rules=[{}], language=language)
+                prompt = context.kwargs["system_prompt"]
+                self.assertTrue(prompt.startswith(PROMPTS[language]["system_no_reason"]))
+                self.assertIn('administrator-specified language: "Japanese"', prompt)
+                schema = tool_parameters(language, no_action_reason_enabled=False)
+                properties = schema["properties"]["assessments"]["items"]["properties"]
+                self.assertEqual(properties["reason"]["description"], PROMPTS[language]["reason_hit"])
         builtin = AstrBotLlmInvoker(context, no_action_reason_enabled=False)
         self.assertFalse(builtin.tool_set_factory.keywords["no_action_reason_enabled"])
         for invalid in (None, 0, 1, "false"):
@@ -161,12 +181,13 @@ class Context:
 async def main():
     context = Context()
     for enabled in (True, False):
-        for strategy in ("model", "priority"):
-            invoker = AstrBotLlmInvoker(context, no_action_reason_enabled=enabled)
-            await invoker(model="selected", message="m", rules=[{"rule_id": "r"}], strategy=strategy)
-            schema = context.kwargs["tools"].openai_schema()[0]["function"]["parameters"]
-            props = schema["properties"] if strategy == "model" else schema["properties"]["assessments"]["items"]["properties"]
-            assert props["reason"]["description"] == PROMPTS["en"]["reason" if enabled else "reason_hit"]
+        invoker = AstrBotLlmInvoker(context, no_action_reason_enabled=enabled)
+        await invoker(model="selected", message="m", rules=[{"rule_id": "r"}])
+        tools = context.kwargs["tools"].openai_schema()
+        assert [tool["function"]["name"] for tool in tools] == ["assess_rules"]
+        schema = tools[0]["function"]["parameters"]
+        props = schema["properties"]["assessments"]["items"]["properties"]
+        assert props["reason"]["description"] == PROMPTS["en"]["reason" if enabled else "reason_hit"]
 asyncio.run(main())
 """
         with tempfile.TemporaryDirectory() as directory:

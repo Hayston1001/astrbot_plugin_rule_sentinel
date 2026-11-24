@@ -50,7 +50,7 @@ class GroupDecider:
     async def __call__(self, item):
         key = (item.platform_id, item.group_id)
         effective = resolve_group_settings(self.config, *key)
-        route = (effective["backend"], effective["model"], effective["strategy"], effective["llm_reason_language"],
+        route = (effective["backend"], effective["model"], effective["llm_reason_language"],
                  effective["image_enabled"], effective["image_model"], effective["image_understanding_mode"],
                  bool(effective["context_messages"]))
         if route not in self.deciders:
@@ -66,14 +66,15 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
     chat_context = ChatContext()
     if settings.backend != "llm":
         raise ValueError("decision backend required")
-    def make_decider(backend, model, strategy, reason_language=None, image_enabled=False,
+    def make_decider(backend, model, reason_language=None, image_enabled=False,
                      image_model="", image_mode="direct", context_enabled=False):
         if backend == "llm":
             language = config.get("llm_reason_language", "") if reason_language is None else reason_language
             def make_llm_decider(enabled):
                 return LlmDecider(rules, AstrBotLlmInvoker(context, reason_language=language,
                                   no_action_reason_enabled=enabled), model=model,
-                                  max_duration_seconds=settings.max_duration_seconds, queue=queue, strategy=strategy,
+                                  max_duration_seconds=settings.max_duration_seconds, queue=queue,
+                                  equal_priority_policy=settings.equal_priority_policy,
                                   no_action_reason_enabled=enabled, image_enabled=image_enabled,
                                   image_model=image_model or None, image_mode=image_mode,
                                   caption_prompt=settings.image_caption_prompt,
@@ -85,7 +86,7 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
             return decider
         raise ValueError("decision backend required")
     decider = (GroupDecider(config, make_decider) if "group_overrides" in config or config.get("context_messages")
-               else make_decider(settings.backend, settings.model, settings.rule_selection_strategy, None,
+               else make_decider(settings.backend, settings.model, None,
                                  settings.image_judging_enabled, settings.image_provider_id,
                                  settings.image_understanding_mode))
     execution_default = config.get("default_execution_mode", "execute")

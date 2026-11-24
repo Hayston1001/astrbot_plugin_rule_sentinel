@@ -40,7 +40,8 @@ class CumulativeModerationTests(unittest.IsolatedAsyncioTestCase):
     def rule(self, rule_id, mode="auto", expected_version=0, text="example"):
         return self.rules.save(platform_id="qq", group_id="g", rule_id=rule_id,
                                expected_version=expected_version, text=text, enabled=True, modified_by="admin",
-                               actions=[{"type": "mute", "mode": mode, "duration_mode": "cumulative",
+                               execution_mode=mode,
+                               actions=[{"type": "mute", "duration_mode": "cumulative",
                                          "window_seconds": 60, "tiers_seconds": [10, 30, 45]}])
 
     def enqueue(self, message):
@@ -57,6 +58,16 @@ class CumulativeModerationTests(unittest.IsolatedAsyncioTestCase):
                                          detail=json.dumps({"proposal": {"rule_id": rule.rule_id,
                                              "rule_version": rule.version, "target_sender_id": "member",
                                              "duration_seconds": None}})))
+        return self.records()[message]
+
+    def decide_many(self, message, rules, *, peer_tie=False):
+        self.enqueue(message)
+        item = self.queue.claim("qq", "g")
+        versions = tuple((row.rule_id, row.version) for row in self.rules.current_for_group("qq", "g"))
+        proposals = [{"rule_id": rule.rule_id, "rule_version": rule.version, "target_sender_id": "member",
+                      "duration_seconds": None} for rule in rules]
+        self.assertTrue(self.queue.finish(item, status="proposed", rule_versions=versions, detail=json.dumps({
+            "proposals": proposals, "proposal": proposals[0], "peer_tie": peer_tie})))
         return self.records()[message]
 
     def records(self):
@@ -84,7 +95,7 @@ class CumulativeModerationTests(unittest.IsolatedAsyncioTestCase):
         later = self.decide("later", rule)
         self.assertNotIn("violation_count", earlier)
         self.assertIsNone(earlier["execution"]["duration_seconds"])
-        self.assertEqual(self.queue.pending_confirmations("qq", "g")["total_actions"], 2)
+        self.assertEqual(self.queue.pending_reviews("qq", "g")["total_actions"], 2)
         self.assertEqual(await self.executor.execute(later["execution"]["id"], mode="confirm", required_action="mute"), "succeeded")
         # QQ now reports the first mute; append exactly the second tier's duration.
         self.session.query_data = {"members": [{"member_openid": "member",
@@ -107,8 +118,8 @@ class CumulativeModerationTests(unittest.IsolatedAsyncioTestCase):
         for mode, mapping in (("strict", {"low": 60}), ("autonomous", {})):
             with self.subTest(mode=mode):
                 rule = self.rules.save(platform_id="qq", group_id="g", rule_id=mode, expected_version=0,
-                                       text=mode, enabled=True, modified_by="admin", actions=[
-                                           {"type": "mute", "mode": "auto", "duration_mode": mode,
+                                       text=mode, enabled=True, modified_by="admin", execution_mode="auto", actions=[
+                                           {"type": "mute", "duration_mode": mode,
                                             "severity_seconds": mapping}
                                        ])
                 self.enqueue(mode)
@@ -152,9 +163,67 @@ class CumulativeModerationTests(unittest.IsolatedAsyncioTestCase):
             self.management.revoke_count("api_key:bad", params)
         revoked = self.management.revoke_count("admin", params)
         self.assertEqual(self.management.revoke_count("other", params), revoked)
-        self.assertEqual(revoked["revoked_by"], "admin")
+        self.assertEqual([unit["revoked_by"] for unit in revoked["violation_counts"]], ["admin"])
+        self.assertEqual(revoked["violation_count"], revoked["violation_counts"][0])
         self.assertEqual(self.records()["one"]["execution"], first["execution"])
         self.assertEqual(self.decide("four", b)["violation_count"]["ordinal"], 2)
+
+    async def test_shared_group_counts_one_message_once_and_both_mutes_use_one_duration(self):
+        a, b = self.rule("a"), self.rule("b")
+        self.config["group_overrides"] = {"qq/g": {"shared_violation_rules": ["a", "b"]}}
+        self.settings.save(self.config)
+        row = self.decide_many("one", [a, b])
+        self.assertEqual(len(row["violation_counts"]), 1)
+        self.assertEqual(row["violation_counts"][0]["rule_ids"], ["a", "b"])
+        self.assertEqual(row["violation_counts"][0]["ordinal"], 1)
+        self.assertEqual([item["duration_seconds"] for item in row["executions"]], [10, 10])
+        self.assertEqual(row["execution_summary"], "executing")
+        self.assertEqual(self.decide("two", a)["violation_count"]["ordinal"], 2)
+
+    async def test_independent_rules_count_once_each_and_progress_separately(self):
+        c, d = self.rule("c"), self.rule("d")
+        self.assertEqual(self.decide("warm", c)["violation_count"]["ordinal"], 1)
+        row = self.decide_many("one", [c, d])
+        units = {unit["rule_id"]: unit for unit in row["violation_counts"]}
+        self.assertEqual({key: unit["ordinal"] for key, unit in units.items()}, {"c": 2, "d": 1})
+        self.assertEqual([item["duration_seconds"] for item in row["executions"]], [30, 10])
+        self.assertEqual(units["c"]["rule_ids"], ["c"])
+
+    async def test_confirmed_shared_group_mutes_use_the_same_tier_in_confirmation_order(self):
+        a, b = self.rule("a", "confirm"), self.rule("b", "confirm")
+        self.config["group_overrides"] = {"qq/g": {"shared_violation_rules": ["a", "b"]}}
+        self.settings.save(self.config)
+        row = self.decide_many("one", [a, b], peer_tie=True)
+        self.assertNotIn("violation_counts", row)
+        first, second = [item["id"] for item in row["executions"]]
+        self.assertEqual(await self.executor.execute(second, mode="confirm", required_action="mute"), "succeeded")
+        self.session.query_data = {"members": [{"member_openid": "member",
+                                                "mute_expire_at": self.records()["one"]["executions"][1]["expires_at"]}]}
+        self.assertEqual(await self.executor.execute(first, mode="confirm", required_action="mute"), "succeeded")
+        row = self.records()["one"]
+        self.assertEqual(len(row["violation_counts"]), 1)
+        self.assertEqual([item["duration_seconds"] for item in row["executions"]], [10, 10])
+
+    async def test_revoke_by_count_id_keeps_the_other_counts_of_the_message(self):
+        c, d = self.rule("c"), self.rule("d")
+        row = self.decide_many("one", [c, d])
+        params = {"platform_id": "qq", "group_id": "g", "message_id": "one"}
+        with self.assertRaises(ValueError):
+            self.management.revoke_count("admin", params)
+        first, second = row["violation_counts"]
+        with self.assertRaises(ValueError):
+            self.management.revoke_count("admin", {**params, "count_id": second["id"] + 1000})
+        for bad in (0, True, "1", -3):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.management.revoke_count("admin", {**params, "count_id": bad})
+        result = self.management.revoke_count("admin", {**params, "count_id": first["id"]})
+        by_id = {unit["id"]: unit for unit in result["violation_counts"]}
+        self.assertEqual(by_id[first["id"]]["revoked_by"], "admin")
+        self.assertIsNone(by_id[second["id"]]["revoked_by"])
+        again = self.management.revoke_count("other", {**params, "count_id": first["id"]})
+        self.assertEqual({unit["id"]: unit["revoked_by"] for unit in again["violation_counts"]},
+                         {first["id"]: "admin", second["id"]: None})
+        self.assertEqual(len(self.records()["one"]["violation_counts"]), 2)
 
     async def test_multiple_shared_groups_keep_independent_counts_and_allow_regrouping(self):
         a, b, c, d, e = [self.rule(key) for key in "abcde"]

@@ -30,7 +30,7 @@ window.AstrBotPluginView = {
     const data = {
       status: {monitoring: 'dry_run', backend: 'llm'},
       settings: {quick_start_completed: false, monitoring_mode: 'allowlist', monitoring_groups: [], decision_backend: 'llm',
-        rule_selection_strategy: 'priority', llm_provider_id: 'test-model', default_action_mode: 'auto',
+        equal_priority_policy: 'confirm', llm_provider_id: 'test-model', default_action_mode: 'auto',
         default_execution_mode: 'record', protected_target_policy: 'exempt', protected_target_template: 'hello',
         message_retention_days: 30, audit_retention_days: 90, diagnostic_capture: false, llm_no_action_reason_enabled: true},
       providers: [{id: 'test-model'}], 'ui-state': {platform_id: 'p', group_id: 'g'},
@@ -256,7 +256,7 @@ class ManagementSelectTests(unittest.TestCase):
         self.page.goto(self.url + "management", wait_until="load")
         expect(self.trigger("group-select")).to_have_attribute("aria-label", "管理的群: 测试群")
         self.page.locator("#tab-settings").click()
-        expect(self.trigger("setting-rule_selection_strategy")).to_have_attribute("aria-label", "默认多规则命中策略: 按规则优先级")
+        expect(self.trigger("setting-equal_priority_policy")).to_have_attribute("aria-label", "相同优先级处置: 人工")
         self.page.locator("#setting-llm_provider_id").focus()
         expect(self.page.get_by_role("option", name="test-model", exact=True)).to_be_visible()
         self.page.keyboard.press("Escape")
@@ -280,10 +280,10 @@ class ManagementSelectTests(unittest.TestCase):
                 self.page.set_viewport_size({"width": width, "height": 800})
                 self.page.goto(self.url + "management", wait_until="load")
                 self.page.locator("#tab-settings").click()
-                control = self.trigger("setting-rule_selection_strategy")
+                control = self.trigger("setting-equal_priority_policy")
                 expect(control).to_be_visible()
                 control.click()
-                expect(self.page.get_by_role("option", name="按规则优先级", exact=True)).to_be_visible()
+                expect(self.page.get_by_role("option", name="全部执行", exact=True)).to_be_visible()
                 dimensions = self.page.evaluate("""() => {
                   const rect = document.querySelector('#custom-select-menu').getBoundingClientRect();
                   return {width: innerWidth, scrollWidth: document.documentElement.scrollWidth,

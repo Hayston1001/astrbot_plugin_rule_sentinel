@@ -137,6 +137,12 @@ class ManagementService:
             if not isinstance(tab, str) or tab not in {"status", "records", "rules", "groups", "settings"}:
                 raise ValueError("invalid UI state")
             return self.queue.save_active_tab(actor, tab)
+        if set(fields) == {"records_platform_id", "records_group_id"}:
+            if fields != {"records_platform_id": "", "records_group_id": ""}:
+                for value in fields.values():
+                    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+                        raise ValueError("invalid UI state")
+            return self.queue.save_records_filter(actor, fields["records_platform_id"], fields["records_group_id"])
         if set(fields) != {"platform_id", "group_id"}:
             raise ValueError("invalid UI state")
         if fields != {"platform_id": "", "group_id": ""}:
@@ -175,13 +181,48 @@ class ManagementService:
             raise PermissionError("not authorized")
         return self.queue.save_overview_layout(actor, self._validate_overview_layout(fields))
 
-    def pending_confirmations(self, actor, platform_id, group_id, before_id=None, limit=20, all_groups=False):
+    def pending_reviews(self, actor, platform_id, group_id, before_id=None, limit=20, all_groups=False):
         if all_groups:
             if not self.actor_allowed(actor):
                 raise PermissionError("not authorized")
         else:
             self._check(actor, platform_id, group_id)
-        return self.queue.pending_confirmations(platform_id, group_id, before_id, limit, all_groups)
+        return self.queue.pending_reviews(platform_id, group_id, before_id, limit, all_groups)
+
+    def close_review_item(self, actor, fields):
+        """Give up one confirmable action, all of one rule's actions, or mark a check done.
+
+        The platform is never called.
+        """
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        if (not isinstance(fields, dict) or not {"target"} <= set(fields)
+                or set(fields) - {"target", "intent_id", "event_id", "platform_id", "group_id", "message_id", "rule_id"}):
+            raise ValueError("invalid review item")
+        if fields["target"] == "rule_actions":
+            if set(fields) != {"target", "platform_id", "group_id", "message_id", "rule_id"}:
+                raise ValueError("invalid review item")
+            platform_id, group_id, message_id, rule_id = (fields[key] for key in
+                                                          ("platform_id", "group_id", "message_id", "rule_id"))
+            self._check(actor, platform_id, group_id)
+            return self.queue.close_rule_actions(platform_id=platform_id, group_id=group_id,
+                                                 message_id=message_id, rule_id=rule_id, actor=actor)
+        expected = {"target", "event_id"} if fields["target"] == "event_check" else {"target", "intent_id"}
+        if set(fields) != expected:
+            raise ValueError("invalid review item")
+        return self.queue.close_review_item(target=fields["target"], actor=actor,
+                                            intent_id=fields.get("intent_id"), event_id=fields.get("event_id"))
+
+    def rule_confirmation_scope(self, actor, fields):
+        """Validate the message and rule scope of a rule-level confirmation."""
+        if not self.actor_allowed(actor):
+            raise PermissionError("not authorized")
+        if (not isinstance(fields, dict) or set(fields) != {"platform_id", "group_id", "message_id", "rule_id"}
+                or any(not isinstance(value, str) or not value.strip() or len(value) > 512
+                       for value in fields.values())):
+            raise ValueError("invalid execution request")
+        self._check(actor, fields["platform_id"], fields["group_id"])
+        return fields
 
     def confirmation_state(self, actor, intent_id):
         if not self.actor_allowed(actor):
@@ -236,14 +277,18 @@ class ManagementService:
     def revoke_count(self, actor, fields):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")
-        if not isinstance(fields, dict) or set(fields) != {"platform_id", "group_id", "message_id"}:
+        if (not isinstance(fields, dict) or not {"platform_id", "group_id", "message_id"} <= set(fields)
+                or set(fields) - {"platform_id", "group_id", "message_id", "count_id"}):
             raise ValueError("invalid violation identity")
         platform_id, group_id, message_id = (fields[key] for key in ("platform_id", "group_id", "message_id"))
+        count_id = fields.get("count_id")
+        if count_id is not None and (type(count_id) is not int or count_id <= 0):
+            raise ValueError("invalid violation identity")
         self._check(actor, platform_id, group_id)
         if any(not isinstance(value, str) or not value.strip() or len(value) > 512
                for value in (platform_id, group_id, message_id)):
             raise ValueError("invalid violation identity")
-        return self.queue.revoke_violation_count(platform_id, group_id, message_id, actor)
+        return self.queue.revoke_violation_count(platform_id, group_id, message_id, actor, count_id)
 
     def summarize_group(self, actor, platform_id, group_id, all_groups=False):
         if not self.actor_allowed(actor):

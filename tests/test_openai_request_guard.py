@@ -9,7 +9,7 @@ class RequestBodyGuardTests(unittest.TestCase):
     def setUp(self):
         self.expected = {"model": "selected", "messages": [{"role": "system", "content": "rules"},
                            {"role": "user", "content": "private message"}],
-                         "tools": [{"type": "function", "function": {"name": "propose_action"}}],
+                         "tools": [{"type": "function", "function": {"name": "assess_rules"}}],
                          "tool_choice": "auto", "stream": False}
         self.guard = RequestBodyGuard(self.expected)
 
@@ -58,7 +58,8 @@ class RequestBodyGuardTests(unittest.TestCase):
                                                    {"role": "user", "content": ""}]},
                    {**self.expected, "tools": []}, {**self.expected, "stream": True},
                    {**self.expected, "tool_choice": "none"},
-                   {**self.expected, "tools": [{"type": "function", "function": {"name": "admin_action"}}]}]
+                   {**self.expected, "tools": [{"type": "function", "function": {"name": "admin_action"}}]},
+                   {**self.expected, "tools": [{"type": "function", "function": {"name": "propose_action"}}]}]
         for expected in invalid:
             with self.subTest(expected=expected), self.assertRaises(RequestIntegrityError):
                 RequestBodyGuard(expected)

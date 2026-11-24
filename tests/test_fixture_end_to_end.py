@@ -52,18 +52,19 @@ class FixturePipelineTests(unittest.IsolatedAsyncioTestCase):
                                           session_origin="qq:GroupMessage:g")
                 self.assertEqual(await admission.submit(message), "queued")
 
-            async def invoke(*, model, message, rules, strategy, language):
+            async def invoke(*, model, message, rules, language):
                 self.assertEqual(model, "synthetic")
                 self.assertEqual(rules[0]["text"], fixture["rule"])
                 outcome = scripted[message]
                 if outcome == "timed_out":
                     raise TimeoutError("synthetic timeout")
                 if outcome == "no_action":
-                    return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
-                                           tools_call_name=[], tools_call_args=[])
-                name = "unknown_tool" if outcome == "rejected" else "propose_action"
+                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                                           tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
+                name = "unknown_tool" if outcome == "rejected" else "assess_rules"
                 return SimpleNamespace(role="tool", is_chunk=False, tools_call_name=[name],
-                    tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "synthetic rule match"}])
+                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low",
+                                                       "reason": "synthetic rule match"}]}])
 
             worker = DryRunWorker(queue, LlmDecider(rules, invoke, model="synthetic", max_duration_seconds=300,
                                                    queue=queue), concurrency=1, timeout_seconds=2)
@@ -108,17 +109,18 @@ class FixturePipelineTests(unittest.IsolatedAsyncioTestCase):
                                           True, False, sender_is_verified_non_bot=True,
                                           session_origin="qq:GroupMessage:g")
                 self.assertEqual(await second_admission.submit(message), "queued")
-            async def second_invoke(*, model, message, rules, strategy, language):
+            async def second_invoke(*, model, message, rules, language):
                 self.assertEqual(model, "synthetic-second")
                 self.assertEqual(rules[0]["text"], fixture["rule"])
                 outcome = second_script[message]
                 if outcome == "failed":
                     raise RuntimeError("synthetic failure")
                 if outcome == "no_action":
-                    return SimpleNamespace(role="assistant", is_chunk=False, completion_text="NO_ACTION",
-                                           tools_call_name=[], tools_call_args=[])
-                return SimpleNamespace(role="tool", is_chunk=False, tools_call_name=["propose_action"],
-                    tools_call_args=[{"violated": True, "rule_id": "r", "severity": "low", "reason": "synthetic rule match"}])
+                    return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+                                           tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "no_hit"}]}])
+                return SimpleNamespace(role="tool", is_chunk=False, tools_call_name=["assess_rules"],
+                    tools_call_args=[{"assessments": [{"rule_id": "r", "outcome": "hit", "severity": "low",
+                                                       "reason": "synthetic rule match"}]}])
             second_worker = DryRunWorker(second_queue, LlmDecider(second_rules, second_invoke, model="synthetic-second",
                 max_duration_seconds=300, queue=second_queue), concurrency=1, timeout_seconds=2)
             self.assertEqual(await second_worker.drain_group("qq", "g"), len(fixture["samples"]))

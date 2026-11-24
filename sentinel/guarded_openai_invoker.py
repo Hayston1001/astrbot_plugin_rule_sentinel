@@ -51,10 +51,10 @@ class GuardedOpenAIInvoker:
         self._parse_response = parse_response
         self._timeout = timeout_seconds
 
-    async def __call__(self, *, model: str, message: str, rules: list, strategy: str = "model"):
+    async def __call__(self, *, model: str, message: str, rules: list):
         if model != self._provider_id:
             raise GuardedModelCallError("selected provider changed")
-        request = build_openai_request(model=self._resolved_model, message=message, rules=rules, strategy=strategy)
+        request = build_openai_request(model=self._resolved_model, message=message, rules=rules)
         guard = SingleRequestGuard(endpoint=self._endpoint, expected=request)
         # This prototype supports standard OpenAI chat completions only. The
         # endpoint guard rejects query strings, credentials and ambiguous paths.
@@ -71,7 +71,7 @@ class GuardedOpenAIInvoker:
             client = AsyncOpenAI(api_key=self._api_key, base_url=base_url, http_client=http,
                                  max_retries=0, timeout=self._timeout)
             completion = await client.chat.completions.create(**request)
-            return await self._parse_response(completion, strategy)
+            return await self._parse_response(completion)
         except asyncio.CancelledError:
             raise
         except (APITimeoutError, TimeoutError):

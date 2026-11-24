@@ -31,11 +31,14 @@ class QueueTests(unittest.TestCase):
             db.commit()
         queue = DryRunQueue(path)
         queue.initialize()
-        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "status"})
+        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "status",
+                                                       "records_platform_id": "", "records_group_id": ""})
         queue.save_active_tab("admin", "records")
         queue.save_ui_state("admin", "other", "group")
+        queue.save_records_filter("admin", "rec", "recgroup")
         queue.initialize()
-        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "other", "group_id": "group", "active_tab": "records"})
+        self.assertEqual(queue.get_ui_state("admin"), {"platform_id": "other", "group_id": "group", "active_tab": "records",
+                                                       "records_platform_id": "rec", "records_group_id": "recgroup"})
 
     def test_ui_tab_and_group_writes_do_not_overwrite_each_other(self):
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -43,7 +46,36 @@ class QueueTests(unittest.TestCase):
                       pool.submit(self.queue.save_ui_state, "admin", "p", "g")]
             for write in writes:
                 write.result(timeout=10)
-        self.assertEqual(self.queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "settings"})
+        self.assertEqual(self.queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "settings",
+                                                            "records_platform_id": "", "records_group_id": ""})
+
+    def test_records_filter_is_stored_per_user_and_independent_of_the_rules_group(self):
+        self.assertIsNone(self.queue.get_ui_state("admin"))
+        self.assertEqual(self.queue.save_records_filter("admin", "p", "g"),
+                         {"records_platform_id": "p", "records_group_id": "g"})
+        self.queue.save_ui_state("admin", "rules-p", "rules-g")
+        self.queue.save_active_tab("admin", "records")
+        self.assertEqual(self.queue.save_records_filter("other", "q", "h"),
+                         {"records_platform_id": "q", "records_group_id": "h"})
+        self.assertEqual(self.queue.get_ui_state("admin"),
+                         {"platform_id": "rules-p", "group_id": "rules-g", "active_tab": "records",
+                          "records_platform_id": "p", "records_group_id": "g"})
+        self.assertEqual(self.queue.get_ui_state("other")["records_group_id"], "h")
+        self.assertEqual(self.queue.get_ui_state("other")["platform_id"], "")
+        self.queue.save_records_filter("admin", "", "")
+        state = self.queue.get_ui_state("admin")
+        self.assertEqual((state["records_platform_id"], state["records_group_id"]), ("", ""))
+        self.assertEqual((state["platform_id"], state["group_id"]), ("rules-p", "rules-g"))
+
+    def test_records_filter_writes_do_not_overwrite_the_other_choices_concurrently(self):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            writes = [pool.submit(self.queue.save_active_tab, "admin", "records"),
+                      pool.submit(self.queue.save_ui_state, "admin", "p", "g"),
+                      pool.submit(self.queue.save_records_filter, "admin", "rp", "rg")]
+            for write in writes:
+                write.result(timeout=10)
+        self.assertEqual(self.queue.get_ui_state("admin"), {"platform_id": "p", "group_id": "g", "active_tab": "records",
+                                                            "records_platform_id": "rp", "records_group_id": "rg"})
 
     def test_capacity_dedup_order_and_group_isolation(self):
         self.assertEqual(self.enqueue("1"), "queued")

@@ -31,7 +31,7 @@ class ExecutionIntentTests(unittest.TestCase):
         self.queue.enqueue(platform_id="p", group_id="g", message_id="m", payload={"text": "private", "sender_id": "sender"}, capacity=10)
         self.item = self.queue.claim("p", "g")
         self.detail = json.dumps({"proposal": {"action": "mute", "rule_id": "r", "rule_version": 1,
-            "target_sender_id": "sender", "duration_seconds": 60, "mode": "auto"}})
+            "target_sender_id": "sender", "duration_seconds": 60}})
 
     def test_intent_and_audit_commit_together_before_payload_erasure(self):
         self.assertTrue(self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),)))
@@ -68,28 +68,55 @@ class ExecutionIntentTests(unittest.TestCase):
 
     def test_plan_creates_one_ordered_intent_per_configured_action(self):
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "recall", "mode": "auto"},
-                            {"type": "reply", "mode": "confirm", "template": "notice"},
-                            {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                        text="rule", enabled=True, execution_mode="confirm", actions=[
+                            {"type": "recall"},
+                            {"type": "reply", "template": "notice"},
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}},
                         ], modified_by="admin")
         detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2,
                             "target_sender_id": "sender", "duration_seconds": 60}})
         self.assertTrue(self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),)))
         with closing(sqlite3.connect(self.path)) as db:
-            rows = db.execute("SELECT action_index, action, mode, duration_seconds, plan_id FROM execution_intents ORDER BY action_index").fetchall()
-        self.assertEqual([row[:4] for row in rows], [(0, "recall", "auto", None),
-                         (1, "reply", "confirm", None), (2, "mute", "auto", 60)])
+            rows = db.execute("SELECT action_index, action, mode, duration_seconds, plan_id, mode_reason FROM execution_intents ORDER BY action_index").fetchall()
+        self.assertEqual([row[:4] for row in rows], [(0, "recall", "confirm", None),
+                         (1, "reply", "confirm", None), (2, "mute", "confirm", 60)])
+        self.assertEqual({row[5] for row in rows}, {"rule"})
         self.assertEqual(len({row[4] for row in rows}), 1)
+
+    def test_rule_level_mode_applies_to_every_action_of_the_rule(self):
+        self.enable_execution()
+        self.assertTrue(self.queue.finish(self.item, status="no_action", detail="{}"))
+        for mode, status, reason in (("auto", "pending_auto", None), ("confirm", "pending_confirm", "rule")):
+            with self.subTest(mode=mode):
+                with closing(sqlite3.connect(self.path)) as db:
+                    db.execute("DELETE FROM execution_intents")
+                    db.commit()
+                self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=len(self.rules.history("p", "g", "r")),
+                                text="rule", enabled=True, execution_mode=mode, actions=[
+                                    {"type": "recall"}, {"type": "reply", "template": "notice"},
+                                    {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}}],
+                                modified_by="admin")
+                version = len(self.rules.history("p", "g", "r"))
+                self.queue.enqueue(platform_id="p", group_id="g", message_id=f"mm-{mode}", capacity=10,
+                                   payload={"text": "private", "sender_id": "sender"})
+                item = self.queue.claim("p", "g")
+                detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": version,
+                                                  "target_sender_id": "sender", "duration_seconds": 60}})
+                self.assertTrue(self.queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", version),)))
+                with closing(sqlite3.connect(self.path)) as db:
+                    rows = db.execute("SELECT mode, status, mode_reason FROM execution_intents ORDER BY action_index").fetchall()
+                self.assertEqual({row[0] for row in rows}, {mode})
+                self.assertEqual({row[1] for row in rows}, {status})
+                self.assertEqual({row[2] for row in rows}, {reason})
 
     def test_plan_executes_automatic_actions_in_order_after_blocked_recall(self):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "recall", "mode": "auto"},
-                            {"type": "reply", "mode": "auto", "template": "rule {rule_id}"},
-                            {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                        text="rule", enabled=True, execution_mode="auto", actions=[
+                            {"type": "recall"},
+                            {"type": "reply", "template": "rule {rule_id}"},
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}},
                         ], modified_by="admin")
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("UPDATE dry_run_queue SET payload=? WHERE state='processing'", (json.dumps({
@@ -144,9 +171,9 @@ class ExecutionIntentTests(unittest.TestCase):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "reply", "mode": "auto", "template": "notice"},
-                            {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                        text="rule", enabled=True, execution_mode="auto", actions=[
+                            {"type": "reply", "template": "notice"},
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}},
                         ], modified_by="admin")
         detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2,
                             "target_sender_id": "sender", "duration_seconds": 60}})
@@ -174,8 +201,8 @@ class ExecutionIntentTests(unittest.TestCase):
     def prepare_reply(self, *, mode="auto", options=None):
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "reply", "mode": mode, "template": "rule {rule_id}\nthanks", **(options or {})},
+                        text="rule", enabled=True, execution_mode=mode, actions=[
+                            {"type": "reply", "template": "rule {rule_id}\nthanks", **(options or {})},
                         ], modified_by="admin")
         detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2, "target_sender_id": "sender"}})
         self.assertTrue(self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),)))
@@ -228,17 +255,19 @@ class ExecutionIntentTests(unittest.TestCase):
         executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "review")
 
-    def test_confirm_action_waits_while_later_auto_action_runs(self):
+    def test_confirm_action_runs_only_that_action_while_another_rule_runs_automatically(self):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "reply", "mode": "confirm", "template": "notice"},
-                            {"type": "mute", "mode": "auto", "duration_mode": "strict", "severity_seconds": {"low": 60}},
-                        ], modified_by="admin")
-        detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2,
-                            "target_sender_id": "sender", "duration_seconds": 60}})
-        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),))
+                        text="rule", enabled=True, execution_mode="confirm", actions=[
+                            {"type": "reply", "template": "notice"}], modified_by="admin")
+        self.rules.save(platform_id="p", group_id="g", rule_id="r2", expected_version=0,
+                        text="rule two", enabled=True, execution_mode="auto", actions=[
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
+        detail = json.dumps({"proposals": [
+            {"rule_id": "r", "rule_version": 2, "target_sender_id": "sender"},
+            {"rule_id": "r2", "rule_version": 1, "target_sender_id": "sender", "duration_seconds": 60}]})
+        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2), ("r2", 1)))
         calls = []
         class Platform:
             async def verify_permission(self, *args): return True
@@ -255,10 +284,45 @@ class ExecutionIntentTests(unittest.TestCase):
             self.assertEqual(calls, ["mute"])
             row = await asyncio.to_thread(self.queue.list_messages, platform_id="p", group_id="g")
             self.assertEqual(row[0]["execution_summary"], "pending_confirm")
-            self.assertEqual(await host.confirm_mute(1), "succeeded")
-            self.assertEqual(await host.confirm_mute(1), "not_claimed")
+            self.assertEqual(await host.confirm_action(1), "succeeded")
+            self.assertEqual(await host.confirm_action(1), "not_claimed")
         asyncio.run(run())
         self.assertEqual(calls, ["mute", "reply"])
+
+    def test_confirming_one_action_never_runs_other_pending_auto_actions_of_the_plan(self):
+        from sentinel.dry_run_host import DryRunHost
+        self.enable_execution()
+        self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
+                        text="rule", enabled=True, execution_mode="confirm", actions=[
+                            {"type": "reply", "template": "notice"}, {"type": "recall"}], modified_by="admin")
+        self.rules.save(platform_id="p", group_id="g", rule_id="r2", expected_version=0,
+                        text="rule two", enabled=True, execution_mode="auto", actions=[
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
+        detail = json.dumps({"proposals": [
+            {"rule_id": "r", "rule_version": 2, "target_sender_id": "sender"},
+            {"rule_id": "r2", "rule_version": 1, "target_sender_id": "sender", "duration_seconds": 60}]})
+        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2), ("r2", 1)))
+        calls = []
+        class Platform:
+            async def verify_permission(self, *args): return True
+            async def send_group_message(self, *args, **kwargs):
+                calls.append("reply")
+                return {"outcome": "succeeded"}
+            async def recall(self, *args):
+                calls.append("recall")
+                return {"outcome": "succeeded"}
+            async def mute(self, *args):
+                calls.append("mute")
+                return {"outcome": "succeeded"}
+        async def run():
+            host = DryRunHost(context=None, config={}, rules=None, queue=self.queue, lock_path="unused")
+            host.mute_executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
+            self.assertEqual(await host.confirm_action(2), "succeeded")
+        asyncio.run(run())
+        self.assertEqual(calls, ["recall"])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT action, status FROM execution_intents ORDER BY id").fetchall(),
+                             [("reply", "pending_confirm"), ("recall", "succeeded"), ("mute", "pending_auto")])
 
     def test_model_cannot_replace_trusted_sender(self):
         bad = json.loads(self.detail)
@@ -301,10 +365,10 @@ class ExecutionIntentTests(unittest.TestCase):
     def test_confirmation_claim_is_idempotent_under_concurrency(self):
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[{"type": "mute", "mode": "confirm",
+                        text="rule", enabled=True, execution_mode="confirm", actions=[{"type": "mute",
                         "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
         detail = json.loads(self.detail)
-        detail["proposal"].update(rule_version=2, mode="confirm")
+        detail["proposal"].update(rule_version=2)
         self.queue.finish(self.item, status="proposed", detail=json.dumps(detail), rule_versions=(("r", 2),))
         store = MuteExecutionStore(self.path)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -316,10 +380,10 @@ class ExecutionIntentTests(unittest.TestCase):
     def test_confirm_waits_for_click_and_double_click_sends_once(self):
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[{"type": "mute", "mode": "confirm",
+                        text="rule", enabled=True, execution_mode="confirm", actions=[{"type": "mute",
                         "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
         detail = json.loads(self.detail)
-        detail["proposal"].update(rule_version=2, mode="confirm")
+        detail["proposal"].update(rule_version=2)
         self.queue.finish(self.item, status="proposed", detail=json.dumps(detail), rule_versions=(("r", 2),))
         calls = []
         class FakePlatform:
@@ -341,18 +405,21 @@ class ExecutionIntentTests(unittest.TestCase):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[
-                            {"type": "reply", "mode": "confirm", "template": "notice"},
-                            {"type": "recall", "mode": "auto"},
-                            {"type": "mute", "mode": "confirm", "duration_mode": "strict", "severity_seconds": {"low": 60}},
+                        text="rule", enabled=True, execution_mode="confirm", actions=[
+                            {"type": "reply", "template": "notice"},
+                            {"type": "mute", "duration_mode": "strict", "severity_seconds": {"low": 60}},
                         ], modified_by="admin")
+        self.rules.save(platform_id="p", group_id="g", rule_id="r2", expected_version=0,
+                        text="rule two", enabled=True, execution_mode="auto", actions=[{"type": "recall"}],
+                        modified_by="admin")
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("UPDATE dry_run_queue SET payload=? WHERE state='processing'", (json.dumps({
                 "text": "private", "sender_id": "sender", "message_time": datetime.now(timezone.utc).isoformat()}),))
             db.commit()
-        detail = json.dumps({"proposal": {"rule_id": "r", "rule_version": 2,
-                             "target_sender_id": "sender", "duration_seconds": 60}})
-        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2),))
+        detail = json.dumps({"proposals": [
+            {"rule_id": "r", "rule_version": 2, "target_sender_id": "sender", "duration_seconds": 60},
+            {"rule_id": "r2", "rule_version": 1, "target_sender_id": "sender"}]})
+        self.queue.finish(self.item, status="proposed", detail=detail, rule_versions=(("r", 2), ("r2", 1)))
         calls = []
         class Platform:
             async def verify_permission(self, *args): return True
@@ -369,22 +436,22 @@ class ExecutionIntentTests(unittest.TestCase):
             host = DryRunHost(context=None, config={}, rules=None, queue=self.queue, lock_path="unused")
             host.mute_executor = MuteExecutor(MuteExecutionStore(self.path), Platform())
             self.assertEqual(await host.confirm_single_mute(1), "not_claimed")
-            results = await asyncio.gather(host.confirm_single_mute(3), host.confirm_single_mute(3))
+            results = await asyncio.gather(host.confirm_single_mute(2), host.confirm_single_mute(2))
             self.assertCountEqual(results, ["succeeded", "not_claimed"])
         asyncio.run(run())
         self.assertEqual(calls, ["mute"])
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT action, status FROM execution_intents ORDER BY id").fetchall(),
-                             [("reply", "pending_confirm"), ("recall", "pending_auto"), ("mute", "succeeded")])
+                             [("reply", "pending_confirm"), ("mute", "succeeded"), ("recall", "pending_auto")])
 
     def test_overview_rechecks_expired_mute_before_contacting_platform(self):
         from sentinel.dry_run_host import DryRunHost
         self.enable_execution()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1,
-                        text="rule", enabled=True, actions=[{"type": "mute", "mode": "confirm",
+                        text="rule", enabled=True, execution_mode="confirm", actions=[{"type": "mute",
                         "duration_mode": "strict", "severity_seconds": {"low": 60}}], modified_by="admin")
         detail = json.loads(self.detail)
-        detail["proposal"].update(rule_version=2, mode="confirm")
+        detail["proposal"].update(rule_version=2)
         self.queue.finish(self.item, status="proposed", detail=json.dumps(detail), rule_versions=(("r", 2),))
         created = datetime.now(timezone.utc) - timedelta(minutes=2)
         with closing(sqlite3.connect(self.path)) as db:

@@ -66,7 +66,7 @@ class RequestBodyGuard:
                        for message, role in zip(messages, ("system", "user")))
                 or not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict)
                 or tools[0].get("type") != "function" or not isinstance(tools[0].get("function"), dict)
-                or tools[0]["function"].get("name") not in ("propose_action", "assess_rules")):
+                or tools[0]["function"].get("name") != "assess_rules"):
             raise RequestIntegrityError("invalid expected request")
         try:
             raw = json.dumps(expected, ensure_ascii=False, allow_nan=False).encode("utf-8")

@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .dry_run_queue import SYSTEM_PLATFORM
-from .action_config import CONCRETE_EXECUTION_MODES, migrate_legacy_actions, validate_actions
+from .action_config import (
+    CONCRETE_EXECUTION_MODES, legacy_rule_mode, migrate_legacy_actions, rule_mode_for_fields, validate_actions,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ class RuleVersion:
     created_at: str
     priority: int = 0
     actions: list[dict] = field(default_factory=list)
+    execution_mode: str = "inherit"
 
 
 class VersionConflict(ValueError):
@@ -85,12 +88,22 @@ class RuleStore:
                 db.execute("ALTER TABLE rule_versions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
             if "actions" not in columns:
                 db.execute("ALTER TABLE rule_versions ADD COLUMN actions TEXT")
+            if "execution_mode" not in columns:
+                db.execute("ALTER TABLE rule_versions ADD COLUMN execution_mode TEXT")
             rows = db.execute("SELECT rowid, allowed_actions, duration_mode, severity_seconds FROM rule_versions WHERE actions IS NULL").fetchall()
             for row in rows:
                 actions = migrate_legacy_actions(json.loads(row["allowed_actions"]), row["duration_mode"],
                                                  json.loads(row["severity_seconds"]))
-                db.execute("UPDATE rule_versions SET actions=? WHERE rowid=? AND actions IS NULL",
-                           (json.dumps(actions, ensure_ascii=False, sort_keys=True), row["rowid"]))
+                # Legacy permission rows were always automatic.
+                db.execute("UPDATE rule_versions SET actions=?, execution_mode=? WHERE rowid=? AND actions IS NULL",
+                           (json.dumps(actions, ensure_ascii=False, sort_keys=True),
+                            "auto" if actions else "inherit", row["rowid"]))
+            # Derive the rule-level mode from older per-action modes. Stored
+            # actions are left untouched and no new version is created.
+            rows = db.execute("SELECT rowid, actions FROM rule_versions WHERE execution_mode IS NULL").fetchall()
+            for row in rows:
+                db.execute("UPDATE rule_versions SET execution_mode=? WHERE rowid=? AND execution_mode IS NULL",
+                           (legacy_rule_mode(json.loads(row["actions"])), row["rowid"]))
             db.commit()
         finally:
             db.close()
@@ -100,12 +113,15 @@ class RuleStore:
         expected_version: int, text: str, enabled: bool,
         modified_by: str, allowed_actions=None, duration_mode=None,
         severity_seconds=None, priority: int = 0, actions=None, expected_action_mode=None,
+        execution_mode=None,
     ) -> RuleVersion:
         """Append a confirmed version; expected_version=0 creates a rule."""
         self.validate_fields(platform_id=platform_id, group_id=group_id, rule_id=rule_id,
                              expected_version=expected_version, text=text, enabled=enabled,
                              allowed_actions=allowed_actions, duration_mode=duration_mode,
-                             severity_seconds=severity_seconds, modified_by=modified_by, priority=priority, actions=actions)
+                             severity_seconds=severity_seconds, modified_by=modified_by, priority=priority, actions=actions,
+                             execution_mode=execution_mode)
+        execution_mode = rule_mode_for_fields(execution_mode, actions)
         if actions is None:
             actions = migrate_legacy_actions(allowed_actions, duration_mode, severity_seconds)
         else:
@@ -134,18 +150,19 @@ class RuleStore:
                 ).fetchone()
                 existing = self._decode(row)
                 if (existing.text == text and existing.enabled == enabled
-                        and existing.priority == priority and existing.actions == actions):
+                        and existing.priority == priority and existing.actions == actions
+                        and existing.execution_mode == execution_mode):
                     db.commit()
                     return existing
             db.execute(
                 """INSERT INTO rule_versions
                    (platform_id, group_id, rule_id, version, text, enabled, allowed_actions,
-                     duration_mode, severity_seconds, modified_by, priority, actions, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     duration_mode, severity_seconds, modified_by, priority, actions, execution_mode, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (platform_id, group_id, rule_id, current + 1, text, int(enabled),
                  json.dumps(allowed_actions), duration_mode,
                  json.dumps(severity_seconds, sort_keys=True), modified_by, priority,
-                  json.dumps(actions, ensure_ascii=False, sort_keys=True),
+                  json.dumps(actions, ensure_ascii=False, sort_keys=True), execution_mode,
                   datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")),
             )
             row = db.execute(
@@ -164,7 +181,7 @@ class RuleStore:
     def validate_fields(*, platform_id: str, group_id: str, rule_id: str,
                         expected_version: int, text: str, enabled: bool,
                         modified_by: str, allowed_actions=None, duration_mode=None,
-                        severity_seconds=None, priority: int = 0, actions=None) -> None:
+                        severity_seconds=None, priority: int = 0, actions=None, execution_mode=None) -> None:
         for value in (platform_id, group_id, rule_id, text, modified_by):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError("identity, text and modifier must be nonempty strings")
@@ -182,6 +199,7 @@ class RuleStore:
             if any(value is not None for value in (allowed_actions, duration_mode, severity_seconds)):
                 raise ValueError("conflicting action formats")
             normalized = validate_actions(actions)
+        rule_mode_for_fields(execution_mode, actions)
         if enabled and not normalized:
             raise ValueError("enabled rule requires an action")
 
@@ -244,9 +262,15 @@ class RuleStore:
         )
         if row["version"] <= 0:
             raise ValueError("corrupt rule version")
+        stored_mode = row["execution_mode"] if "execution_mode" in row.keys() else None
+        if stored_mode is None:
+            raw = json.loads(row["actions"]) if "actions" in row.keys() and row["actions"] is not None else None
+            stored_mode = rule_mode_for_fields(None, raw)
+        else:
+            rule_mode_for_fields(stored_mode, None)
         return RuleVersion(
             row["platform_id"], row["group_id"], row["rule_id"], row["version"],
             row["text"], bool(row["enabled"]), tuple(action["type"] for action in actions),
             row["duration_mode"], severity,
-            row["modified_by"], row["created_at"], row["priority"], actions,
+            row["modified_by"], row["created_at"], row["priority"], actions, stored_mode,
         )

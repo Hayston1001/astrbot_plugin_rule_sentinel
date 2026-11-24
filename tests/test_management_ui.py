@@ -150,11 +150,13 @@ class ManagementUiTests(unittest.TestCase):
         self.assertNotIn('.editor-footer', css)
         self.assertNotIn('.editor-footer', html)
         self.assertNotIn("确认保存</button>", html)
-        self.assertEqual(html.count('<option value="priority">按规则优先级</option>'), 2)
+        self.assertNotIn('<option value="priority">', html)
+        self.assertNotIn('rule_selection_strategy', html + script)
+        self.assertIn('id="setting-equal_priority_policy"', html)
         self.assertNotIn("管理员优先级", html + script)
         self.assertIn('aria-describedby="rule-priority-help"', html)
         self.assertIn('数值越大越优先', html)
-        self.assertIn('最高优先级并列时转人工复核', html)
+        self.assertIn('aria-describedby="equal-priority-help"', html)
         self.assertIn('id="action-list" role="list"', html)
         self.assertIn('id="action-order-status"', html)
         self.assertIn('按方向键', html)
@@ -329,7 +331,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('.tabs.has-glide button[aria-selected="true"]::after', css)
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn('behavior: "smooth"', script)
-        self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 5)
+        self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 6)
 
     def test_rule_and_group_hover_share_a_strong_animated_outline(self):
         root = Path(__file__).resolve().parents[1]

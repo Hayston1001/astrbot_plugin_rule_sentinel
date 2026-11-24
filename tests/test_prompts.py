@@ -1,6 +1,6 @@
 import unittest
 
-from sentinel.prompts import PROMPTS, detect_language, select_prompt_language
+from sentinel.prompts import PROMPT_VERSION, PROMPTS, detect_language, select_prompt_language
 
 
 class PromptTests(unittest.TestCase):
@@ -23,6 +23,24 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(set(PROMPTS["en"]), set(PROMPTS["zh"]))
         for language, phrase in (("en", "Do not repeat or quote the original message"),
                                  ("zh", "不要复述或引用消息原文")):
-            for key in ("reason", "system_model", "system_priority"):
+            for key in ("reason", "reason_hit", "system", "system_no_reason"):
                 with self.subTest(language=language, key=key):
                     self.assertIn(phrase, PROMPTS[language][key])
+
+    def test_prompt_version_and_single_protocol_keys(self):
+        self.assertEqual(PROMPT_VERSION, 2)
+        for language in ("en", "zh"):
+            keys = set(PROMPTS[language])
+            self.assertTrue({"system", "system_no_reason", "tool", "assessments", "outcome"} <= keys)
+            for removed in ("system_priority", "system_priority_no_reason", "system_model",
+                            "system_model_no_reason", "tool_priority", "tool_model", "action",
+                            "chat_context_review"):
+                self.assertNotIn(removed, keys)
+
+    def test_system_prompts_require_one_assessment_call_per_message(self):
+        for key in ("system", "system_no_reason"):
+            self.assertIn("assess_rules", PROMPTS["en"][key])
+            self.assertIn("exactly once", PROMPTS["en"][key])
+            self.assertNotIn("NO_ACTION", PROMPTS["en"][key])
+            self.assertIn("assess_rules", PROMPTS["zh"][key])
+            self.assertNotIn("NO_ACTION", PROMPTS["zh"][key])

@@ -1,9 +1,9 @@
-"""Isolated AstrBot LLM proposal caller, not registered as a chat tool.
+"""Isolated AstrBot LLM assessment caller, not registered as a chat tool.
 
-Uses a single model request instead of executing a tool loop: the returned tool
-call is data for the dry-run validator. AstrBot providers may silently drop or
-shrink input when a request exceeds the context window, so the model decision is
-treated as advisory: every proposal is validated against the stored rule
+Uses a single model request instead of executing a tool loop: the returned
+assess_rules call is data for the dry-run validator. AstrBot providers may
+silently drop or shrink input when a request exceeds the context window, so the
+model decision is treated as advisory: every hit is validated against the stored rule
 version and the triggering sender, and the audit records the input size. That
 makes a truncated input a visible quality problem instead of an actionable one.
 """
@@ -15,7 +15,7 @@ from .prompts import PROMPTS
 from .group_settings import validate_reason_language
 
 
-def tool_parameters(strategy, language, *, no_action_reason_enabled=True):
+def tool_parameters(language, *, no_action_reason_enabled=True):
     if type(no_action_reason_enabled) is not bool:
         raise ValueError("invalid no-action reason setting")
     text = PROMPTS[language]
@@ -23,12 +23,6 @@ def tool_parameters(strategy, language, *, no_action_reason_enabled=True):
                   for key in ("rule_id", "severity", "duration_seconds", "reason")}
     if not no_action_reason_enabled:
         properties["reason"]["description"] = text["reason_hit"]
-    if strategy == "model":
-        properties["violated"] = {"type": "boolean", "enum": [True]}
-        return {"type": "object", "properties": properties, "required": ["rule_id", "violated", "reason"],
-                "additionalProperties": False}
-    if strategy != "priority":
-        raise ValueError("invalid rule selection strategy")
     properties["outcome"] = {"type": "string", "enum": ["hit", "no_hit", "review"],
                              "description": text["outcome"]}
     return {"type": "object", "properties": {"assessments": {"type": "array", "description": text["assessments"],
@@ -37,24 +31,17 @@ def tool_parameters(strategy, language, *, no_action_reason_enabled=True):
 
 
 # English defaults remain available to the separate, unwired request prototype.
-SYSTEM_PROMPT = PROMPTS["en"]["system_model"]
-PRIORITY_SYSTEM_PROMPT = PROMPTS["en"]["system_priority"]
-TOOL_PARAMETERS = tool_parameters("model", "en")
-PRIORITY_TOOL_PARAMETERS = tool_parameters("priority", "en")
+SYSTEM_PROMPT = PROMPTS["en"]["system"]
+TOOL_PARAMETERS = tool_parameters("en")
 
 
-def make_tool_set(strategy="model", language="en", *, no_action_reason_enabled=True):
+def make_tool_set(language="en", *, no_action_reason_enabled=True):
     # Import only when invoked; plugin initialization stays inactive.
     from astrbot.core.agent.tool import FunctionTool, ToolSet
     if language not in PROMPTS:
         raise ValueError("unsupported prompt language")
-    if strategy == "priority":
-        return ToolSet([FunctionTool(name="assess_rules", description=PROMPTS[language]["tool_priority"],
-                                     parameters=tool_parameters(strategy, language, no_action_reason_enabled=no_action_reason_enabled), handler=None)])
-    if strategy != "model":
-        raise ValueError("invalid rule selection strategy")
-    return ToolSet([FunctionTool(name="propose_action", description=PROMPTS[language]["tool_model"],
-                                 parameters=tool_parameters(strategy, language, no_action_reason_enabled=no_action_reason_enabled), handler=None)])
+    return ToolSet([FunctionTool(name="assess_rules", description=PROMPTS[language]["tool"],
+                                 parameters=tool_parameters(language, no_action_reason_enabled=no_action_reason_enabled), handler=None)])
 
 
 class AstrBotLlmInvoker:
@@ -68,15 +55,13 @@ class AstrBotLlmInvoker:
         self.reason_language = reason_language.strip()
         self.no_action_reason_enabled = no_action_reason_enabled
 
-    async def __call__(self, *, model: str, message: str, rules: list, strategy: str = "model",
+    async def __call__(self, *, model: str, message: str, rules: list,
                        language: str = "en", image_urls=None, image_caption=None, chat_context=None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if (not isinstance(message, str) or not isinstance(rules, list) or not rules
                 or (not message.strip() and not image_urls and not image_caption)):
             raise ValueError("message and rules are required")
-        if strategy not in ("model", "priority"):
-            raise ValueError("invalid rule selection strategy")
         if language not in PROMPTS:
             raise ValueError("unsupported prompt language")
         if image_urls:
@@ -86,7 +71,7 @@ class AstrBotLlmInvoker:
         else:
             trigger = message
         prompt_data = {"rules": rules, "message_untrusted": trigger}
-        prompt_key = "system_" + strategy + ("" if self.no_action_reason_enabled else "_no_reason")
+        prompt_key = "system" if self.no_action_reason_enabled else "system_no_reason"
         system_prompt = PROMPTS[language][prompt_key]
         if self.reason_language:
             system_prompt += ("\nWrite every decision reason in the administrator-specified language: "
@@ -98,12 +83,10 @@ class AstrBotLlmInvoker:
         if chat_context is not None:
             prompt_data["prior_messages_untrusted"] = chat_context
             system_prompt += "\n" + PROMPTS[language]["chat_context"]
-            if strategy == "model":
-                system_prompt += " " + PROMPTS[language]["chat_context_review"]
         prompt = json.dumps(prompt_data, ensure_ascii=False)
         return await self.context.llm_generate(chat_provider_id=model, prompt=prompt,
                                                image_urls=list(image_urls) if image_urls else None,
-                                               tools=self.tool_set_factory(strategy, language),
+                                               tools=self.tool_set_factory(language),
                                                system_prompt=system_prompt,
                                                contexts=[])
 

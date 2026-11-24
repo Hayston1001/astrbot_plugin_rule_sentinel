@@ -124,7 +124,7 @@ globalThis.window = {addEventListener() {}, AstrBotPluginView: {
       image_caption_prompt: "describe the image", image_max_count: 4, image_max_bytes_per_image: 4194304,
       image_max_total_bytes: 8388608, image_fetch_timeout_seconds: 10};
     if (endpoint === "providers") return [{id: "example"}];    if (endpoint === "image-model-options") return {providers: [{id: "example", model: "example", modalities: ["text"], image_capability: "no_image", tool_capability: "undeclared"}], framework_caption_provider_id: ""};
-    if (endpoint === "ui-state") return {platform_id: "p", group_id: "g", active_tab: "records"};
+    if (endpoint === "ui-state") return {platform_id: "p", group_id: "g", records_platform_id: "p", records_group_id: "g", active_tab: "records"};
     if (endpoint === "platforms") return [{id: "p", type: "qq_official"}];
     if (endpoint === "groups") return [{platform_id: "p", group_id: "g", rule_count: 0}];
     if (endpoint === "rules") return [];
@@ -149,8 +149,8 @@ assert.deepEqual(headings, ["时间", "结果", "理由摘要", "规则 ID", "�
 const options = (id) => [...html.match(new RegExp(`<select id="${id}">(.*?)</select>`, "s"))[1].matchAll(/<option[^>]*>(.*?)<\/option>/g)].map((match) => match[1]);
 assert.ok(!html.includes('id="setting-decision_backend"'));
 assert.ok(!html.toLowerCase().includes("jev"));
-assert.deepEqual(options("records-decision-filter"), ["全部", "拟执行", "全部成功", "部分失败", "已撤回", "全部无法执行", "无法撤回", "已超时不可撤回", "全部失败", "撤回失败", "结果不明", "待确认", "未违反规则", "跳过", "其他"]);
-assert.deepEqual(options("records-execution-filter"), ["全部", "全部成功", "部分失败", "已撤回", "无法执行", "无法撤回", "已超时不可撤回", "执行失败", "撤回失败", "结果不明", "待确认", "无执行"]);
+assert.deepEqual(options("records-decision-filter"), ["全部", "拟执行", "全部成功", "部分失败", "已撤回", "全部无法执行", "无法撤回", "已超时不可撤回", "全部失败", "撤回失败", "结果不明", "待确认", "已放弃", "部分已放弃", "未违反规则", "跳过", "其他"]);
+assert.deepEqual(options("records-execution-filter"), ["全部", "全部成功", "部分失败", "已撤回", "无法执行", "无法撤回", "已超时不可撤回", "执行失败", "撤回失败", "结果不明", "待确认", "已放弃", "部分已放弃", "无执行"]);
 assert.ok(!html.includes('class="chip'));
 assert.ok(html.indexOf('id="records-search"') < html.indexOf('id="records-decision-filter"'));
 assert.ok(html.indexOf('id="records-decision-filter"') < html.indexOf('id="records-execution-filter"'));
@@ -452,7 +452,8 @@ assert.equal(elements["current-rules"].textContent, "该群还没有规则.");
 await elements["tab-status"].trigger("click");
 assert.equal(elements["panel-status"].hidden, false);
 await elements["tab-records"].trigger("click");
-assert.equal(requests.filter((request) => !(request.endpoint === "ui-state" && request.body?.active_tab)).length, count + 1);
+// Overview summary and group table on entering the overview, then two message pages and the summary on returning to records.
+assert.equal(requests.filter((request) => !(request.endpoint === "ui-state" && request.body?.active_tab)).length, count + 5);
 elements["records-decision-filter"].value = "proposed";
 await elements["records-decision-filter"].trigger("change");
 assert.ok(elements["records-body"].children.length > 0);

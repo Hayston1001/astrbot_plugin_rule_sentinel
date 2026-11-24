@@ -6,7 +6,6 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 from sentinel.dry_run_queue import DryRunQueue
 from sentinel.mute_execution_store import MuteExecutionStore
@@ -27,7 +26,7 @@ class RecallExecutionTests(unittest.TestCase):
         self.rules.initialize()
         self.queue.initialize()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=0, text="rule", enabled=True,
-                        actions=[{"type": "recall", "mode": "auto"}], modified_by="admin")
+                        actions=[{"type": "recall"}], execution_mode="auto", modified_by="admin")
         settings = SettingsStore(self.path, self.root / "backup")
         config = settings.load_or_migrate({})
         config.update(action_execution_enabled=True, monitoring_groups=["p/g"],
@@ -35,14 +34,18 @@ class RecallExecutionTests(unittest.TestCase):
         settings.save(config)
         self.settings, self.config = settings, config
 
-    def create_intent(self, age=0, *, include_time=True, mode="auto", version=1):
+    def intent_id(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            return db.execute("SELECT max(id) FROM execution_intents").fetchone()[0]
+
+    def create_intent(self, age=0, *, include_time=True, version=1, message_id="trigger/id"):
         payload = {"text": "private", "sender_id": "sender"}
         if include_time:
             payload["message_time"] = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
-        self.queue.enqueue(platform_id="p", group_id="g", message_id="trigger/id", payload=payload, capacity=10)
+        self.queue.enqueue(platform_id="p", group_id="g", message_id=message_id, payload=payload, capacity=10)
         item = self.queue.claim("p", "g")
         detail = json.dumps({"proposal": {"action": "recall", "rule_id": "r", "rule_version": version,
-                             "target_sender_id": "sender", "mode": mode}})
+                             "target_sender_id": "sender"}})
         self.queue.finish(item, status="proposed", detail=detail, rule_versions=(("r", version),))
 
     def state(self):
@@ -63,16 +66,46 @@ class RecallExecutionTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT status, platform_code, trace_id FROM execution_attempts").fetchone(), ("succeeded", "200", "trace-1"))
 
-    def test_111_seconds_is_blocked_without_platform_call(self):
-        self.create_intent(age=111)
-        class Platform:
-            async def verify_permission(self, *args): raise AssertionError("platform must not be called")
-        asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto"))
-        self.assertEqual(self.state(), ("blocked", "recall_expired", 0))
+    def test_old_messages_still_reach_the_platform(self):
+        for age in (111, 600, 86400 * 3):
+            with self.subTest(age=age):
+                with closing(sqlite3.connect(self.path)) as db:
+                    db.execute("DELETE FROM execution_intents")
+                    db.execute("DELETE FROM execution_attempts")
+                    db.commit()
+                self.queue_counter = getattr(self, "queue_counter", 0) + 1
+                self.create_intent(age=age, message_id=f"m{self.queue_counter}")
+                calls = []
+                class Platform:
+                    async def verify_permission(self, *args): return True
+                    async def recall(self, *args):
+                        calls.append(args)
+                        return {"outcome": "succeeded"}
+                intent_id = self.intent_id()
+                self.assertEqual(self.state()[0], "pending_auto")
+                self.assertEqual(asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(intent_id, mode="auto")), "succeeded")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.state(), ("succeeded", None, 1))
 
-    def test_missing_timestamp_requires_review_without_platform_call(self):
+    def test_message_time_is_not_a_precondition(self):
         self.create_intent(include_time=False)
-        self.assertEqual(self.state(), ("review", "invalid_message_time", 0))
+        self.assertEqual(self.state(), ("pending_auto", None, 0))
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertIsNone(db.execute("SELECT expires_at FROM execution_intents").fetchone()[0])
+        calls = []
+        class Platform:
+            async def verify_permission(self, *args): return True
+            async def recall(self, *args):
+                calls.append(args)
+                return {"outcome": "succeeded"}
+        self.assertEqual(asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto")), "succeeded")
+        self.assertEqual(len(calls), 1)
+
+    def test_recall_intents_have_no_local_deadline(self):
+        self.create_intent(age=600)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertIsNone(db.execute("SELECT expires_at FROM execution_intents").fetchone()[0])
+        self.assertFalse(hasattr(MuteExecutionStore, "_recall_expired"))
 
     def test_timeout_never_retries(self):
         self.create_intent()
@@ -86,19 +119,24 @@ class RecallExecutionTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.state(), ("unknown", None, 1))
 
-    def test_expiry_during_permission_check_prevents_recall(self):
-        self.create_intent()
+    def test_platform_expiry_answer_is_blocked_and_never_retried(self):
+        self.create_intent(age=30)
+        calls = []
         class Platform:
             async def verify_permission(self, *args): return True
-            async def recall(self, *args): raise AssertionError("must not recall")
-        with patch.object(MuteExecutionStore, "_recall_expired", side_effect=[False, True, True]):
-            self.assertEqual(asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto")), "blocked")
+            async def recall(self, *args):
+                calls.append(args)
+                return {"outcome": "blocked", "reason_code": "recall_expired", "platform_code": "40064004"}
+        self.assertEqual(asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto")), "blocked")
+        self.assertEqual(len(calls), 1)
         self.assertEqual(self.state(), ("blocked", "recall_expired", 1))
+        self.assertEqual(asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto")), "not_claimed")
+        self.assertEqual(len(calls), 1)
 
     def test_confirmed_recall_is_idempotent(self):
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1, text="rule", enabled=True,
-                        actions=[{"type": "recall", "mode": "confirm"}], modified_by="admin")
-        self.create_intent(mode="confirm", version=2)
+                        actions=[{"type": "recall"}], execution_mode="confirm", modified_by="admin")
+        self.create_intent(version=2)
         calls = []
         class Platform:
             async def verify_permission(self, *args): return True
@@ -184,7 +222,7 @@ class RecallExecutionTests(unittest.TestCase):
     def test_rule_change_prevents_recall(self):
         self.create_intent()
         self.rules.save(platform_id="p", group_id="g", rule_id="r", expected_version=1, text="changed", enabled=False,
-                        actions=[{"type": "recall", "mode": "auto"}], modified_by="admin")
+                        actions=[{"type": "recall"}], execution_mode="auto", modified_by="admin")
         class Platform:
             async def verify_permission(self, *args): raise AssertionError("must not call platform")
         asyncio.run(MuteExecutor(MuteExecutionStore(self.path), Platform()).execute(1, mode="auto"))

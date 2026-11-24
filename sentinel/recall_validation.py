@@ -1,6 +1,6 @@
 """Side-effect-free recall revalidation against a trusted intent."""
 
-from .action_config import resolve_action_mode, validate_actions
+from .action_config import intent_mode_allowed, validate_actions
 from .mute_validation import MuteCheck
 
 
@@ -21,10 +21,6 @@ def revalidate_recall(intent, *, rule, default_action_mode=None):
     except (TypeError, ValueError):
         return MuteCheck(False, "invalid_rule_actions")
     action = next((entry for entry in actions if entry["type"] == "recall"), None)
-    try:
-        mode = resolve_action_mode(action["mode"], default_action_mode) if action else None
-    except ValueError:
-        mode = None
-    if mode is None or mode != intent.get("mode"):
+    if action is None or not intent_mode_allowed(rule.execution_mode, intent.get("mode"), default_action_mode):
         return MuteCheck(False, "action_not_allowed")
     return MuteCheck(True, "validated")

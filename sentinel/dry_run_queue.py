@@ -137,6 +137,14 @@ class DryRunQueue:
                     username TEXT PRIMARY KEY, platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
                     active_tab TEXT NOT NULL DEFAULT 'status'
                 );
+                CREATE TABLE IF NOT EXISTS review_closures (
+                    id INTEGER PRIMARY KEY,
+                    target TEXT NOT NULL CHECK(target IN ('intent', 'event')),
+                    ref_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('dismissed', 'checked')),
+                    closed_by TEXT NOT NULL, closed_at TEXT NOT NULL,
+                    UNIQUE(target, ref_id)
+                );
                 CREATE TABLE IF NOT EXISTS dashboard_overview_layout (
                     username TEXT PRIMARY KEY, payload TEXT NOT NULL
                 );
@@ -180,6 +188,10 @@ class DryRunQueue:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dashboard_ui_state)")}
             if "active_tab" not in columns:
                 db.execute("ALTER TABLE dashboard_ui_state ADD COLUMN active_tab TEXT NOT NULL DEFAULT 'status'")
+            # The records group filter is stored apart from the rules page group; empty means all groups.
+            for column in ("records_platform_id", "records_group_id"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE dashboard_ui_state ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dry_run_events)")}
             if "attempt_id" not in columns:
                 db.execute("ALTER TABLE dry_run_events ADD COLUMN attempt_id TEXT")
@@ -210,6 +222,9 @@ class DryRunQueue:
                     'event:' || source_event_id, 0 FROM execution_intents""")
                 db.execute("DROP TABLE execution_intents")
                 db.execute("ALTER TABLE execution_intents_plan RENAME TO execution_intents")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(execution_intents)")}
+            if "mode_reason" not in columns:
+                db.execute("ALTER TABLE execution_intents ADD COLUMN mode_reason TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS execution_intents_pending_group "
                        "ON execution_intents(status, action, platform_id, group_id, id)")
             db.execute("CREATE INDEX IF NOT EXISTS execution_intents_chat_scope "
@@ -472,120 +487,132 @@ class DryRunQueue:
 
     @staticmethod
     def _record_execution_intent(db, item, payload, event_id, detail, action_index=0):
-        """Create an intent atomically with its validated audit event.
+        """Create intents atomically with their validated audit event.
 
-        The executor rechecks durable settings, rule, permissions and intent
-        state before acting.
+        One audit event may select several rules; each selected rule expands to
+        its configured actions in rule order, then action order. The executor
+        rechecks durable settings, rule, permissions and intent state before acting.
         """
         from .rule_store import RuleStore
-        from .mute_validation import revalidate_mute
-        from .recall_validation import revalidate_recall
 
         try:
             snapshot = json.loads(payload)
-            proposal = json.loads(detail)["proposal"]
+            decoded = json.loads(detail)
+            proposals = decoded.get("proposals")
+            if proposals is None:
+                proposals = [decoded["proposal"]]
+            if not isinstance(proposals, list) or not proposals:
+                raise ValueError("invalid proposals")
+            peer_tie = decoded.get("peer_tie") is True
             sender = snapshot["sender_id"]
-            if not isinstance(sender, str) or not sender.strip() or proposal["target_sender_id"] != sender:
+            if not isinstance(sender, str) or not sender.strip():
                 raise ValueError("sender mismatch")
-            rule_id, version = proposal["rule_id"], proposal["rule_version"]
-            if not isinstance(rule_id, str) or not rule_id.strip() or type(version) is not int or version <= 0:
-                raise ValueError("invalid rule identity")
-            row = db.execute("SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? ORDER BY version DESC LIMIT 1",
-                             (item.platform_id, item.group_id, rule_id)).fetchone()
-            rule = RuleStore._decode(row) if row is not None else None
-            if "action" not in proposal:
+            seen = set()
+            for proposal in proposals:
+                if proposal["target_sender_id"] != sender:
+                    raise ValueError("sender mismatch")
+                rule_id, version = proposal["rule_id"], proposal["rule_version"]
+                if (not isinstance(rule_id, str) or not rule_id.strip() or type(version) is not int
+                        or version <= 0 or rule_id in seen):
+                    raise ValueError("invalid rule identity")
+                seen.add(rule_id)
+                row = db.execute("SELECT * FROM rule_versions WHERE platform_id=? AND group_id=? AND rule_id=? ORDER BY version DESC LIMIT 1",
+                                 (item.platform_id, item.group_id, rule_id)).fetchone()
+                rule = RuleStore._decode(row) if row is not None else None
                 if rule is None or rule.version != version or not rule.enabled:
                     raise ValueError("invalid action rule")
-                for index, entry in enumerate(rule.actions):
-                    action_proposal = {**proposal, "action": entry["type"], "mode": entry["mode"]}
-                    if entry["type"] != "mute":
-                        action_proposal["duration_seconds"] = None
-                    DryRunQueue._record_execution_intent(db, item, payload, event_id,
-                        json.dumps({"proposal": action_proposal}, ensure_ascii=False), action_index=index)
-                return
-            action = proposal["action"]
-            if action not in ("mute", "reply", "recall") or rule is None or rule.version != version or not rule.enabled:
-                raise ValueError("invalid action rule")
-            selected = next((entry for entry in rule.actions if entry["type"] == action), None)
-            if selected is None or proposal.get("mode") != selected["mode"]:
-                raise ValueError("action not allowed")
-            has_settings = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dashboard_settings'").fetchone()
-            stored_settings = db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone() if has_settings else None
-            settings = json.loads(stored_settings["payload"]) if stored_settings else {}
-            from .group_settings import execution_allowed, resolve_group_settings
-            from .action_config import resolve_action_mode
-            execution_enabled = execution_allowed(settings, item.platform_id, item.group_id)
-            default_action_mode = settings.get("default_action_mode")
-            actual_mode = resolve_action_mode(selected["mode"], default_action_mode)
-            limit = settings.get("max_duration_seconds", 2592000)
-            now = datetime.now(timezone.utc)
-            duration = proposal.get("duration_seconds")
-            expires = None
-            message_time = None
-            missing_time = False
-            try:
-                parsed_time = datetime.fromisoformat(snapshot["message_time"])
-                if parsed_time.tzinfo is None or parsed_time > now:
-                    raise ValueError("invalid message timestamp")
-                message_time = parsed_time.astimezone(timezone.utc).isoformat(timespec="milliseconds")
-            except (KeyError, TypeError, ValueError, OverflowError):
-                pass
-            intent = {"platform_id": item.platform_id, "group_id": item.group_id, "message_id": item.message_id, "rule_id": rule_id,
-                       "rule_version": version, "action": action, "target_sender_id": sender,
-                       "duration_seconds": duration, "mode": actual_mode, "source_event_id": event_id}
-            state = ("pending_auto" if actual_mode == "auto" else "pending_confirm") if execution_enabled else "inactive"
-            reason = None
-            if action == "mute" and selected["duration_mode"] == "cumulative":
-                if duration is not None:
-                    raise ValueError("cumulative mute does not accept a proposed duration")
-                if state == "pending_confirm":
-                    reason = "cumulative_mute_on_confirmation"
+                if "action" not in proposal:
+                    for entry in rule.actions:
+                        action_proposal = {**proposal, "action": entry["type"]}
+                        if entry["type"] != "mute":
+                            action_proposal["duration_seconds"] = None
+                        DryRunQueue._record_action_intent(db, item, snapshot, event_id, action_proposal, rule,
+                                                          action_index, peer_tie)
+                        action_index += 1
                 else:
-                    group = resolve_group_settings(settings, item.platform_id, item.group_id)
-                    count = count_cumulative_mute(db, intent, rule, selected, group, now)
-                    if count is not None:
-                        duration = count.duration_seconds
-                    if execution_enabled:
-                        intent["duration_seconds"] = duration
-                        if count is None:
-                            state, reason = "review", "cumulative_not_counted"
-                        else:
-                            check = revalidate_mute(intent, rule=rule, max_duration_seconds=limit,
-                                                    default_action_mode=default_action_mode, cumulative_duration=count.duration_seconds)
-                            if check.allowed:
-                                expires = (now + timedelta(seconds=duration)).isoformat(timespec="milliseconds")
-                            else:
-                                state, reason = "review", check.reason
-            elif action == "mute":
-                if not revalidate_mute(intent, rule=rule, max_duration_seconds=limit, default_action_mode=default_action_mode).allowed:
-                    raise ValueError("invalid mute")
-                expires = (now + timedelta(seconds=duration)).isoformat(timespec="seconds")
-            elif action == "recall":
-                if not revalidate_recall(intent, rule=rule, default_action_mode=default_action_mode).allowed:
-                    raise ValueError("invalid recall")
-                duration = None
-                try:
-                    if message_time is None:
-                        raise ValueError("invalid message timestamp")
-                    expires = (datetime.fromisoformat(message_time) + timedelta(seconds=110)).isoformat(timespec="milliseconds")
-                except (TypeError, ValueError, OverflowError):
-                    missing_time = True
-                    message_time = None
-                if execution_enabled and missing_time:
-                    state, reason = "review", "invalid_message_time"
-            else:
-                duration = None
-            timestamp = now.isoformat(timespec="milliseconds")
-            db.execute("""INSERT INTO execution_intents
-                (source_event_id, source_attempt_id, platform_id, group_id, message_id, rule_id, rule_version,
-                 action, target_sender_id, mode, duration_seconds, expires_at, status, created_at, updated_at, message_time, reason_code, plan_id, action_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (event_id, item.lease, item.platform_id, item.group_id, item.message_id, rule_id, version,
-                 action, sender, actual_mode, duration, expires,
-                  state, timestamp, timestamp, message_time, reason,
-                 f"event:{event_id}", action_index))
+                    DryRunQueue._record_action_intent(db, item, snapshot, event_id, proposal, rule,
+                                                      action_index, peer_tie)
+                    action_index += 1
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid execution intent") from error
+
+    @staticmethod
+    def _record_action_intent(db, item, snapshot, event_id, proposal, rule, action_index, peer_tie):
+        from .mute_validation import revalidate_mute
+        from .recall_validation import revalidate_recall
+        from .group_settings import execution_allowed, resolve_group_settings
+        from .action_config import resolve_final_mode
+
+        action, version, rule_id, sender = proposal["action"], rule.version, rule.rule_id, proposal["target_sender_id"]
+        if action not in ("mute", "reply", "recall"):
+            raise ValueError("invalid action rule")
+        selected = next((entry for entry in rule.actions if entry["type"] == action), None)
+        if selected is None:
+            raise ValueError("action not allowed")
+        has_settings = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dashboard_settings'").fetchone()
+        stored_settings = db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone() if has_settings else None
+        settings = json.loads(stored_settings["payload"]) if stored_settings else {}
+        execution_enabled = execution_allowed(settings, item.platform_id, item.group_id)
+        default_action_mode = settings.get("default_action_mode")
+        actual_mode, mode_reason = resolve_final_mode(rule.execution_mode, default_action_mode, peer_tie=peer_tie)
+        limit = settings.get("max_duration_seconds", 2592000)
+        now = datetime.now(timezone.utc)
+        duration = proposal.get("duration_seconds")
+        message_time = None
+        try:
+            parsed_time = datetime.fromisoformat(snapshot["message_time"])
+            if parsed_time.tzinfo is None or parsed_time > now:
+                raise ValueError("invalid message timestamp")
+            message_time = parsed_time.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
+        expires = None
+        intent = {"platform_id": item.platform_id, "group_id": item.group_id, "message_id": item.message_id, "rule_id": rule_id,
+                   "rule_version": version, "action": action, "target_sender_id": sender,
+                   "duration_seconds": duration, "mode": actual_mode, "source_event_id": event_id}
+        state = ("pending_auto" if actual_mode == "auto" else "pending_confirm") if execution_enabled else "inactive"
+        reason = None
+        if action == "mute" and selected["duration_mode"] == "cumulative":
+            if duration is not None:
+                raise ValueError("cumulative mute does not accept a proposed duration")
+            if state == "pending_confirm":
+                reason = "cumulative_mute_on_confirmation"
+            else:
+                group = resolve_group_settings(settings, item.platform_id, item.group_id)
+                count = count_cumulative_mute(db, intent, rule, selected, group, now)
+                if count is not None:
+                    duration = count.duration_seconds
+                if execution_enabled:
+                    intent["duration_seconds"] = duration
+                    if count is None:
+                        state, reason = "review", "cumulative_not_counted"
+                    else:
+                        check = revalidate_mute(intent, rule=rule, max_duration_seconds=limit,
+                                                default_action_mode=default_action_mode, cumulative_duration=count.duration_seconds)
+                        if check.allowed:
+                            expires = (now + timedelta(seconds=duration)).isoformat(timespec="milliseconds")
+                        else:
+                            state, reason = "review", check.reason
+        elif action == "mute":
+            if not revalidate_mute(intent, rule=rule, max_duration_seconds=limit, default_action_mode=default_action_mode).allowed:
+                raise ValueError("invalid mute")
+            expires = (now + timedelta(seconds=duration)).isoformat(timespec="seconds")
+        elif action == "recall":
+            if not revalidate_recall(intent, rule=rule, default_action_mode=default_action_mode).allowed:
+                raise ValueError("invalid recall")
+            duration = None
+        else:
+            duration = None
+        timestamp = now.isoformat(timespec="milliseconds")
+        db.execute("""INSERT INTO execution_intents
+            (source_event_id, source_attempt_id, platform_id, group_id, message_id, rule_id, rule_version,
+             action, target_sender_id, mode, duration_seconds, expires_at, status, created_at, updated_at, message_time, reason_code,
+             plan_id, action_index, mode_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, item.lease, item.platform_id, item.group_id, item.message_id, rule_id, version,
+             action, sender, actual_mode, duration, expires,
+             state, timestamp, timestamp, message_time, reason,
+             f"event:{event_id}", action_index, mode_reason))
 
     def recover_after_exclusive_start(self) -> int:
         """Reset dry-run work after all previous workers have stopped."""
@@ -643,6 +670,9 @@ class DryRunQueue:
             (row["id"],)).fetchall()]
         notice = db.execute("""SELECT status, attempts, sent_quoted, sent_passive, send_method, downgraded, downgrade_reason, platform_code, reason_code, trace_id, updated_at
             FROM protected_target_notices WHERE intent_id=?""", (row["id"],)).fetchone()
+        closure = db.execute("""SELECT kind, closed_by, closed_at FROM review_closures
+            WHERE target='intent' AND ref_id=?""", (row["id"],)).fetchone()
+        result["closure"] = dict(closure) if closure else None
         result["notice"] = dict(notice) if notice else None
         if notice:
             result["notice"]["history"] = [dict(attempt) for attempt in db.execute("""SELECT attempt, status, sent_quoted, sent_passive, send_method, downgraded, downgrade_reason,
@@ -652,8 +682,8 @@ class DryRunQueue:
 
     @staticmethod
     def _executions_for_event(db, event_id):
-        rows = db.execute("""SELECT id, plan_id, action_index, action, mode, status, attempts, duration_seconds,
-            expires_at, platform_code, reason_code, trace_id, updated_at FROM execution_intents
+        rows = db.execute("""SELECT id, plan_id, action_index, action, mode, mode_reason, rule_id, status, attempts,
+            duration_seconds, expires_at, platform_code, reason_code, trace_id, updated_at FROM execution_intents
             WHERE source_event_id=? ORDER BY action_index""", (event_id,)).fetchall()
         return [DryRunQueue._execution_details(db, row) for row in rows]
 
@@ -669,6 +699,8 @@ class DryRunQueue:
             return None
         if "pending_confirm" in states:
             return "pending_confirm"
+        if all(state == "dismissed" for state in states):
+            return "dismissed"
         if any(state in ("pending_auto", "pending_retry", "executing") for state in states):
             return "executing"
         if any(state in ("unknown", "review") for state in states):
@@ -677,6 +709,8 @@ class DryRunQueue:
             return "succeeded"
         if all(state == "failed" for state in states):
             return "failed"
+        if all(state in ("succeeded", "dismissed") for state in states):
+            return "partial_dismissed"
         if all(state in ("blocked", "permission_denied", "denied", "unsupported") for state in states):
             return "blocked"
         if all(state == "inactive" for state in states):
@@ -697,33 +731,50 @@ class DryRunQueue:
             latest["executions"] = self._executions_for_event(db, event_id)
             latest["execution"] = latest["executions"][0] if latest["executions"] else None
             latest["execution_summary"] = self._execution_summary(latest["executions"])
-            count = self._violation_for_event(db, event_id)
-            if count is not None:
-                latest["violation_count"] = count
+            self._attach_violations(db, latest, event_id)
             return latest
         finally:
             db.close()
 
     @staticmethod
-    def _violation_for_event(db, event_id):
-        row = db.execute("""SELECT ordinal, duration_seconds, counted_at_us, revoked_at_us, revoked_by
-            FROM violation_counts WHERE source_event_id=?""", (event_id,)).fetchone()
-        return dict(row) if row is not None else None
+    def _violations_for_event(db, event_id):
+        rows = db.execute("""SELECT id, rule_id, owner, ordinal, duration_seconds, counted_at_us, revoked_at_us, revoked_by
+            FROM violation_counts WHERE source_event_id=? ORDER BY id""", (event_id,)).fetchall()
+        result = []
+        for row in rows:
+            unit = dict(row)
+            try:
+                unit["rule_ids"] = json.loads(unit.pop("owner"))
+            except (TypeError, ValueError):
+                unit["rule_ids"] = [unit["rule_id"]]
+            result.append(unit)
+        return result
 
-    def revoke_violation_count(self, platform_id, group_id, message_id, actor):
+    @staticmethod
+    def _attach_violations(db, target, event_id):
+        units = DryRunQueue._violations_for_event(db, event_id)
+        if units:
+            target["violation_counts"] = units
+            target["violation_count"] = units[0]
+
+    def revoke_violation_count(self, platform_id, group_id, message_id, actor, count_id=None):
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            changed = revoke_violation(db, platform_id=platform_id, group_id=group_id, message_id=message_id,
-                                       revoked_at=datetime.now(timezone.utc), revoked_by=actor)
-            row = db.execute("SELECT source_event_id FROM violation_counts WHERE platform_id=? AND group_id=? AND message_id=?",
-                             (platform_id, group_id, message_id)).fetchone()
-            if row is None:
+            rows = db.execute("SELECT id, source_event_id FROM violation_counts WHERE platform_id=? AND group_id=? AND message_id=? ORDER BY id",
+                              (platform_id, group_id, message_id)).fetchall()
+            if not rows or (count_id is not None and count_id not in [row["id"] for row in rows]):
                 raise ValueError("no violation count")
-            result = self._violation_for_event(db, row["source_event_id"])
+            if count_id is None and len(rows) > 1:
+                raise ValueError("violation count must be specified")
+            changed = revoke_violation(db, platform_id=platform_id, group_id=group_id, message_id=message_id,
+                                       revoked_at=datetime.now(timezone.utc), revoked_by=actor, count_id=count_id)
+            event_id = next(row["source_event_id"] for row in rows if count_id is None or row["id"] == count_id)
+            result = {"violation_counts": self._violations_for_event(db, event_id)}
+            result["violation_count"] = result["violation_counts"][0]
             db.commit()
             if changed:
-                self._publish((platform_id, group_id, message_id), row["source_event_id"])
+                self._publish((platform_id, group_id, message_id), event_id)
             return result
         except BaseException:
             db.rollback()
@@ -830,45 +881,105 @@ class DryRunQueue:
         finally:
             db.close()
 
-    def pending_confirmations(self, platform_id, group_id, before_id=None, limit=20, all_groups=False):
-        """Read pending supported actions and counts from one consistent snapshot."""
+    @staticmethod
+    def _review_items_sql(scope_sql):
+        """Open review items: confirmable actions, unresolved executions and latest judgments needing review."""
+        return f"""
+            SELECT 'action' AS kind, i.platform_id, i.group_id, i.message_id, i.source_event_id AS cursor,
+                   i.created_at AS created_at
+            FROM execution_intents i
+            WHERE i.status='pending_confirm' AND {scope_sql.format(alias='i')}
+            UNION ALL
+            SELECT 'intent_check', i.platform_id, i.group_id, i.message_id, i.source_event_id, i.created_at
+            FROM execution_intents i
+            WHERE i.status IN ('unknown', 'review') AND {scope_sql.format(alias='i')}
+              AND NOT EXISTS (SELECT 1 FROM review_closures c WHERE c.target='intent' AND c.ref_id=i.id)
+            UNION ALL
+            SELECT 'event_check', e.platform_id, e.group_id, e.message_id, e.id, e.created_at
+            FROM dry_run_events e
+            WHERE e.status='review' AND {scope_sql.format(alias='e')}
+              AND e.id=(SELECT MAX(x.id) FROM dry_run_events x WHERE x.platform_id=e.platform_id
+                        AND x.group_id=e.group_id AND x.message_id=e.message_id)
+              AND NOT EXISTS (SELECT 1 FROM review_closures c WHERE c.target='event' AND c.ref_id=e.id)"""
+
+    @staticmethod
+    def _review_scope(platform_id, group_id, all_groups):
         if type(all_groups) is not bool or (all_groups and (platform_id is not None or group_id is not None)):
             raise ValueError("invalid group identity")
         if not all_groups and any(not isinstance(value, str) or not value.strip() or len(value) > 128
                                   for value in (platform_id, group_id)):
             raise ValueError("invalid group identity")
+        if all_groups:
+            return "{alias}.platform_id != ?", (SYSTEM_PLATFORM,)
+        return "{alias}.platform_id=? AND {alias}.group_id=?", (platform_id, group_id)
+
+    def pending_reviews(self, platform_id, group_id, before_id=None, limit=20, all_groups=False):
+        """Read open review items, counted per message, from one consistent snapshot.
+
+        A message stays listed until each of its confirmable actions and
+        checks is acted on or closed.
+        """
+        scope_sql, scope = self._review_scope(platform_id, group_id, all_groups)
         if (before_id is not None and (type(before_id) is not int or not 1 <= before_id <= 9223372036854775807)
                 or type(limit) is not int or not 1 <= limit <= 100):
             raise ValueError("invalid pagination")
         from .message_retention import stored_retention_days
+        items = self._review_items_sql(scope_sql)
+        item_scope = scope * 3
         db = self._connect()
         try:
             db.execute("BEGIN")
-            predicate = "platform_id != ?" if all_groups else "platform_id=? AND group_id=?"
-            scope = (SYSTEM_PLATFORM,) if all_groups else (platform_id, group_id)
-            # Only actions supported by this plugin's real execution boundary
-            # belong in the executable confirmation queue.
-            where = f"status='pending_confirm' AND mode='confirm' AND action='mute' AND {predicate}"
-            totals = db.execute(f"""SELECT COUNT(*) AS messages, COALESCE(SUM(actions), 0) AS actions FROM (
-                SELECT COUNT(*) AS actions FROM execution_intents WHERE {where}
-                GROUP BY platform_id, group_id, message_id)""", scope).fetchone()
-            rows = db.execute(f"""SELECT platform_id, group_id, message_id, MAX(id) AS cursor
-                FROM execution_intents WHERE {where} GROUP BY platform_id, group_id, message_id
-                HAVING (? IS NULL OR MAX(id) < ?) ORDER BY cursor DESC LIMIT ?""",
-                (*scope, before_id, before_id, limit + 1)).fetchall()
+            totals = {"action": 0, "intent_check": 0, "event_check": 0}
+            oldest = None
+            for row in db.execute(f"SELECT kind, COUNT(*) AS n, MIN(created_at) AS oldest FROM ({items}) GROUP BY kind", item_scope):
+                totals[row["kind"]] = row["n"]
+                oldest = row["oldest"] if oldest is None or row["oldest"] < oldest else oldest
+            total_messages = db.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM ({items}) GROUP BY platform_id, group_id, message_id)", item_scope).fetchone()[0]
+            rows = db.execute(f"""SELECT platform_id, group_id, message_id, MAX(cursor) AS cursor FROM ({items})
+                GROUP BY platform_id, group_id, message_id HAVING (? IS NULL OR MAX(cursor) < ?)
+                ORDER BY cursor DESC LIMIT ?""", (*item_scope, before_id, before_id, limit + 1)).fetchall()
             has_more = len(rows) > limit
             rows = rows[:limit]
-            days = stored_retention_days(db)
+            try:
+                days = stored_retention_days(db)
+            except (TypeError, ValueError):
+                days = None
+            setting = db.execute("SELECT payload FROM dashboard_settings WHERE id=1").fetchone() \
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dashboard_settings'").fetchone() else None
+            try:
+                config = json.loads(setting["payload"]) if setting else None
+            except (TypeError, ValueError):
+                config = None
+            from .group_settings import execution_allowed
             messages = []
             for row in rows:
                 key = (row["platform_id"], row["group_id"], row["message_id"])
-                actions = [dict(item) for item in db.execute("""SELECT i.id, i.action, i.mode, i.status,
+                actions = [dict(item) for item in db.execute("""SELECT i.id, i.action, i.mode, i.mode_reason, i.status,
                     i.rule_id, i.rule_version, i.duration_seconds, i.expires_at, i.message_time,
                     i.action_index, i.reason_code, e.detail, e.created_at FROM execution_intents i
                     JOIN dry_run_events e ON e.id=i.source_event_id
-                    WHERE i.platform_id=? AND i.group_id=? AND i.message_id=?
-                       AND i.status='pending_confirm' AND i.mode='confirm' AND i.action='mute'
+                    WHERE i.platform_id=? AND i.group_id=? AND i.message_id=? AND i.status='pending_confirm'
                     ORDER BY i.source_event_id DESC, i.action_index""", key).fetchall()]
+                checks = [{"kind": "intent", **dict(item)} for item in db.execute("""SELECT i.id AS intent_id, i.action, i.status,
+                    i.rule_id, i.reason_code, i.updated_at, i.source_event_id AS event_id FROM execution_intents i
+                    WHERE i.platform_id=? AND i.group_id=? AND i.message_id=? AND i.status IN ('unknown', 'review')
+                      AND NOT EXISTS (SELECT 1 FROM review_closures c WHERE c.target='intent' AND c.ref_id=i.id)
+                    ORDER BY i.source_event_id DESC, i.action_index""", key).fetchall()]
+                latest = db.execute("""SELECT id, status, detail, created_at FROM dry_run_events
+                    WHERE platform_id=? AND group_id=? AND message_id=? ORDER BY id DESC LIMIT 1""", key).fetchone()
+                if (latest is not None and latest["status"] == "review" and not db.execute(
+                        "SELECT 1 FROM review_closures WHERE target='event' AND ref_id=?", (latest["id"],)).fetchone()):
+                    reason = None
+                    try:
+                        decoded = json.loads(latest["detail"])
+                        if isinstance(decoded, dict):
+                            reason = decoded.get("review_reason")
+                            reason = reason if isinstance(reason, str) else None
+                    except (TypeError, ValueError, RecursionError):
+                        reason = latest["detail"][:100] if isinstance(latest["detail"], str) else None
+                    checks.append({"kind": "event", "event_id": latest["id"], "status": "review",
+                                   "review_reason": reason, "created_at": latest["created_at"]})
                 content = None
                 if days:
                     content_row = db.execute("""SELECT content FROM message_contents
@@ -876,12 +987,141 @@ class DryRunQueue:
                         AND stored_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
                         (*key, f"-{days} days")).fetchone()
                     content = content_row["content"] if content_row else None
+                try:
+                    allowed = config is not None and execution_allowed(config, key[0], key[1])
+                except (TypeError, ValueError, KeyError):
+                    allowed = False
                 messages.append({"platform_id": key[0], "group_id": key[1], "message_id": key[2],
                                  "content": content[:400] if content is not None else None,
                                  "content_truncated": content is not None and len(content) > 400,
-                                 "cursor": row["cursor"], "actions": actions})
-            return {"messages": messages, "total_messages": totals["messages"], "total_actions": totals["actions"],
-                    "next_before_id": rows[-1]["cursor"] if has_more and rows else None}
+                                 "cursor": row["cursor"], "execution_allowed": allowed,
+                                 "actions": actions, "checks": checks})
+            return {"messages": messages, "total_messages": total_messages,
+                    "total_actions": totals["action"], "total_checks": totals["intent_check"] + totals["event_check"],
+                    "oldest_at": oldest, "next_before_id": rows[-1]["cursor"] if has_more and rows else None}
+        finally:
+            db.close()
+
+    def close_review_item(self, *, target, actor, intent_id=None, event_id=None):
+        """Close one open review item without calling the platform.
+
+        target is "action" (give up a confirmable action), "intent_check" or
+        "event_check" (mark checked). The original records stay; only the
+        operator and time are added. Closing twice reports the item as already closed.
+        """
+        if target not in ("action", "intent_check", "event_check") or not isinstance(actor, str) or not actor.strip():
+            raise ValueError("invalid review item")
+        ref = event_id if target == "event_check" else intent_id
+        other = intent_id if target == "event_check" else event_id
+        if type(ref) is not int or ref <= 0 or other is not None:
+            raise ValueError("invalid review item")
+        kind = "dismissed" if target == "action" else "checked"
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            closed = db.execute("SELECT closed_by, closed_at FROM review_closures WHERE target=? AND ref_id=?",
+                                ("event" if target == "event_check" else "intent", ref)).fetchone()
+            if target == "event_check":
+                row = db.execute("SELECT id, platform_id, group_id, message_id, status FROM dry_run_events WHERE id=?", (ref,)).fetchone()
+                if row is None or row["platform_id"] == SYSTEM_PLATFORM:
+                    raise ValueError("unknown review item")
+                key, publish_id = (row["platform_id"], row["group_id"], row["message_id"]), ref
+                if closed is None:
+                    newest = db.execute("""SELECT MAX(id) FROM dry_run_events WHERE platform_id=? AND group_id=? AND message_id=?""",
+                                        key).fetchone()[0]
+                    if row["status"] != "review" or newest != ref:
+                        raise ValueError("review item is no longer open")
+            else:
+                row = db.execute("SELECT * FROM execution_intents WHERE id=?", (ref,)).fetchone()
+                if row is None:
+                    raise ValueError("unknown review item")
+                key, publish_id = (row["platform_id"], row["group_id"], row["message_id"]), row["source_event_id"]
+                if closed is None:
+                    allowed = ("pending_confirm",) if target == "action" else ("unknown", "review")
+                    if row["status"] not in allowed:
+                        raise ValueError("review item is no longer open")
+            if closed is not None:
+                db.commit()
+                return {"closed": False, "already_closed": True, "closed_by": closed["closed_by"], "closed_at": closed["closed_at"]}
+            if target == "action":
+                db.execute("UPDATE execution_intents SET status='dismissed', reason_code='dismissed', updated_at=? WHERE id=? AND status='pending_confirm'",
+                           (now, ref))
+            db.execute("INSERT INTO review_closures (target, ref_id, kind, closed_by, closed_at) VALUES (?, ?, ?, ?, ?)",
+                       ("event" if target == "event_check" else "intent", ref, kind, actor, now))
+            db.commit()
+            self._publish(key, publish_id)
+            return {"closed": True, "already_closed": False, "closed_by": actor, "closed_at": now}
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def _review_message(*values):
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 512 for value in values):
+            raise ValueError("invalid message identity")
+        return values
+
+    def pending_rule_actions(self, *, platform_id, group_id, message_id, rule_id):
+        """List one rule's pending confirmable actions for a message, in action order."""
+        self._review_message(platform_id, group_id, message_id, rule_id)
+        db = self._connect()
+        try:
+            rows = db.execute("""SELECT id FROM execution_intents WHERE platform_id=? AND group_id=? AND message_id=?
+                AND rule_id=? AND status='pending_confirm' ORDER BY action_index, id""",
+                (platform_id, group_id, message_id, rule_id)).fetchall()
+            return [row["id"] for row in rows]
+        finally:
+            db.close()
+
+    def close_rule_actions(self, *, platform_id, group_id, message_id, rule_id, actor):
+        """Give up every pending confirmable action of one rule for one message."""
+        self._review_message(platform_id, group_id, message_id, rule_id)
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("invalid review item")
+        key = (platform_id, group_id, message_id)
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            rows = db.execute("""SELECT id FROM execution_intents WHERE platform_id=? AND group_id=? AND message_id=?
+                AND rule_id=? AND status='pending_confirm' ORDER BY action_index, id""", (*key, rule_id)).fetchall()
+            closed = already = 0
+            for row in rows:
+                if db.execute("SELECT 1 FROM review_closures WHERE target='intent' AND ref_id=?", (row["id"],)).fetchone():
+                    already += 1
+                    continue
+                db.execute("UPDATE execution_intents SET status='dismissed', reason_code='dismissed', updated_at=? "
+                           "WHERE id=? AND status='pending_confirm'", (now, row["id"]))
+                db.execute("INSERT INTO review_closures (target, ref_id, kind, closed_by, closed_at) VALUES "
+                           "('intent', ?, 'dismissed', ?, ?)", (row["id"], actor, now))
+                closed += 1
+            if not rows:
+                prior = db.execute("""SELECT COUNT(*) FROM execution_intents i JOIN review_closures c
+                    ON c.target='intent' AND c.ref_id=i.id
+                    WHERE i.platform_id=? AND i.group_id=? AND i.message_id=? AND i.rule_id=?""",
+                    (*key, rule_id)).fetchone()[0]
+                if prior:
+                    stored = db.execute("""SELECT c.closed_by, c.closed_at FROM review_closures c
+                        JOIN execution_intents i ON i.id=c.ref_id AND c.target='intent'
+                        WHERE i.platform_id=? AND i.group_id=? AND i.message_id=? AND i.rule_id=?
+                        ORDER BY c.id LIMIT 1""", (*key, rule_id)).fetchone()
+                    db.commit()
+                    return {"closed": 0, "already_closed": prior, "closed_by": stored["closed_by"],
+                            "closed_at": stored["closed_at"]}
+                raise ValueError("no review action")
+            publish_id = db.execute("""SELECT MAX(source_event_id) FROM execution_intents
+                WHERE platform_id=? AND group_id=? AND message_id=? AND rule_id=?""",
+                (*key, rule_id)).fetchone()[0]
+            db.commit()
+            if closed:
+                self._publish(key, publish_id)
+            return {"closed": closed, "already_closed": already, "closed_by": actor, "closed_at": now}
+        except BaseException:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -890,8 +1130,7 @@ class DryRunQueue:
             raise ValueError("invalid intent")
         db = self._connect()
         try:
-            row = db.execute("SELECT status, reason_code FROM execution_intents WHERE id=? AND action='mute'",
-                             (intent_id,)).fetchone()
+            row = db.execute("SELECT status, reason_code FROM execution_intents WHERE id=?", (intent_id,)).fetchone()
             return dict(row) if row else None
         finally:
             db.close()
@@ -995,9 +1234,7 @@ class DryRunQueue:
                     row["executions"] = self._executions_for_event(db, row["id"])
                     row["execution"] = row["executions"][0] if row["executions"] else None
                     row["execution_summary"] = self._execution_summary(row["executions"])
-                    count = self._violation_for_event(db, row["id"])
-                    if count is not None:
-                        row["violation_count"] = count
+                    self._attach_violations(db, row, row["id"])
                 placeholders = ",".join("(?,?,?)" for _ in result)
                 timeline = db.execute(
                     "SELECT platform_id, group_id, message_id, id, status, created_at FROM dry_run_events "
@@ -1121,8 +1358,8 @@ class DryRunQueue:
     def get_ui_state(self, username: str) -> dict | None:
         db = self._connect()
         try:
-            row = db.execute("SELECT platform_id, group_id, active_tab FROM dashboard_ui_state WHERE username=?",
-                             (username,)).fetchone()
+            row = db.execute("""SELECT platform_id, group_id, active_tab, records_platform_id, records_group_id
+                FROM dashboard_ui_state WHERE username=?""", (username,)).fetchone()
             return dict(row) if row else None
         finally:
             db.close()
@@ -1171,6 +1408,18 @@ class DryRunQueue:
                 (username, platform_id, group_id))
             db.commit()
             return {"platform_id": platform_id, "group_id": group_id}
+        finally:
+            db.close()
+
+    def save_records_filter(self, username: str, platform_id: str, group_id: str) -> dict:
+        db = self._connect()
+        try:
+            db.execute("""INSERT INTO dashboard_ui_state (username, platform_id, group_id, records_platform_id, records_group_id)
+                VALUES (?, '', '', ?, ?) ON CONFLICT(username) DO UPDATE SET
+                records_platform_id=excluded.records_platform_id, records_group_id=excluded.records_group_id""",
+                (username, platform_id, group_id))
+            db.commit()
+            return {"records_platform_id": platform_id, "records_group_id": group_id}
         finally:
             db.close()
 
