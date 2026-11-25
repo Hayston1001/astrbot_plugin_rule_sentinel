@@ -943,11 +943,14 @@ function recordCopyButton(text, label) {
   button.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const copied = await copyText(text);
+    const value = typeof text === "function" ? String(text() ?? "") : text;
+    if (!value.trim()) { showFeedback("没有可复制的内容.", "error"); return; }
+    const copied = await copyText(value);
     showFeedback(copied ? "已复制" : "复制失败, 请手动选择文本.", copied ? "success" : "error");
   });
   return button;
 }
+el("output-copy").appendChild(recordCopyButton(() => el("output").textContent, "复制排查输出"));
 function violationOwner(count, scope) {
   const ids = Array.isArray(count.rule_ids) && count.rule_ids.length ? count.rule_ids : [count.rule_id].filter(Boolean);
   if (ids.length > 1) {

@@ -946,6 +946,10 @@ details[open] > summary::after { transform: rotate(45deg); color: var(--text); }
 details.is-closing > summary::after { transform: none; color: var(--muted); }
 .diagnostics summary::after, .manual summary::after, .record-raw summary::after { margin-left: 0; }
 .diagnostics .buttons { margin-top: 16px; }
+.diagnostics-output { position: relative; }
+.diagnostics-output:has(> pre:empty) { display: none; }
+.diagnostics-output pre { padding-right: 54px; }
+.diagnostics-output > #output-copy { position: absolute; top: 14px; right: 20px; }
 .all-groups-status { margin-top: 0; }
 .all-groups-status .records-heading { margin-bottom: 4px; }
 .all-groups-status .table-wrap { overflow-x: auto; }
