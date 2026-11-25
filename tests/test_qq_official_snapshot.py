@@ -83,7 +83,7 @@ class SnapshotTests(unittest.TestCase):
                 result = extract(self.event(raw_message=raw), is_management_command=lambda _: False, text_segment_types=(Plain, At))
                 self.assertFalse(result.message.is_text)
 
-    def test_quoted_text_is_accepted_without_the_quoted_content(self):
+    def _scenario_quoted_text_is_accepted_without_the_quoted_content(self):
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
             "message_type": 103,
@@ -112,7 +112,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result.message.original_text, result.message.text)
         self.assertEqual(event.message_obj.message_str, text)
 
-    def test_quote_segment_stays_non_text_until_the_caller_identifies_it(self):
+    def _scenario_quote_segment_stays_non_text_until_the_caller_identifies_it(self):
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
             "message_type": 103,
@@ -122,7 +122,7 @@ class SnapshotTests(unittest.TestCase):
         result = extract(event, is_management_command=lambda _: False, text_segment_types=(Plain, At))
         self.assertFalse(result.message.is_text)
 
-    def test_quote_with_its_own_media_is_still_not_text(self):
+    def _scenario_quote_with_its_own_media_is_still_not_text(self):
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
             "message_type": 103,
@@ -139,7 +139,28 @@ class SnapshotTests(unittest.TestCase):
                        text_segment_types=(Plain, At), quote_segment_types=(Reply,),
                        image_segment_types=(Image,))
 
-    def test_image_only_message_is_kept_for_later_judging(self):
+    def test_image_message_extraction(self):
+        for name, scenario in (
+            ("image only", self._scenario_image_only_message_is_kept_for_later_judging),
+            ("text and image", self._scenario_text_and_image_keep_both_parts),
+            ("local temp image", self._scenario_local_temp_image_file_is_accepted),
+            ("mixed media", self._scenario_mixed_media_and_unparsed_attachments_stay_unsupported),
+            ("invalid reference", self._scenario_invalid_image_reference_is_rejected),
+        ):
+            with self.subTest(scenario=name):
+                scenario()
+
+    def test_quote_context_is_not_sender_content(self):
+        for name, scenario in (
+            ("quoted text", self._scenario_quoted_text_is_accepted_without_the_quoted_content),
+            ("quote segment", self._scenario_quote_segment_stays_non_text_until_the_caller_identifies_it),
+            ("quote media", self._scenario_quote_with_its_own_media_is_still_not_text),
+            ("quote image", self._scenario_quote_image_is_never_attributed_to_the_sender),
+        ):
+            with self.subTest(scenario=name):
+                scenario()
+
+    def _scenario_image_only_message_is_kept_for_later_judging(self):
         url = "https://cdn.example.com/a.png"
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
@@ -151,7 +172,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result.message.image_urls, (url,))
         self.assertEqual(result.message.text, "")
 
-    def test_text_and_image_keep_both_parts(self):
+    def _scenario_text_and_image_keep_both_parts(self):
         url = "https://cdn.example.com/a.png"
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
@@ -162,7 +183,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result.message.text, "look at this")
         self.assertEqual(result.message.image_urls, (url,))
 
-    def test_local_temp_image_file_is_accepted(self):
+    def _scenario_local_temp_image_file_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "a.png"
             path.write_bytes(b"\x89PNG\r\n\x1a\npayload")
@@ -175,7 +196,7 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(result.message.image_urls, (str(path),))
             self.assertFalse(result.message.is_text)
 
-    def test_quote_image_is_never_attributed_to_the_sender(self):
+    def _scenario_quote_image_is_never_attributed_to_the_sender(self):
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False},
             "message_type": 103, "msg_elements": [{"id": "quoted", "content": "quoted words"}]})
@@ -184,7 +205,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(result.message.is_text)
         self.assertEqual(result.message.image_urls, ())
 
-    def test_mixed_media_and_unparsed_attachments_stay_unsupported(self):
+    def _scenario_mixed_media_and_unparsed_attachments_stay_unsupported(self):
         url = "https://cdn.example.com/a.png"
         cases = (
             ([Image(file=url), Record()], {"message_type": 0}),
@@ -199,7 +220,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertFalse(result.message.is_text)
                 self.assertEqual(result.message.image_urls, ())
 
-    def test_invalid_image_reference_is_rejected(self):
+    def _scenario_invalid_image_reference_is_rejected(self):
         raw = SimpleNamespace(group_openid="g", raw_data={
             "author": {"member_openid": "sender", "bot": False}, "message_type": 0})
         for value in ("ftp://cdn.example.com/a.png", "javascript:alert(1)", "https://cdn.example.com/a b.png"):

@@ -7,6 +7,46 @@ from pathlib import Path
 
 
 class ManagementUiTests(unittest.TestCase):
+    def test_accessibility_and_text_contract(self):
+        for name, check in (
+            ("image viewer icons", self._check_image_viewer_zoom_buttons_have_accessible_icons),
+            ("feedback accessibility", self._check_operation_feedback_is_accessible_and_respects_reduced_motion),
+            ("records rendering", self._check_records_view_uses_bridge_and_text_rendering),
+            ("typography", self._check_typography_distinguishes_headings_help_and_field_values),
+        ):
+            with self.subTest(check=name):
+                check()
+
+    def test_theme_and_status_contract(self):
+        for name, check in (
+            ("emphasis", self._check_record_and_rule_emphasis_are_distinct),
+            ("notification records", self._check_notification_records_render_readable_chinese_summary),
+            ("live badge", self._check_live_badge_alignment_and_shared_corner_radius),
+            ("button colors", self._check_button_colors_remain_distinct_from_surfaces),
+            ("neutral theme", self._check_neutral_theme_anchors_and_no_action_switch),
+        ):
+            with self.subTest(check=name):
+                check()
+
+    def test_layout_and_table_contract(self):
+        for name, check in (
+            ("responsive controls", self._check_management_layout_preserves_responsive_controls),
+            ("record columns", self._check_record_table_column_sizes_do_not_depend_on_details),
+            ("settings presentation", self._check_settings_save_and_monitor_status_presentation),
+        ):
+            with self.subTest(check=name):
+                check()
+
+    def test_motion_and_feedback_contract(self):
+        for name, check in (
+            ("tab slide", self._check_tab_changes_slide_and_editors_report_unsaved_state),
+            ("copy button", self._check_raw_record_copy_button_is_icon_only),
+            ("motion asset", self._check_motion_asset_is_loaded_and_respects_reduced_motion),
+            ("hover lift", self._check_rule_and_group_hover_share_a_soft_animated_lift),
+        ):
+            with self.subTest(check=name):
+                check()
+
     def test_image_viewer_zoom_drag_and_close(self):
         if not shutil.which("node"):
             self.skipTest("node is unavailable")
@@ -16,7 +56,7 @@ class ManagementUiTests(unittest.TestCase):
                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_image_viewer_zoom_buttons_have_accessible_icons(self):
+    def _check_image_viewer_zoom_buttons_have_accessible_icons(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         for name, label in (("out", "缩小图片"), ("in", "放大图片")):
@@ -43,7 +83,7 @@ class ManagementUiTests(unittest.TestCase):
                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_operation_feedback_is_accessible_and_respects_reduced_motion(self):
+    def _check_operation_feedback_is_accessible_and_respects_reduced_motion(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
@@ -85,7 +125,7 @@ class ManagementUiTests(unittest.TestCase):
                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_records_view_uses_bridge_and_text_rendering(self):
+    def _check_records_view_uses_bridge_and_text_rendering(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
@@ -123,7 +163,7 @@ class ManagementUiTests(unittest.TestCase):
             self.assertIn(f'id="tab-{tab}"', html)
             self.assertIn(f'id="panel-{tab}"', html)
 
-    def test_management_layout_preserves_responsive_controls(self):
+    def _check_management_layout_preserves_responsive_controls(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
@@ -181,7 +221,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('id="version" type="hidden"', html)
         self.assertIn('id="groups-status-body"', html)
 
-    def test_typography_distinguishes_headings_help_and_field_values(self):
+    def _check_typography_distinguishes_headings_help_and_field_values(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         for token in ("--weight-heading: 700", "--weight-section: 650", "--weight-label: 600",
@@ -194,7 +234,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('.group-row > div:first-child > p {', css)
         self.assertNotIn('.scope-id', css)
 
-    def test_record_and_rule_emphasis_are_distinct(self):
+    def _check_record_and_rule_emphasis_are_distinct(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         self.assertIn('box-shadow: inset 4px 0 0 var(--text)', css)
@@ -207,7 +247,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('background: var(--surface)', current)
         self.assertIn('.rule-action-number', css)
 
-    def test_tab_changes_slide_and_editors_report_unsaved_state(self):
+    def _check_tab_changes_slide_and_editors_report_unsaved_state(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
@@ -222,7 +262,7 @@ class ManagementUiTests(unittest.TestCase):
                       (root / "views" / "management" / "index.html").read_text(encoding="utf-8"))
         self.assertIn('bridge.apiPost("notification-test", {})', script)
 
-    def test_notification_records_render_readable_chinese_summary(self):
+    def _check_notification_records_render_readable_chinese_summary(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         self.assertIn('el("notifications").addEventListener("click", () => showNotifications());', script)
@@ -232,7 +272,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('row.summary', script)
         self.assertIn('还没有通知记录.', script)
 
-    def test_raw_record_copy_button_is_icon_only(self):
+    def _check_raw_record_copy_button_is_icon_only(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
@@ -246,7 +286,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('<div class="diagnostics-output"><pre id="output" aria-live="polite"></pre><span id="output-copy"></span></div>', html)
         self.assertIn(".diagnostics-output > #output-copy { position: absolute;", css)
 
-    def test_record_table_column_sizes_do_not_depend_on_details(self):
+    def _check_record_table_column_sizes_do_not_depend_on_details(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         self.assertIn('#records-table { table-layout: fixed; }', css)
@@ -255,7 +295,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('scrollbar-gutter: stable', css)
         self.assertIn('#records-table th:last-child, #records-table tr.record td:last-child { padding-right: 14px; }', css)
 
-    def test_settings_save_and_monitor_status_presentation(self):
+    def _check_settings_save_and_monitor_status_presentation(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
@@ -279,7 +319,7 @@ class ManagementUiTests(unittest.TestCase):
         for tone in ('success', 'warning'):
             self.assertIn(f'.status-main[data-tone="{tone}"] > strong {{ color: var(--signal-{tone}-line); }}', css)
 
-    def test_live_badge_alignment_and_shared_corner_radius(self):
+    def _check_live_badge_alignment_and_shared_corner_radius(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
@@ -298,7 +338,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('setting-action_execution_enabled', html)
         self.assertIn('id="monitor-group"', html)
 
-    def test_button_colors_remain_distinct_from_surfaces(self):
+    def _check_button_colors_remain_distinct_from_surfaces(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         button = css.split('\nbutton {', 1)[1].split('}', 1)[0]
@@ -331,7 +371,7 @@ class ManagementUiTests(unittest.TestCase):
             for surface in ('--button-bg', '--raised', '--surface'):
                 self.assertGreaterEqual(contrast(tokens['--button-border'], tokens[surface]), 3)
 
-    def test_motion_asset_is_loaded_and_respects_reduced_motion(self):
+    def _check_motion_asset_is_loaded_and_respects_reduced_motion(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         motion = (root / "views" / "management" / "motion.js").read_text(encoding="utf-8")
@@ -347,7 +387,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertNotIn('behavior: "smooth"', script)
         self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 6)
 
-    def test_rule_and_group_hover_share_a_soft_animated_lift(self):
+    def _check_rule_and_group_hover_share_a_soft_animated_lift(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         common = css.split('.rule-card, .group-row {', 1)[1].split('}', 1)[0]
@@ -362,7 +402,7 @@ class ManagementUiTests(unittest.TestCase):
         self.assertIn('border-width: 1px', editing)
         self.assertIn('prefers-reduced-motion: reduce', css)
 
-    def test_neutral_theme_anchors_and_no_action_switch(self):
+    def _check_neutral_theme_anchors_and_no_action_switch(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "views" / "management" / "index.html").read_text(encoding="utf-8")
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")

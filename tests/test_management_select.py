@@ -96,20 +96,64 @@ class ManagementSelectTests(unittest.TestCase):
         cls.playwright.stop()
 
     def setUp(self):
+        self.page = None
+        self._reset_page()
+
+    def tearDown(self):
+        self.page.close()
+        self.assertEqual(self.errors, [])
+
+    def _reset_page(self):
+        if self.page is not None:
+            self.page.close()
+            self.assertEqual(self.errors, [])
         self.page = self.browser.new_page(viewport={"width": 800, "height": 600})
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.goto(self.url, wait_until="load")
         self.page.wait_for_selector("#result + .custom-select-trigger")
 
-    def tearDown(self):
-        self.page.close()
-        self.assertEqual(self.errors, [])
+    def test_selection_events_and_native_fallback(self):
+        for name, scenario in (
+            ("events and programmatic updates", self._scenario_selection_events_and_programmatic_updates),
+            ("rapid toggles", self._scenario_rapid_toggles_do_not_leave_a_stale_menu),
+            ("native controls without script", self._scenario_native_controls_remain_available_without_script),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_keyboard_and_editable_suggestions(self):
+        for name, scenario in (
+            ("keyboard and labels", self._scenario_keyboard_and_labels),
+            ("editable suggestions", self._scenario_editable_suggestions_filter_and_keep_custom_values),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_dynamic_and_management_controls(self):
+        for name, scenario in (
+            ("dynamic options", self._scenario_dynamic_options_and_controls),
+            ("management rule controls", self._scenario_management_page_dynamic_rule_controls),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_placement_theme_and_responsive(self):
+        for name, scenario in (
+            ("placement and theme", self._scenario_placement_theme_and_reduced_motion),
+            ("phone and tablet", self._scenario_management_page_fits_phone_and_tablet),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
 
     def trigger(self, name):
         return self.page.locator(f"#{name} + .custom-select-trigger")
 
-    def test_selection_events_and_programmatic_updates(self):
+    def _scenario_selection_events_and_programmatic_updates(self):
         from playwright.sync_api import expect
 
         trigger = self.trigger("result")
@@ -135,7 +179,7 @@ class ManagementSelectTests(unittest.TestCase):
         self.page.evaluate("document.querySelector('#result').disabled = false")
         expect(trigger).to_be_enabled()
 
-    def test_rapid_toggles_do_not_leave_a_stale_menu(self):
+    def _scenario_rapid_toggles_do_not_leave_a_stale_menu(self):
         from playwright.sync_api import expect
 
         trigger = self.trigger("result")
@@ -146,7 +190,7 @@ class ManagementSelectTests(unittest.TestCase):
         expect(trigger).to_have_attribute("aria-expanded", "false")
         expect(self.page.locator("#custom-select-menu")).to_have_attribute("aria-hidden", "true")
 
-    def test_native_controls_remain_available_without_script(self):
+    def _scenario_native_controls_remain_available_without_script(self):
         from playwright.sync_api import expect
 
         self.page.route("**/select.js", lambda route: route.abort())
@@ -154,7 +198,7 @@ class ManagementSelectTests(unittest.TestCase):
         expect(self.page.locator("#result")).to_be_visible()
         expect(self.page.locator("#model")).to_have_attribute("list", "models")
 
-    def test_keyboard_and_labels(self):
+    def _scenario_keyboard_and_labels(self):
         from playwright.sync_api import expect
 
         trigger = self.trigger("result")
@@ -176,7 +220,7 @@ class ManagementSelectTests(unittest.TestCase):
         self.page.locator("#outside").click()
         expect(self.trigger("action")).to_have_attribute("aria-expanded", "false")
 
-    def test_dynamic_options_and_controls(self):
+    def _scenario_dynamic_options_and_controls(self):
         from playwright.sync_api import expect
 
         self.page.evaluate("""() => {
@@ -199,7 +243,7 @@ class ManagementSelectTests(unittest.TestCase):
         self.page.evaluate("document.querySelector('#dynamic').replaceChildren()")
         expect(self.page.locator("#custom-select-menu")).to_have_attribute("aria-hidden", "true")
 
-    def test_editable_suggestions_filter_and_keep_custom_values(self):
+    def _scenario_editable_suggestions_filter_and_keep_custom_values(self):
         from playwright.sync_api import expect
 
         model = self.page.locator("#model")
@@ -229,7 +273,7 @@ class ManagementSelectTests(unittest.TestCase):
         expect(model).to_have_value("custom-model-two")
         expect(model).to_have_attribute("aria-expanded", "false")
 
-    def test_placement_theme_and_reduced_motion(self):
+    def _scenario_placement_theme_and_reduced_motion(self):
         from playwright.sync_api import expect
 
         self.page.emulate_media(reduced_motion="reduce")
@@ -250,7 +294,7 @@ class ManagementSelectTests(unittest.TestCase):
         duration = menu.evaluate("element => getComputedStyle(element).transitionDuration")
         self.assertNotIn("0.44s", duration)
 
-    def test_management_page_dynamic_rule_controls(self):
+    def _scenario_management_page_dynamic_rule_controls(self):
         from playwright.sync_api import expect
 
         self.page.goto(self.url + "management", wait_until="load")
@@ -272,7 +316,7 @@ class ManagementSelectTests(unittest.TestCase):
         self.page.get_by_role("button", name="添加级别").click()
         expect(self.page.locator(".severity-row .custom-select-trigger")).to_have_attribute("aria-label", "单位: 秒")
 
-    def test_management_page_fits_phone_and_tablet(self):
+    def _scenario_management_page_fits_phone_and_tablet(self):
         from playwright.sync_api import expect
 
         for width in (320, 390, 768, 1440):

@@ -33,15 +33,53 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         cls.playwright.stop()
 
     def setUp(self):
+        self.page = None
+        self._reset_page()
+
+    def tearDown(self):
+        self.page.close()
+        self.assertEqual(self.errors, [])
+
+    def _reset_page(self):
+        if self.page is not None:
+            self.page.close()
+            self.assertEqual(self.errors, [])
         self.page = self.browser.new_page(viewport={"width": 1100, "height": 750})
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(f"{error}\n{error.stack}"))
         self.page.goto(self.url)
         self.page.wait_for_selector(".rule-card")
 
-    def tearDown(self):
-        self.page.close()
-        self.assertEqual(self.errors, [])
+    def test_history_loading_and_readability(self):
+        for name, scenario in (
+            ("readable history cards", self._scenario_history_cards_show_readable_configuration_across_themes_and_widths),
+            ("loading and fast reversal", self._scenario_history_loading_and_fast_reversal_do_not_jump_or_restore_stale_content),
+            ("fast response fade", self._scenario_fast_history_response_fades_in_without_reversing_card_height),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_rule_details_exclusivity_and_drafts(self):
+        for name, scenario in (
+            ("exclusive details and draft", self._scenario_rule_details_are_exclusive_and_history_preserves_draft),
+            ("exclusive details reduced motion", self._scenario_rule_details_are_exclusive_across_cards_with_reduced_motion),
+            ("suspended draft", self._scenario_suspended_draft_survives_group_switch_and_new_rule_closes_history),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_saving_keeps_editor_and_forms_stable(self):
+        for name, scenario in (
+            ("buttons while saving", self._scenario_rule_buttons_and_refresh_remain_stable_while_saving),
+            ("editing during confirmation", self._scenario_editing_during_confirmation_keeps_the_new_draft_and_version),
+            ("failed saves", self._scenario_toggle_and_failed_saves_preserve_the_editor),
+            ("group and global saves", self._scenario_group_and_global_saves_keep_their_forms_in_place),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
 
     def test_reply_options_follow_saved_globals_and_keep_independent_overrides(self):
         from playwright.sync_api import expect
@@ -308,7 +346,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
                 page.mouse.up()
                 self.assertNotIn("is-dragging", row.get_attribute("class"))
 
-    def test_rule_details_are_exclusive_and_history_preserves_draft(self):
+    def _scenario_rule_details_are_exclusive_and_history_preserves_draft(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -352,7 +390,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         edit.click()
         expect(page.locator("#text")).to_have_value("original rule")
 
-    def test_history_cards_show_readable_configuration_across_themes_and_widths(self):
+    def _scenario_history_cards_show_readable_configuration_across_themes_and_widths(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -380,7 +418,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
                     self.assertNotEqual(entry.evaluate("node => getComputedStyle(node).backgroundColor"),
                                         card.evaluate("node => getComputedStyle(node).backgroundColor"))
 
-    def test_history_loading_and_fast_reversal_do_not_jump_or_restore_stale_content(self):
+    def _scenario_history_loading_and_fast_reversal_do_not_jump_or_restore_stale_content(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -427,7 +465,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(card.locator(".rule-history")).to_contain_text("fresh version")
         expect(card.locator(".rule-history")).not_to_contain_text("stale version")
 
-    def test_fast_history_response_fades_in_without_reversing_card_height(self):
+    def _scenario_fast_history_response_fades_in_without_reversing_card_height(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -457,7 +495,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         heights = [frame["height"] for frame in frames]
         self.assertGreaterEqual(min(b - a for a, b in zip(heights, heights[1:])), -2, frames)
 
-    def test_rule_details_are_exclusive_across_cards_with_reduced_motion(self):
+    def _scenario_rule_details_are_exclusive_across_cards_with_reduced_motion(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -475,7 +513,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(second.locator(".rule-history")).to_be_hidden()
         expect(page.locator("#text")).to_have_value("draft in first rule")
 
-    def test_suspended_draft_survives_group_switch_and_new_rule_closes_history(self):
+    def _scenario_suspended_draft_survives_group_switch_and_new_rule_closes_history(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -542,7 +580,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.set_viewport_size({"width": 390, "height": 750})
         self.assertEqual(row.locator("td").first.evaluate("node => getComputedStyle(node).textAlign"), "left")
 
-    def test_rule_buttons_and_refresh_remain_stable_while_saving(self):
+    def _scenario_rule_buttons_and_refresh_remain_stable_while_saving(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -602,7 +640,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         page.locator(".rule-card > .rule-edit").click()
         expect(page.locator("#text")).to_have_value("updated rule")
 
-    def test_editing_during_confirmation_keeps_the_new_draft_and_version(self):
+    def _scenario_editing_during_confirmation_keeps_the_new_draft_and_version(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -675,7 +713,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         expect(first.locator(".rule-card")).to_have_count(2)
         expect(page.locator("#text")).to_have_value("updated first group rule")
 
-    def test_toggle_and_failed_saves_preserve_the_editor(self):
+    def _scenario_toggle_and_failed_saves_preserve_the_editor(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -950,7 +988,7 @@ class ManagementSaveStabilityTests(unittest.TestCase):
         rows.first.get_by_role("button", name="配置", exact=True).click()
         expect(field).to_have_value("8")
 
-    def test_group_and_global_saves_keep_their_forms_in_place(self):
+    def _scenario_group_and_global_saves_keep_their_forms_in_place(self):
         from playwright.sync_api import expect
 
         page = self.page

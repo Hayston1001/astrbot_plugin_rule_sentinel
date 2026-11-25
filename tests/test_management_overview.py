@@ -32,6 +32,17 @@ class ManagementOverviewTests(unittest.TestCase):
         cls.playwright.stop()
 
     def setUp(self):
+        self.page = None
+        self._reset_page()
+
+    def tearDown(self):
+        self.page.close()
+        self.assertEqual(self.errors, [])
+
+    def _reset_page(self):
+        if self.page is not None:
+            self.page.close()
+            self.assertEqual(self.errors, [])
         self.page = self.browser.new_page(viewport={"width": 1200, "height": 850}, reduced_motion="reduce")
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
@@ -39,9 +50,95 @@ class ManagementOverviewTests(unittest.TestCase):
         self.page.locator("#overview-customize").wait_for(state="visible")
         self.page.wait_for_function("!document.querySelector('#overview-customize').disabled")
 
-    def tearDown(self):
-        self.page.close()
-        self.assertEqual(self.errors, [])
+    def test_width_transition_basics(self):
+        for name, scenario in (
+            ("animate card and neighbor", self._scenario_width_change_animates_card_and_neighbor_without_teleporting),
+            ("reverse during transition", self._scenario_width_change_reverses_smoothly_during_an_existing_transition),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_width_transition_stability(self):
+        for name, scenario in (
+            ("shorter page", self._scenario_width_change_follows_smoothly_when_the_page_becomes_shorter),
+            ("near page end", self._scenario_reversing_width_near_page_end_keeps_the_current_scroll_and_frame),
+            ("switch mid transition", self._scenario_switching_another_card_mid_transition_keeps_visible_positions),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_width_transition_interactions(self):
+        for name, scenario in (
+            ("manual scrolling", self._scenario_manual_scrolling_interrupts_width_transition_and_cleans_up),
+            ("viewport resize", self._scenario_resizing_the_viewport_interrupts_the_width_transition),
+            ("keyboard controls", self._scenario_width_controls_work_from_keyboard_and_preserve_expanded_content),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_width_transition_reduced_motion_and_cards(self):
+        for name, scenario in (
+            ("reduced motion and single column", self._scenario_width_change_respects_reduced_motion_and_single_column),
+            ("every card in both directions", self._scenario_each_card_changes_width_in_both_directions_without_a_layout_jump),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_reorder_edit_mode_and_preview(self):
+        for name, scenario in (
+            ("edit mode gating", self._scenario_keyboard_and_pointer_reorder_only_in_edit_mode),
+            ("preview and escape", self._scenario_drag_previews_the_new_order_before_release_and_escape_restores_it),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_reorder_commit_and_preview_stability(self):
+        for name, scenario in (
+            ("commit on release", self._scenario_live_preview_commits_the_position_on_release),
+            ("stable while cards animate", self._scenario_live_preview_stays_stable_while_other_cards_animate),
+            ("mixed widths", self._scenario_mixed_width_live_previews_stay_stable_and_match_the_drop),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_reorder_touch(self):
+        for name, scenario in (
+            ("edge scroll and cancel", self._scenario_touch_drag_scrolls_at_the_edge_and_pointercancel_restores_the_draft),
+            ("tall card follow", self._scenario_touch_move_follows_tall_card_and_keeps_handle_visible),
+            ("no placeholder and escape", self._scenario_touch_drag_shows_no_placeholder_in_original_position_and_escape_cancels),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_reorder_follow_and_bounds(self):
+        for name, scenario in (
+            ("mouse drag stays in view", self._scenario_moved_card_stays_in_view_after_mouse_drag_without_jumping_to_top),
+            ("keyboard follow", self._scenario_keyboard_move_follows_card_with_and_without_reduced_motion),
+            ("content above changes", self._scenario_follow_adjusts_when_content_above_changes_during_the_move),
+            ("rapid moves and scrolling", self._scenario_move_buttons_follow_rapid_moves_and_stop_for_manual_scrolling),
+            ("last card boundary", self._scenario_last_card_follows_within_page_boundaries),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_reorder_original_position_and_layout(self):
+        for name, scenario in (
+            ("original position drop", self._scenario_original_position_drop_does_not_scroll_or_reorder),
+            ("original position reduced motion", self._scenario_original_position_drop_returns_smoothly_or_immediately_with_reduced_motion),
+            ("half width drag", self._scenario_half_width_drag_keeps_a_stable_preview_at_a_fixed_pointer),
+            ("long single column", self._scenario_long_single_column_card_previews_reordering_above_the_viewport),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
 
     COUNT_ALL = "24 条消息待复核 (25 个可确认动作, 1 项需核查)"
 
@@ -476,7 +573,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page.locator("#overview-cancel").click()
         self.assertEqual(page.locator(".overview-card:visible").count(), 0)
 
-    def test_width_change_animates_card_and_neighbor_without_teleporting(self):
+    def _scenario_width_change_animates_card_and_neighbor_without_teleporting(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
@@ -525,7 +622,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertTrue(result["focused"], result)
         self.assertEqual(result["rows"], "")
 
-    def test_width_change_reverses_smoothly_during_an_existing_transition(self):
+    def _scenario_width_change_reverses_smoothly_during_an_existing_transition(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
@@ -558,7 +655,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertTrue(result["focused"], result)
         self.assertEqual((result["rows"], result["spacers"], result["animating"]), ("", 0, 0))
 
-    def test_width_change_respects_reduced_motion_and_single_column(self):
+    def _scenario_width_change_respects_reduced_motion_and_single_column(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.locator("#overview-customize").click()
@@ -595,7 +692,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertFalse(result["spacer"], result)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
 
-    def test_width_change_follows_smoothly_when_the_page_becomes_shorter(self):
+    def _scenario_width_change_follows_smoothly_when_the_page_becomes_shorter(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.locator("#overview-customize").click()
@@ -640,7 +737,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertTrue(result["focused"], result)
         self.assertEqual(result["spacers"], 0)
 
-    def test_reversing_width_near_page_end_keeps_the_current_scroll_and_frame(self):
+    def _scenario_reversing_width_near_page_end_keeps_the_current_scroll_and_frame(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.locator("#overview-customize").click()
@@ -670,7 +767,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(page.locator(".overview-resize-spacer, .is-width-animating, .is-width-target").count(), 0)
         self.assertEqual(page.locator("#overview-grid").evaluate("node => node.style.gridTemplateRows"), "")
 
-    def test_manual_scrolling_interrupts_width_transition_and_cleans_up(self):
+    def _scenario_manual_scrolling_interrupts_width_transition_and_cleans_up(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.emulate_media(reduced_motion="no-preference")
@@ -690,7 +787,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(result["layout"], "full")
         self.assertEqual((result["rows"], result["spacers"], result["animating"]), ("", 0, 0))
 
-    def test_resizing_the_viewport_interrupts_the_width_transition(self):
+    def _scenario_resizing_the_viewport_interrupts_the_width_transition(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 850})
         page.emulate_media(reduced_motion="no-preference")
@@ -707,7 +804,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(result["rows"], "")
         self.assertLessEqual(result["overflow"], 0, result)
 
-    def test_width_controls_work_from_keyboard_and_preserve_expanded_content(self):
+    def _scenario_width_controls_work_from_keyboard_and_preserve_expanded_content(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
@@ -730,7 +827,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertIsNone(page.evaluate("sessionStorage.getItem('fixture-layout-overview')"))
         self.assertEqual(page.locator(".overview-resize-spacer, .is-width-animating, .is-width-target").count(), 0)
 
-    def test_switching_another_card_mid_transition_keeps_visible_positions(self):
+    def _scenario_switching_another_card_mid_transition_keeps_visible_positions(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1400})
         page.emulate_media(reduced_motion="no-preference")
@@ -756,7 +853,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertTrue(page.locator('[data-card="recent"] .overview-width').evaluate("node => document.activeElement === node"))
         self.assertEqual(page.locator(".overview-resize-spacer, .is-width-animating, .is-width-target").count(), 0)
 
-    def test_each_card_changes_width_in_both_directions_without_a_layout_jump(self):
+    def _scenario_each_card_changes_width_in_both_directions_without_a_layout_jump(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1500})
         page.emulate_media(reduced_motion="no-preference")
@@ -794,7 +891,7 @@ class ManagementOverviewTests(unittest.TestCase):
                     self.assertEqual(result["rows"], "")
                     self.assertFalse(result["spacer"])
 
-    def test_keyboard_and_pointer_reorder_only_in_edit_mode(self):
+    def _scenario_keyboard_and_pointer_reorder_only_in_edit_mode(self):
         from playwright.sync_api import expect
         page = self.page
         self.assertEqual(page.locator(".overview-card-tools").count(), 0)
@@ -823,7 +920,7 @@ class ManagementOverviewTests(unittest.TestCase):
         order = page.locator("#overview-grid > [data-card]:visible").evaluate_all("cards => cards.map(card => card.dataset.card)")
         self.assertEqual(order[-1], "overall")
 
-    def test_drag_previews_the_new_order_before_release_and_escape_restores_it(self):
+    def _scenario_drag_previews_the_new_order_before_release_and_escape_restores_it(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
         page.locator("#overview-customize").click()
@@ -857,7 +954,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(page.locator(".overview-drop-placeholder").count(), 0)
         self.assertIsNone(page.evaluate("sessionStorage.getItem('fixture-layout-overview')"))
 
-    def test_live_preview_commits_the_position_on_release(self):
+    def _scenario_live_preview_commits_the_position_on_release(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
         page.locator("#overview-customize").click()
@@ -880,7 +977,7 @@ class ManagementOverviewTests(unittest.TestCase):
         saved = page.evaluate("JSON.parse(sessionStorage.getItem('fixture-layout-overview')).cards")
         self.assertEqual([item["id"] for item in saved[:4]], ["pending", "recent", "overall", "groups"])
 
-    def test_live_preview_stays_stable_while_other_cards_animate(self):
+    def _scenario_live_preview_stays_stable_while_other_cards_animate(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
         page.emulate_media(reduced_motion="no-preference")
@@ -916,7 +1013,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page.evaluate("window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: 77, pointerType: 'touch'}))")
         self.assertEqual(page.locator(".overview-drop-placeholder").count(), 0)
 
-    def test_mixed_width_live_previews_stay_stable_and_match_the_drop(self):
+    def _scenario_mixed_width_live_previews_stay_stable_and_match_the_drop(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 2600})
         page.emulate_media(reduced_motion="no-preference")
@@ -960,7 +1057,7 @@ class ManagementOverviewTests(unittest.TestCase):
                 self.assertEqual(result["final"], expected, result)
                 self.assertNotEqual(result["final"][:4], ["pending", "overall", "recent", "groups"], result)
 
-    def test_touch_drag_scrolls_at_the_edge_and_pointercancel_restores_the_draft(self):
+    def _scenario_touch_drag_scrolls_at_the_edge_and_pointercancel_restores_the_draft(self):
         page = self.page
         page.set_viewport_size({"width": 390, "height": 700})
         page.wait_for_function("document.querySelector('#overview-pending-count').textContent.includes('25 个可确认动作')")
@@ -1004,7 +1101,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(after["order"][:4], ["pending", "overall", "recent", "groups"])
         self.assertIsNone(after["stored"])
 
-    def test_moved_card_stays_in_view_after_mouse_drag_without_jumping_to_top(self):
+    def _scenario_moved_card_stays_in_view_after_mouse_drag_without_jumping_to_top(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -1054,7 +1151,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertGreaterEqual(result["top"], result["header"] - 5, result)
         self.assertLessEqual(result["bottom"], result["height"] + 5, result)
 
-    def test_keyboard_move_follows_card_with_and_without_reduced_motion(self):
+    def _scenario_keyboard_move_follows_card_with_and_without_reduced_motion(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         for reduced_motion in ("reduce", "no-preference"):
@@ -1102,7 +1199,7 @@ class ManagementOverviewTests(unittest.TestCase):
                 if reduced_motion == "no-preference":
                     self.assertGreater(len(set(round(y) for y in result["frames"])), 2, result)
 
-    def test_follow_adjusts_when_content_above_changes_during_the_move(self):
+    def _scenario_follow_adjusts_when_content_above_changes_during_the_move(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.emulate_media(reduced_motion="no-preference")
@@ -1126,7 +1223,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertGreaterEqual(result["top"], 80, result)
         self.assertLessEqual(result["bottom"], result["height"] + 5, result)
 
-    def test_touch_move_follows_tall_card_and_keeps_handle_visible(self):
+    def _scenario_touch_move_follows_tall_card_and_keeps_handle_visible(self):
         page = self.page
         page.set_viewport_size({"width": 390, "height": 700})
         page.emulate_media(reduced_motion="no-preference")
@@ -1167,7 +1264,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertLessEqual(result["handleBottom"], result["viewport"], result)
         self.assertTrue(result["focused"], result)
 
-    def test_original_position_drop_does_not_scroll_or_reorder(self):
+    def _scenario_original_position_drop_does_not_scroll_or_reorder(self):
         page = self.page
         page.emulate_media(reduced_motion="no-preference")
         page.locator("#overview-customize").click()
@@ -1193,7 +1290,7 @@ class ManagementOverviewTests(unittest.TestCase):
         self.assertEqual(result["order"][:4], ["pending", "overall", "recent", "groups"])
         self.assertEqual(result["markers"], 0)
 
-    def test_original_position_drop_returns_smoothly_or_immediately_with_reduced_motion(self):
+    def _scenario_original_position_drop_returns_smoothly_or_immediately_with_reduced_motion(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
         for reduced in ("no-preference", "reduce"):
@@ -1220,7 +1317,7 @@ class ManagementOverviewTests(unittest.TestCase):
                 self.assertAlmostEqual(result["before"], result["after"], delta=1)
                 self.assertEqual(result["animations"] > 0, reduced == "no-preference", result)
 
-    def test_move_buttons_follow_rapid_moves_and_stop_for_manual_scrolling(self):
+    def _scenario_move_buttons_follow_rapid_moves_and_stop_for_manual_scrolling(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.emulate_media(reduced_motion="no-preference")
@@ -1254,7 +1351,7 @@ class ManagementOverviewTests(unittest.TestCase):
         page.wait_for_timeout(400)
         self.assertAlmostEqual(page.evaluate("window.scrollY"), after_wheel, delta=1)
 
-    def test_last_card_follows_within_page_boundaries(self):
+    def _scenario_last_card_follows_within_page_boundaries(self):
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 650})
         page.locator("#overview-customize").click()
@@ -1299,7 +1396,7 @@ class ManagementOverviewTests(unittest.TestCase):
                         self.assertEqual((item["iconWidth"], item["iconHeight"]), ("3px", "3px"))
                         self.assertNotEqual(item["iconShadow"], "none")
 
-    def test_half_width_drag_keeps_a_stable_preview_at_a_fixed_pointer(self):
+    def _scenario_half_width_drag_keeps_a_stable_preview_at_a_fixed_pointer(self):
         from playwright.sync_api import expect
         page = self.page
         page.set_viewport_size({"width": 1200, "height": 1800})
@@ -1333,7 +1430,7 @@ class ManagementOverviewTests(unittest.TestCase):
         order = page.locator("#overview-grid > [data-card]:visible").evaluate_all("cards => cards.map(card => card.dataset.card)")
         self.assertEqual(order[:4], ["overall", "pending", "recent", "groups"])
 
-    def test_long_single_column_card_previews_reordering_above_the_viewport(self):
+    def _scenario_long_single_column_card_previews_reordering_above_the_viewport(self):
         page = self.page
         page.set_viewport_size({"width": 390, "height": 700})
         page.locator("#overview-customize").click()
@@ -1412,7 +1509,7 @@ class ManagementOverviewTests(unittest.TestCase):
         expect(page.locator("#overview-pending-count")).to_have_text(self.COUNT_ALL)
         self.assertEqual(page.evaluate("window.quickStartMock.confirmationPosts"), [{"intent_id": 1}])
 
-    def test_touch_drag_shows_no_placeholder_in_original_position_and_escape_cancels(self):
+    def _scenario_touch_drag_shows_no_placeholder_in_original_position_and_escape_cancels(self):
         from playwright.sync_api import expect
         page = self.page
         page.locator("#overview-customize").click()

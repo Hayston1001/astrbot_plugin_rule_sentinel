@@ -1431,14 +1431,42 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
         self.raw_body = json.dumps({**base, "count_id": 7}).encode()
         self.assertEqual((await self.plugin.revoke_violation_count())["status_code"], 400)
 
-    async def test_invalid_or_oversized_body_is_rejected(self):
+    async def test_request_body_validation_rejects_invalid_payloads(self):
+        original_body = self.request.body
+        try:
+            for name, scenario in (
+                ("invalid or oversized body", self._scenario_invalid_or_oversized_body_is_rejected),
+                ("declared length", self._scenario_declared_oversized_or_invalid_length_is_rejected_before_read),
+                ("length mismatch", self._scenario_declared_body_length_must_match_actual_body),
+                ("unsupported content type", self._scenario_form_or_ambiguous_content_type_is_rejected_before_read),
+            ):
+                with self.subTest(scenario=name):
+                    self.request.body = original_body
+                    await scenario()
+        finally:
+            self.request.body = original_body
+
+    async def test_request_body_validation_accepts_valid_payloads(self):
+        original_body = self.request.body
+        try:
+            for name, scenario in (
+                ("quoted brackets", self._scenario_json_depth_check_ignores_quoted_and_escaped_brackets),
+                ("content type with charset", self._scenario_json_content_type_with_charset_is_accepted),
+            ):
+                with self.subTest(scenario=name):
+                    self.request.body = original_body
+                    await scenario()
+        finally:
+            self.request.body = original_body
+
+    async def _scenario_invalid_or_oversized_body_is_rejected(self):
         for body in (b"not json", b"x" * (self.module.MAX_BODY_BYTES + 1), b'{"x":1,"x":2}',
                      b'{"x":{"nested":1,"nested":2}}', b'{"x":NaN}', b'{"x":' + b'[' * 2000 + b']' * 2000 + b'}'):
             with self.subTest(body=body[:40]):
                 self.raw_body = body
                 self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
 
-    async def test_declared_oversized_or_invalid_length_is_rejected_before_read(self):
+    async def _scenario_declared_oversized_or_invalid_length_is_rejected_before_read(self):
         async def forbidden_body():
             self.fail("invalid declared body length was read")
         self.request.body = forbidden_body
@@ -1450,18 +1478,18 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                                                      if key == "content-type" else ["1", "1"])
         self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
 
-    async def test_declared_body_length_must_match_actual_body(self):
+    async def _scenario_declared_body_length_must_match_actual_body(self):
         self.raw_body = b"{}"
         self.request.headers = {"content-type": "application/json", "content-length": "1"}
         self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
 
-    async def test_json_depth_check_ignores_quoted_and_escaped_brackets(self):
+    async def _scenario_json_depth_check_ignores_quoted_and_escaped_brackets(self):
         payload = {"text": '"' + "[" * 200 + '\\"' + "]" * 200}
         self.raw_body = json.dumps(payload).encode()
         self.request.headers = {"content-type": "application/json", "content-length": str(len(self.raw_body))}
         self.assertEqual(await self.plugin._payload(), payload)
 
-    async def test_form_or_ambiguous_content_type_is_rejected_before_read(self):
+    async def _scenario_form_or_ambiguous_content_type_is_rejected_before_read(self):
         async def forbidden_body():
             self.fail("unsupported request body was read")
         self.request.body = forbidden_body
@@ -1475,7 +1503,7 @@ class MainManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.plugin.preview_rule())["status_code"], 400)
                 self.assertEqual((await self.plugin.confirm_rule())["status_code"], 400)
 
-    async def test_json_content_type_with_charset_is_accepted(self):
+    async def _scenario_json_content_type_with_charset_is_accepted(self):
         self.raw_body = b'{}'
         self.request.headers = {"content-type": "Application/JSON; charset=utf-8"}
         self.assertEqual(await self.plugin._payload(), {})

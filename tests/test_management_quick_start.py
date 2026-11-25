@@ -64,20 +64,50 @@ class ManagementQuickStartTests(unittest.TestCase):
         cls.playwright.stop()
 
     def setUp(self):
-        self.page = self.browser.new_page(viewport={"width": 1200, "height": 850}, reduced_motion="reduce")
-        self.errors = []
-        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.page = None
+        self._reset_page()
 
     def tearDown(self):
         self.page.close()
         self.assertEqual(self.errors, [])
+
+    def _reset_page(self):
+        if self.page is not None:
+            self.page.close()
+            self.assertEqual(self.errors, [])
+        self.page = self.browser.new_page(viewport={"width": 1200, "height": 850}, reduced_motion="reduce")
+        self.errors = []
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+
+    def test_tab_restore_basics(self):
+        for name, scenario in (
+            ("first open and restore", self._scenario_first_open_uses_status_and_restores_the_last_tab),
+            ("no default flash", self._scenario_saved_tab_is_not_preceded_by_default_content_or_indicator),
+            ("choice before bridge", self._scenario_tab_choice_before_bridge_is_ready_is_preserved),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_tab_restore_late_and_failed_reads(self):
+        for name, scenario in (
+            ("late saved tab", self._scenario_late_saved_tab_does_not_override_a_new_choice),
+            ("failed restore", self._scenario_failed_tab_restore_shows_default_page),
+            ("unrelated status request", self._scenario_saved_tab_does_not_wait_for_unrelated_status_request),
+        ):
+            with self.subTest(scenario=name):
+                self._reset_page()
+                scenario()
+
+    def test_rapid_tab_changes_save_the_last_choice(self):
+        self._scenario_rapid_tab_changes_save_the_last_choice()
 
     def open_status(self, scenario="empty"):
         self.page.goto(self.url + "?scenario=" + scenario)
         self.page.locator("#tab-status").click()
         self.page.wait_for_function("document.querySelector('#quick-start-progress').textContent !== '正在读取进度...'")
 
-    def test_first_open_uses_status_and_restores_the_last_tab(self):
+    def _scenario_first_open_uses_status_and_restores_the_last_tab(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -95,7 +125,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         page.reload()
         expect(page.locator("#tab-status")).to_have_attribute("aria-selected", "true")
 
-    def test_late_saved_tab_does_not_override_a_new_choice(self):
+    def _scenario_late_saved_tab_does_not_override_a_new_choice(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -106,7 +136,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
         page.wait_for_function("JSON.parse(sessionStorage.getItem('fixture-ui-state-delay') || '{}').active_tab === 'settings'")
 
-    def test_saved_tab_is_not_preceded_by_default_content_or_indicator(self):
+    def _scenario_saved_tab_is_not_preceded_by_default_content_or_indicator(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -122,7 +152,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         expect(page.locator("#panel-records")).to_be_visible()
         expect(page.locator("#panel-status")).to_be_hidden()
 
-    def test_failed_tab_restore_shows_default_page(self):
+    def _scenario_failed_tab_restore_shows_default_page(self):
         from playwright.sync_api import expect
 
         self.page.goto(self.url + "?scenario=ui-state-error")
@@ -130,7 +160,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         expect(self.page.locator("#tab-status")).to_have_attribute("aria-selected", "true")
         expect(self.page.locator("#selection-status")).to_have_text("无法读取上次选择.")
 
-    def test_saved_tab_does_not_wait_for_unrelated_status_request(self):
+    def _scenario_saved_tab_does_not_wait_for_unrelated_status_request(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -141,7 +171,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         page.wait_for_function("window.quickStartMock.requests.includes('settings')", timeout=3000)
         page.evaluate("window.quickStartMock.releaseStatus()")
 
-    def test_tab_choice_before_bridge_is_ready_is_preserved(self):
+    def _scenario_tab_choice_before_bridge_is_ready_is_preserved(self):
         from playwright.sync_api import expect
 
         page = self.page
@@ -155,7 +185,7 @@ class ManagementQuickStartTests(unittest.TestCase):
         page.wait_for_function("window.quickStartMock.requests.includes('groups')")
         expect(page.locator("#tab-settings")).to_have_attribute("aria-selected", "true")
 
-    def test_rapid_tab_changes_save_the_last_choice(self):
+    def _scenario_rapid_tab_changes_save_the_last_choice(self):
         from playwright.sync_api import expect
 
         page = self.page
