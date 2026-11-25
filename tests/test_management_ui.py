@@ -343,15 +343,19 @@ class ManagementUiTests(unittest.TestCase):
         self.assertNotIn('behavior: "smooth"', script)
         self.assertEqual(script.count('behavior: prefersReducedMotion() ? "auto" : "smooth"'), 6)
 
-    def test_rule_and_group_hover_share_a_strong_animated_outline(self):
+    def test_rule_and_group_hover_share_a_soft_animated_lift(self):
         root = Path(__file__).resolve().parents[1]
         css = (root / "views" / "management" / "style.css").read_text(encoding="utf-8")
         common = css.split('.rule-card, .group-row {', 1)[1].split('}', 1)[0]
-        self.assertIn('transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out)', common)
+        self.assertIn('transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out)', common)
         self.assertIn('@media (hover: hover)', css)
-        hover = css.split('.rule-card:hover, .group-row:hover {', 1)[1].split('}', 1)[0]
+        hover = css.split('.rule-card:hover:not(.is-editing), .group-row:hover:not(.is-editing) {', 1)[1].split('}', 1)[0]
         self.assertIn('border-color: var(--text)', hover)
-        self.assertIn('box-shadow: 0 0 0 2px var(--text)', hover)
+        self.assertIn('box-shadow: var(--card-hover-shadow)', hover)
+        self.assertIn('transform: translateY(-2px)', hover)
+        self.assertNotIn('0 0 0 2px var(--text)', css)
+        editing = css.split('.rule-card.is-editing, .group-row.is-editing {', 1)[1].split('}', 1)[0]
+        self.assertIn('border-width: 1px', editing)
         self.assertIn('prefers-reduced-motion: reduce', css)
 
     def test_neutral_theme_anchors_and_no_action_switch(self):

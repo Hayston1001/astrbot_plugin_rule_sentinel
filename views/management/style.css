@@ -18,6 +18,7 @@
   --header-height: 48px;
   --gutter: clamp(18px, 3vw, 44px);
   --focus-ring: rgba(26, 26, 26, .14);
+  --card-hover-shadow: 0 1px 2px rgb(0 0 0 / .04), 0 10px 24px rgb(0 0 0 / .07);
   --action-surface-saturation: 40%;
   --action-surface-lightness: 97%;
   --action-outline-lightness: 88%;
@@ -62,6 +63,7 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --focus-ring: rgba(242, 242, 242, .18);
+  --card-hover-shadow: 0 1px 2px rgb(0 0 0 / .35), 0 12px 28px rgb(0 0 0 / .45), inset 0 1px 0 rgb(255 255 255 / .05);
   --signal-success-line: #8fe0ac;
   --signal-warning-line: #f3d18a;
   --action-surface-saturation: 14%;
@@ -102,6 +104,7 @@
   :root:not([data-theme]) {
     color-scheme: dark;
     --focus-ring: rgba(242, 242, 242, .18);
+    --card-hover-shadow: 0 1px 2px rgb(0 0 0 / .35), 0 12px 28px rgb(0 0 0 / .45), inset 0 1px 0 rgb(255 255 255 / .05);
     --signal-success-line: #8fe0ac;
     --signal-warning-line: #f3d18a;
     --action-surface-saturation: 14%; --action-surface-lightness: 16%; --action-outline-lightness: 30%; --action-badge-lightness: 80%; --action-badge-text: #1a1a1a;
@@ -597,11 +600,15 @@ tr.record.is-located td { animation: record-located 2.4s ease-out; }
 .rule-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 0 12px; color: var(--text); }
 .rule-card, .group-row {
   scroll-margin-top: calc(var(--header-height) + 16px);
-  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
-.rule-card.is-editing, .group-row.is-editing { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.rule-card.is-editing, .group-row.is-editing { border-color: var(--text); border-width: 1px; }
 @media (hover: hover) {
-  .rule-card:hover, .group-row:hover { border-color: var(--text); box-shadow: 0 0 0 2px var(--text); }
+  .rule-card:hover:not(.is-editing), .group-row:hover:not(.is-editing) {
+    border-color: var(--text);
+    box-shadow: var(--card-hover-shadow);
+    transform: translateY(-2px);
+  }
 }
 .rule-card > div { min-width: 0; }
 .rule-card > button { flex: none; white-space: nowrap; }
