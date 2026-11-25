@@ -1186,6 +1186,13 @@ function renderRecords(rows, append = false, update = false) {
     if (decision.rejected_call && typeof decision.rejected_call === "object") {
       addRecordDetail(info, "模型建议", rejectedCallText(decision.rejected_call));
     }
+    const attempts = decision.generation_attempts;
+    if (Number.isInteger(attempts) && attempts > 1) {
+      const reasons = Array.isArray(decision.generation_reasons)
+        ? decision.generation_reasons.map((code) => failureReasonText[code] || String(code)).join("; ") : "";
+      const skipped = decision.retry_skipped === "time_budget" ? ", 判定时间不足未继续" : "";
+      addRecordDetail(info, "重新生成", `模型输出未通过校验, 共生成 ${attempts} 次${reasons ? " (" + reasons + ")" : ""}${skipped}.`);
+    }
     const errorDetail = errorDetailText(decision.error);
     if (errorDetail) addRecordDetail(info, "错误详情", errorDetail);
     const truncated = decision.detail_truncated || detail.detail_truncated;

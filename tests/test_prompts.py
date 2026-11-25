@@ -28,8 +28,9 @@ class PromptTests(unittest.TestCase):
                     self.assertIn(phrase, PROMPTS[language][key])
 
     def test_prompt_version_and_single_protocol_keys(self):
-        self.assertEqual(PROMPT_VERSION, 2)
+        self.assertEqual(PROMPT_VERSION, 3)
         for language in ("en", "zh"):
+            self.assertIn("{reason}", PROMPTS[language]["retry"])
             keys = set(PROMPTS[language])
             self.assertTrue({"system", "system_no_reason", "tool", "assessments", "outcome"} <= keys)
             for removed in ("system_priority", "system_priority_no_reason", "system_model",

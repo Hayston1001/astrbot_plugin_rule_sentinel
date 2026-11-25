@@ -3,7 +3,7 @@
 import unicodedata
 
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 # Bump PROMPT_VERSION whenever prompt text, tool descriptions, or required
 # argument shapes change, so stored audits can be tied to the exact template.
 
@@ -26,6 +26,10 @@ PROMPTS = {
             "Do not repeat or quote the original message, or copy links, accounts or contact details. "
             "Use review when uncertain. Never choose a target, modify rules, or execute actions."
         ),
+        "retry": ("The previous response was rejected: {reason}. Respond again by calling assess_rules exactly once and matching the tool schema exactly. "
+                  "Return one assessment for every supplied rule_id, with an outcome of hit, no_hit or review, and no other fields. "
+                  "A strict rule needs one of its severity_levels; an autonomous rule needs an integer duration_seconds from 1 to its duration_limit_seconds. "
+                  "Do not repeat a rejected value."),
         "tool": "Return one data-only assessment per rule.",
         "rule_id": "Identifier of an enabled rule.",
         "severity": "Configured severity for a strict rule.",
@@ -66,6 +70,10 @@ PROMPTS = {
             "违规理由用一句话概括, 不超过 40 字. 不要复述或引用消息原文, 不要抄写链接, 账号或联系方式. "
             "无法确定时使用 review. 不得选择目标, 修改规则或执行动作."
         ),
+        "retry": ("上一次回答未通过校验: {reason}. 请重新调用一次 assess_rules, 并严格符合工具参数. "
+                  "为每个给出的 rule_id 各返回一项判定, outcome 只能是 hit, no_hit 或 review, 不要添加其他字段. "
+                  "严格映射的规则需要给出它的一个 severity_levels; 自主时长的规则需要给出 1 到该规则 duration_limit_seconds 之间的整数 duration_seconds. "
+                  "不要重复被拒绝的值."),
         "tool": "为每条规则返回一项仅供记录的判定.",
         "rule_id": "已启用规则的标识.",
         "severity": "严格规则中配置的严重级别.",

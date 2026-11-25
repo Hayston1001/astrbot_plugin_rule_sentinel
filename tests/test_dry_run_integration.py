@@ -41,7 +41,7 @@ class DryRunIntegrationTests(unittest.IsolatedAsyncioTestCase):
             admission = DryRunAdmission(queue, rules, policy=policy, capacity=10, model="synthetic", session_gate=gate)
             started, release = asyncio.Event(), asyncio.Event()
             calls = []
-            async def invoke(*, model, message, rules, language):
+            async def invoke(*, model, message, rules, language, retry_reason=None):
                 calls.append(message)
                 if message == "first private message":
                     started.set()

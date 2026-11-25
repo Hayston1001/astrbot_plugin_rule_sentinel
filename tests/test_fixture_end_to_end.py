@@ -52,7 +52,7 @@ class FixturePipelineTests(unittest.IsolatedAsyncioTestCase):
                                           session_origin="qq:GroupMessage:g")
                 self.assertEqual(await admission.submit(message), "queued")
 
-            async def invoke(*, model, message, rules, language):
+            async def invoke(*, model, message, rules, language, retry_reason=None):
                 self.assertEqual(model, "synthetic")
                 self.assertEqual(rules[0]["text"], fixture["rule"])
                 outcome = scripted[message]
@@ -109,7 +109,7 @@ class FixturePipelineTests(unittest.IsolatedAsyncioTestCase):
                                           True, False, sender_is_verified_non_bot=True,
                                           session_origin="qq:GroupMessage:g")
                 self.assertEqual(await second_admission.submit(message), "queued")
-            async def second_invoke(*, model, message, rules, language):
+            async def second_invoke(*, model, message, rules, language, retry_reason=None):
                 self.assertEqual(model, "synthetic-second")
                 self.assertEqual(rules[0]["text"], fixture["rule"])
                 outcome = second_script[message]

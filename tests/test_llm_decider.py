@@ -165,6 +165,88 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["rejected_call"]["reason_chars"], 800)
         self.assertNotIn("proposal", audit)
 
+    async def test_invalid_duration_is_regenerated_before_it_is_final(self):
+        self.rules.save(**{**self.rule, "expected_version": 1, "duration_mode": "autonomous",
+                           "severity_seconds": {}})
+        answers = [assess(hit(severity=None, duration_seconds="600")),
+                   assess(hit(severity=None, duration_seconds=120))]
+        calls = []
+        async def invoke(**kwargs):
+            calls.append(kwargs.get("retry_reason"))
+            return answers[len(calls) - 1]
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "proposed")
+        self.assertEqual(calls, [None, "invalid_duration"])
+        self.assertEqual(audit["proposal"]["duration_seconds"], 120)
+        self.assertEqual(audit["generation_attempts"], 2)
+        self.assertEqual(audit["generation_reasons"], ["invalid_duration"])
+
+    async def test_regeneration_is_bounded_and_the_last_answer_is_recorded(self):
+        self.rules.save(**{**self.rule, "expected_version": 1, "duration_mode": "autonomous",
+                           "severity_seconds": {}})
+        calls = []
+        async def invoke(**kwargs):
+            calls.append(kwargs.get("retry_reason"))
+            return assess(hit(severity=None, duration_seconds=0))
+        status, audit = await self.run_worker(invoke)
+        self.assertEqual(status, "rejected")
+        self.assertEqual(calls, [None, "invalid_duration", "invalid_duration"])
+        self.assertEqual(audit["validation"], "invalid_duration")
+        self.assertEqual(audit["generation_attempts"], 3)
+        self.assertEqual(audit["generation_reasons"], ["invalid_duration"] * 3)
+        self.assertEqual(audit["rejected_call"]["duration_seconds"], {"type": "int", "value": 0})
+
+    async def test_incomplete_and_malformed_answers_are_regenerated(self):
+        incomplete = SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["assess_rules"],
+            tools_call_args=[{"assessments": [hit()]}],
+            raw_completion={"choices": [{"finish_reason": "length"}]})
+        legacy = SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=[],
+                                 tools_call_args=[], completion_text="NO_ACTION")
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("DELETE FROM dry_run_queue")
+            db.commit()
+        for index, (first, reason) in enumerate(((incomplete, "incomplete_model_output"),
+                                                 (legacy, "missing_or_multiple_assessments"))):
+            with self.subTest(reason=reason):
+                self.queue.enqueue(platform_id="p", group_id="g", message_id=f"retry-{index}",
+                                   capacity=10, payload={"text": "private message", "sender_id": "u"})
+                answers = [first, assess(hit())]
+                calls = []
+                async def invoke(**kwargs):
+                    calls.append(kwargs.get("retry_reason"))
+                    return answers[len(calls) - 1]
+                status, audit = await self.run_worker(invoke)
+                self.assertEqual(status, "proposed")
+                self.assertEqual(calls, [None, reason])
+                self.assertEqual(audit["generation_attempts"], 2)
+                self.assertEqual(audit["generation_reasons"], [reason])
+                with closing(sqlite3.connect(self.path)) as db:
+                    db.execute("DELETE FROM dry_run_queue")
+                    db.commit()
+
+    async def test_retry_stops_when_the_decision_budget_is_used(self):
+        self.rules.save(**{**self.rule, "expected_version": 1, "duration_mode": "autonomous",
+                           "severity_seconds": {}})
+        calls = []
+        async def invoke(**kwargs):
+            calls.append(kwargs.get("retry_reason"))
+            return assess(hit(severity=None, duration_seconds="600"))
+        item = self.queue.claim("p", "g")
+        result = await self.decider(invoke, retry_budget_seconds=0.0001)(item)
+        detail = json.loads(result.detail)
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(calls, [None])
+        self.assertEqual(detail["retry_skipped"], "time_budget")
+        self.assertNotIn("generation_attempts", detail)
+
+    async def test_invalid_generation_settings_are_rejected_at_construction(self):
+        for value in (0, 6, True, 2.0, "3"):
+            with self.subTest(attempts=value), self.assertRaises(ValueError):
+                self.decider(lambda **kwargs: None, max_generation_attempts=value)
+        for value in (0, -1, True, "1"):
+            with self.subTest(budget=value), self.assertRaises(ValueError):
+                self.decider(lambda **kwargs: None, retry_budget_seconds=value)
+
     async def test_protocol_diagnostics_and_input_fingerprint_are_audited(self):
         async def invoke(**kwargs):
             return SimpleNamespace(role="assistant", is_chunk=False, tools_call_name=["wrong_tool"],
@@ -173,7 +255,7 @@ class LlmDeciderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "rejected")
         self.assertEqual(audit["response_status"], "invalid_assessment_tool")
         self.assertEqual(audit["detail_version"], 1)
-        self.assertEqual(audit["prompt_version"], 2)
+        self.assertEqual(audit["prompt_version"], 3)
         self.assertRegex(audit["input_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(audit["protocol"]["tool_names"], ["wrong_tool"])
         self.assertEqual(audit["protocol"]["argument_types"], ["dict"])

@@ -80,7 +80,8 @@ def build_runtime(*, context, config, rules, queue, notify=None, session_gate=No
                                   caption_prompt=settings.image_caption_prompt,
                                    fetcher=image_fetcher, prefetcher=image_prefetcher,
                                    chat_context=chat_context if context_enabled else None,
-                                   diagnostic_capture=settings.diagnostic_capture)
+                                   diagnostic_capture=settings.diagnostic_capture,
+                                   retry_budget_seconds=settings.timeout_seconds)
             decider = ReasonConfiguredDecider(config, make_llm_decider)
             decider.current()
             return decider

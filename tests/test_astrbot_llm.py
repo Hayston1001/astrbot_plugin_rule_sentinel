@@ -129,6 +129,23 @@ class InvokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(TOOL_PARAMETERS, schema)
         self.assertEqual(SYSTEM_PROMPT, PROMPTS["en"]["system"])
 
+    async def test_retry_reason_is_appended_as_a_correction(self):
+        class Context:
+            async def llm_generate(self, **kwargs):
+                self.kwargs = kwargs
+        context = Context()
+        invoker = AstrBotLlmInvoker(context, tool_set_factory=lambda *_: None)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                await invoker(model="selected", message="m", rules=[{}], language=language,
+                              retry_reason="invalid_duration")
+                prompt = context.kwargs["system_prompt"]
+                self.assertTrue(prompt.startswith(PROMPTS[language]["system"]))
+                self.assertIn(PROMPTS[language]["retry"].format(reason="invalid_duration"), prompt)
+        for invalid in ("", " ", 1, "x" * 65):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                await invoker(model="selected", message="m", rules=[{}], retry_reason=invalid)
+
     async def test_reason_language_is_appended_without_translating_the_prompt(self):
         class Context:
             async def llm_generate(self, **kwargs):

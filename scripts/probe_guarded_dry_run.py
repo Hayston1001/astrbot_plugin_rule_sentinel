@@ -74,7 +74,7 @@ def main():
             guarded = GuardedOpenAIInvoker(provider_id="synthetic", resolved_model="synthetic", endpoint=endpoint,
                 api_key="synthetic", transport_factory=lambda: httpx.MockTransport(handler),
                 parse_response=parse, timeout_seconds=10)
-            async def invoke(*, model, message, rules, language):
+            async def invoke(*, model, message, rules, language, retry_reason=None):
                 assert language == "en"
                 if message != "private tamper":
                     return await guarded(model=model, message=message, rules=rules)

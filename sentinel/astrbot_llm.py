@@ -56,7 +56,8 @@ class AstrBotLlmInvoker:
         self.no_action_reason_enabled = no_action_reason_enabled
 
     async def __call__(self, *, model: str, message: str, rules: list,
-                       language: str = "en", image_urls=None, image_caption=None, chat_context=None):
+                       language: str = "en", image_urls=None, image_caption=None, chat_context=None,
+                       retry_reason: str | None = None):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be explicitly selected")
         if (not isinstance(message, str) or not isinstance(rules, list) or not rules
@@ -64,6 +65,9 @@ class AstrBotLlmInvoker:
             raise ValueError("message and rules are required")
         if language not in PROMPTS:
             raise ValueError("unsupported prompt language")
+        if retry_reason is not None and (not isinstance(retry_reason, str)
+                                         or not retry_reason.strip() or len(retry_reason) > 64):
+            raise ValueError("invalid retry reason")
         if image_urls:
             trigger = {"text": message, "image_count": len(image_urls)}
         elif image_caption:
@@ -83,6 +87,8 @@ class AstrBotLlmInvoker:
         if chat_context is not None:
             prompt_data["prior_messages_untrusted"] = chat_context
             system_prompt += "\n" + PROMPTS[language]["chat_context"]
+        if retry_reason is not None:
+            system_prompt += "\n" + PROMPTS[language]["retry"].format(reason=retry_reason.strip())
         prompt = json.dumps(prompt_data, ensure_ascii=False)
         return await self.context.llm_generate(chat_provider_id=model, prompt=prompt,
                                                image_urls=list(image_urls) if image_urls else None,
