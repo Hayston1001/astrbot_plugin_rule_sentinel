@@ -254,7 +254,7 @@
               </div>
             </section>
             <section class="settings-section" aria-labelledby="settings-alerts-title"><div class="settings-intro"><h2 id="settings-alerts-title" tabindex="-1">失败提示</h2><p>判定失败或规则动作被拒绝时, 可以私聊通知管理员, 也可以在群里发言. 两种方式可以同时使用, 都不设置时只记录.</p></div><div class="settings-fields">
-              <section class="config-subsection"><h4>私聊通知管理员</h4><p class="field-help">判定模型失败, 超时, 熔断, 队列已满, 存储失败, 以及规则动作因目标是管理员或机器人被拒绝时, 私聊通知接收人. 消息写明故障情况, 发生的群和消息, 影响和处理去处; 同类故障按下方间隔合并, 并注明次数. 不选接收人则不发送.</p>
+              <section class="config-subsection"><h4>私聊通知管理员</h4><p class="field-help">判定模型失败, 超时, 熔断, 队列已满, 存储失败, 以及规则动作因目标是管理员或机器人被拒绝时, 私聊通知接收人. 消息写明故障情况, 发生的群, 发送者, 触发消息和原文, 规则, 动作, 影响和处理去处; 原文过长时截断. 同类故障按下方间隔合并, 并注明次数. 不选接收人则不发送.</p>
                 <div class="notification-recipient-field">
                   <div><strong>通知接收人</strong><p id="notification-recipient-summary" class="field-help">未设置接收人</p></div>
                   <button id="notification-recipient-open" class="secondary" type="button" aria-haspopup="dialog">选择接收人</button>
@@ -269,12 +269,12 @@
                 </details>
                 <label>同类失败通知间隔, 秒 <input id="setting-notification_interval_seconds" type="number" min="0" aria-describedby="notification-interval-help"><span id="notification-interval-help" class="field-help">选了接收人时须大于 0. 不发送通知时清空接收人并设为 0.</span></label>
               </section>
-              <section class="config-subsection"><h4>在群里发言</h4><p class="field-help">规则动作因目标是管理员或机器人而被平台拒绝时, 在触发规则的群里发言. 各群可以在群管理中覆盖. 真实执行关闭时不会发言.</p>
+              <section class="config-subsection"><h4>在群里发言</h4><p class="field-help">规则动作因目标是管理员或机器人而被平台拒绝时, 在触发规则的群里发言. 群内发言只发送简短通知, 不会自动附带消息原文; 全群可见, 请避免在模板里写入敏感内容. 各群可以在群管理中覆盖. 真实执行关闭时不会发言.</p>
                 <label>默认处理方式 <select id="setting-protected_target_policy"><option value="exempt">不发言</option><option value="group_message">在群里发言</option></select><span class="field-help">选择在群里发言时, 会使用下方内容和引用设置.</span></label>
                 <div class="notice-settings"><label>默认发言内容 <textarea id="setting-protected_target_template" maxlength="500" aria-describedby="template-help"></textarea></label>
                   <p id="template-help" class="field-help">最多 500 字. {rule_id} 表示规则标识, {sender_id} 表示成员标识, {action} 表示动作类型 (mute 为禁言, recall 为撤回). 单群发言时可继承或自定义.</p>
                   <div class="template-example"><strong>发言内容示例</strong><p id="setting-template-preview"></p><span>规则和成员标识为示例值.</span></div>
-                  <label class="check"><input id="setting-protected_target_quote" type="checkbox"><span>发言时引用触发消息</span></label><p class="field-help">引用导致这次规则判定的群消息.</p>
+                  <label class="check"><input id="setting-protected_target_quote" type="checkbox"><span>发言时引用触发消息</span></label><p class="field-help">引用导致这次规则判定的群消息, 会在群内展示原消息内容, 默认关闭.</p>
                 </div>
               </section>
             </div></section>

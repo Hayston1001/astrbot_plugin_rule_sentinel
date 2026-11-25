@@ -42,6 +42,17 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT status, detail FROM dry_run_events").fetchone(), ("skipped", "non_text_or_unknown"))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dry_run_queue").fetchone()[0], 0)
 
+    async def test_queue_full_notification_carries_the_skipped_text(self):
+        notices = []
+        admission = DryRunAdmission(self.queue, self.rules, policy=self.policy, capacity=1, model="m",
+                                    notify=lambda code, scope=None, reason="": notices.append((code, scope)))
+        self.assertEqual(await admission.submit(self.message), "queued")
+        second = IncomingMessage("p", "g", "m2", "u", "bot", "另一条消息", True, False)
+        self.assertEqual(await admission.submit(second), "queue_full")
+        self.assertEqual([code for code, _ in notices], ["queue_full"])
+        self.assertEqual(notices[0][1].message_text, "另一条消息")
+        self.assertEqual(notices[0][1].sender_id, "u")
+
     async def test_disallowed_group_and_unconfigured_model(self):
         blocked = MonitoringPolicy("allowlist", frozenset())
         admission = DryRunAdmission(self.queue, self.rules, policy=blocked, capacity=100, model="m")

@@ -16,6 +16,7 @@ class MuteExecutor:
                 self.notify("action_rejected", notification_scope(
                     platform_id=intent["platform_id"], group_id=intent["group_id"],
                     message_id=intent["message_id"], rule_id=intent["rule_id"],
+                    sender_id=intent["target_sender_id"],
                     action=intent["action"], duration_seconds=intent.get("duration_seconds")))
             except Exception:
                 pass

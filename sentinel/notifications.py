@@ -4,10 +4,12 @@ The host supplies explicitly configured private recipients, a send function,
 and audit callback. No recipient is selected automatically. Notifications are
 informational and never authorize, retry, or execute moderation actions.
 
-Every notice names the failure, its scope, its consequence and where to look.
-The scope carries identifiers only: no message text, member identity or model
-output. Repeated failures of the same kind are coalesced by the configured
-interval and the notice reports how many were merged.
+Every private notice names the failure, its scope, its consequence and where to
+look. Because it goes only to saved administrators, it carries the triggering
+message and sender identity so the problem is clear. Group notices are separate
+and never include message text by default. Repeated failures of the same kind
+are coalesced by the configured interval and the notice reports how many were
+merged.
 """
 
 import asyncio
@@ -84,12 +86,24 @@ REASON_LABELS = {
 
 ACTION_LABELS = {"mute": "禁言", "recall": "撤回", "reply": "发言"}
 
-MAX_NOTIFICATION_TEXT = 1000
+MAX_NOTIFICATION_TEXT = 4000
 MAX_SCOPE_FIELD = 128
 MAX_GROUP_LABEL = 100
+MAX_MESSAGE_PREVIEW = 2000
 MAX_DURATION_SECONDS = 2592000
 MAX_NOTIFICATION_TARGETS = 20
 MAX_NOTIFICATION_TARGET_LENGTH = 512
+
+
+def _message_preview(value) -> str:
+    """One bounded, single-line excerpt of the triggering message."""
+    if not isinstance(value, str):
+        return ""
+    text = "".join(char for char in value if char.isprintable() or char.isspace())
+    text = " ".join(text.split())
+    if len(text) > MAX_MESSAGE_PREVIEW:
+        text = text[:MAX_MESSAGE_PREVIEW - 1].rstrip() + "…"
+    return text
 
 
 def _scope_field(value, *, name: str, limit: int = MAX_SCOPE_FIELD) -> str:
@@ -103,7 +117,7 @@ def _scope_field(value, *, name: str, limit: int = MAX_SCOPE_FIELD) -> str:
 
 @dataclass(frozen=True)
 class NotificationScope:
-    """Where a failure happened. Identifiers only, never message content."""
+    """Where a failure happened. Identifiers plus a bounded message excerpt."""
 
     platform_id: str = ""
     group_id: str = ""
@@ -112,12 +126,15 @@ class NotificationScope:
     action: str = ""
     duration_seconds: int | None = None
     group_label: str = ""
+    sender_id: str = ""
+    message_text: str = ""
 
     def __post_init__(self):
-        for name in ("platform_id", "group_id", "message_id", "rule_id"):
+        for name in ("platform_id", "group_id", "message_id", "rule_id", "sender_id"):
             object.__setattr__(self, name, _scope_field(getattr(self, name), name=name))
         object.__setattr__(self, "group_label", _scope_field(self.group_label, name="group label",
                                                            limit=MAX_GROUP_LABEL))
+        object.__setattr__(self, "message_text", _message_preview(self.message_text))
         action = "" if self.action is None else self.action
         if action and action not in ACTION_LABELS:
             raise ValueError("invalid notification action")
@@ -146,7 +163,7 @@ def validate_notification_targets(targets):
 
 
 def notification_scope(*, platform_id="", group_id="", message_id="", rule_id="", action="",
-                       duration_seconds=None, group_label="") -> NotificationScope:
+                       duration_seconds=None, group_label="", sender_id="", message_text="") -> NotificationScope:
     """Build a scope from platform-provided identifiers.
 
     A notice must never be the reason a worker fails, so a value the scope
@@ -158,6 +175,7 @@ def notification_scope(*, platform_id="", group_id="", message_id="", rule_id=""
                                ("group_id", group_id, MAX_SCOPE_FIELD),
                                ("message_id", message_id, MAX_SCOPE_FIELD),
                                ("rule_id", rule_id, MAX_SCOPE_FIELD),
+                               ("sender_id", sender_id, MAX_SCOPE_FIELD),
                                ("group_label", group_label, MAX_GROUP_LABEL)):
         try:
             fields[name] = _scope_field(value, name=name, limit=limit)
@@ -167,6 +185,7 @@ def notification_scope(*, platform_id="", group_id="", message_id="", rule_id=""
         fields["action"] = action
     if type(duration_seconds) is int and 0 < duration_seconds <= MAX_DURATION_SECONDS:
         fields["duration_seconds"] = duration_seconds
+    fields["message_text"] = _message_preview(message_text)
     return NotificationScope(**fields)
 
 
@@ -178,8 +197,12 @@ def render_notice(spec: NoticeSpec, scope: NotificationScope, *, label: str, occ
         lines.append(f"范围: 群 {group} ({scope.platform_id})" if scope.platform_id else f"范围: 群 {group}")
     elif scope.platform_id:
         lines.append(f"范围: 实例 {scope.platform_id}")
+    if scope.sender_id:
+        lines.append(f"发送者: {scope.sender_id}")
     if scope.message_id:
         lines.append(f"消息: {scope.message_id}")
+    if scope.message_text:
+        lines.append(f"消息原文: {scope.message_text}")
     if scope.rule_id:
         lines.append(f"规则: {scope.rule_id}")
     if scope.action:
@@ -209,7 +232,8 @@ class _PendingNotice:
 
 class NotificationService:
     def __init__(self, *, recipients, interval_seconds: float, send, audit, clock=time.monotonic,
-                 send_timeout_seconds: float = 10, wall_clock=datetime.now, resolve_group_label=None):
+                 send_timeout_seconds: float = 10, wall_clock=datetime.now, resolve_group_label=None,
+                 resolve_message_text=None):
         self.recipients = validate_notification_targets(recipients)
         if not self.recipients:
             raise ValueError("explicit private notification recipient required")
@@ -223,6 +247,7 @@ class NotificationService:
         self.clock = clock
         self.wall_clock = wall_clock
         self.resolve_group_label = resolve_group_label
+        self.resolve_message_text = resolve_message_text
         self.send_timeout = send_timeout_seconds
         self.next_allowed = {}
         self.pending = {}
@@ -267,6 +292,13 @@ class NotificationService:
                 resolved = ""
             if isinstance(resolved, str) and resolved:
                 current = replace(current, group_label=resolved)
+        if current.message_id and not current.message_text and self.resolve_message_text is not None:
+            try:
+                resolved = await self.resolve_message_text(current)
+            except Exception:
+                resolved = ""
+            if isinstance(resolved, str) and resolved:
+                current = replace(current, message_text=resolved)
         text = render_notice(spec, current, label=label, occurrences=occurrences,
                              group_count=group_count, now=self.wall_clock())
         statuses = set()
@@ -441,6 +473,11 @@ def build_notification_dispatcher(*, context, queue, recipients, interval_second
     async def resolve_group_label(scope):
         return await run_sync_safely(queue.group_label, scope.platform_id, scope.group_id)
 
+    async def resolve_message_text(scope):
+        return await run_sync_safely(queue.message_content, platform_id=scope.platform_id,
+                                     group_id=scope.group_id, message_id=scope.message_id)
+
     service = NotificationService(recipients=recipients, interval_seconds=interval_seconds,
-                                  send=send, audit=audit, resolve_group_label=resolve_group_label)
+                                  send=send, audit=audit, resolve_group_label=resolve_group_label,
+                                  resolve_message_text=resolve_message_text)
     return NotificationDispatcher(service, capacity=64, on_failure=on_failure)

@@ -577,6 +577,26 @@ class ExecutionIntentTests(unittest.TestCase):
         self.assertEqual(row["execution"]["notice"]["status"], "succeeded")
         self.assertEqual(row["execution"]["notice"]["trace_id"], "trace-1")
 
+    def test_group_notice_does_not_append_the_message_text(self):
+        self.enable_execution()
+        settings = SettingsStore(self.path, self.path.parent / "backup.json")
+        config = settings.load_or_migrate({})
+        config.update(protected_target_policy="group_message", protected_target_template="warning")
+        settings.save(config)
+        self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
+        sent = []
+        class FakePlatform:
+            async def verify_permission(self, *args): return True
+            async def mute(self, *args):
+                return {"outcome": "blocked", "reason_code": "protected_target", "platform_code": "40103004"}
+            async def send_group_message(self, *args, **kwargs):
+                sent.append((args, kwargs))
+                return {"outcome": "succeeded", "platform_code": "200"}
+        result = asyncio.run(MuteExecutor(MuteExecutionStore(self.path), FakePlatform()).execute(1, mode="auto"))
+        self.assertEqual(result, "blocked")
+        self.assertEqual(sent[0][0], ("p", "g", "warning"))
+        self.assertNotIn("private", sent[0][0][2])
+
     def test_group_notice_override_and_monitoring_recheck(self):
         self.enable_execution()
         settings = SettingsStore(self.path, self.path.parent / "backup.json")
@@ -657,8 +677,8 @@ class ExecutionIntentTests(unittest.TestCase):
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "blocked")
         self.assertEqual([code for code, scope in offered], ["action_rejected"])
         scope = offered[0][1]
-        self.assertEqual((scope.platform_id, scope.group_id, scope.rule_id, scope.action, scope.duration_seconds),
-                         ("p", "g", "r", "mute", 60))
+        self.assertEqual((scope.platform_id, scope.group_id, scope.rule_id, scope.action, scope.duration_seconds,
+                          scope.sender_id), ("p", "g", "r", "mute", 60, "sender"))
 
     def test_unknown_notice_is_not_retried(self):
         self.enable_execution()

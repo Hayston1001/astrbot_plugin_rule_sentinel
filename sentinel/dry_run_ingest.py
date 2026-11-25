@@ -128,7 +128,11 @@ class DryRunAdmission:
             try:
                 self.notify("queue_full", notification_scope(platform_id=message.platform_id,
                                                              group_id=message.group_id,
-                                                             message_id=message.message_id))
+                                                             message_id=message.message_id,
+                                                             sender_id=message.sender_id,
+                                                             message_text=(message.original_text
+                                                                           if isinstance(message.original_text, str)
+                                                                           and message.original_text.strip() else text)))
             except Exception:
                 pass
         return result

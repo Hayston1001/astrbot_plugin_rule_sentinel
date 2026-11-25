@@ -36,6 +36,24 @@ def _safe_error_fields(error):
     return result
 
 
+def _message_text(item):
+    """Readable triggering text kept in the pending payload, never the audit."""
+    payload = getattr(item, "payload", None)
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("original_text", "text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _sender_id(item):
+    payload = getattr(item, "payload", None)
+    value = payload.get("sender_id") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def _failure_detail(reason_code, *, error=None, stage="decision", **fields):
     detail = {"reason": reason_code, "reason_code": reason_code, "stage": stage,
               "detail_version": AUDIT_DETAIL_VERSION, **fields}
@@ -168,7 +186,8 @@ class DryRunWorker:
                     result = Decision("failed", _failure_detail(
                         "audit_detail_invalid_or_too_large", detail_truncated=True))
                 item_scope = notification_scope(platform_id=item.platform_id, group_id=item.group_id,
-                                                 message_id=item.message_id)
+                                                 message_id=item.message_id, sender_id=_sender_id(item),
+                                                 message_text=_message_text(item))
                 try:
                     finish_args = {"status": result.status, "detail": result.detail}
                     if result.rule_versions is not None and result.status in ("proposed", "no_action"):

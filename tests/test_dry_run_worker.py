@@ -45,6 +45,20 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["error"], {"type": "RuntimeError"})
         self.assertNotIn("secret", events[1][2])
 
+    async def test_failure_notification_carries_the_triggering_text(self):
+        self.queue.enqueue(platform_id="p", group_id="g", message_id="1",
+                           payload={"text": "private", "sender_id": "member-1"}, capacity=5)
+        scopes = []
+        def record(code, scope=None, reason=""):
+            scopes.append((code, scope))
+        async def decide(item):
+            raise RuntimeError("private")
+        worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1, notify=record)
+        self.assertEqual(await worker.drain_group("p", "g"), 1)
+        self.assertEqual([code for code, _ in scopes], ["model_failed"])
+        self.assertEqual(scopes[0][1].message_text, "private")
+        self.assertEqual(scopes[0][1].sender_id, "member-1")
+
     async def test_timeout_is_not_no_action(self):
         self.enqueue("g", "1")
         async def decide(item):

@@ -7,9 +7,9 @@ from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
 
-from sentinel.notifications import (MAX_NOTIFICATION_TEXT, NotificationDispatcher, NotificationScope,
-                                   NotificationService, TEST_MESSAGE, build_notification_dispatcher,
-                                   notification_scope, send_test_notifications)
+from sentinel.notifications import (MAX_MESSAGE_PREVIEW, MAX_NOTIFICATION_TEXT, NotificationDispatcher,
+                                   NotificationScope, NotificationService, TEST_MESSAGE,
+                                   build_notification_dispatcher, notification_scope, send_test_notifications)
 from sentinel.dry_run_queue import DryRunQueue
 
 
@@ -41,15 +41,18 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
                                       audit=record, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
         scope = NotificationScope(platform_id="qq_official", group_id="123456789", message_id="45678",
-                                  group_label="产品群")
+                                  group_label="产品群", sender_id="member-1",
+                                  message_text="这段消息违反了群规")
         self.assertEqual(await service.notify("model_failed", scope, "decision_error"), "submitted")
         lines = sent[0].splitlines()
         self.assertEqual(lines[0], "Rule Sentinel 失败提示")
         self.assertEqual(lines[1], "情况: 模型判定失败, 判定过程出错")
         self.assertEqual(lines[2], "范围: 群 产品群 (qq_official)")
-        self.assertEqual(lines[3], "消息: 45678")
-        self.assertEqual(lines[4], "时间: 11-24 14:03")
-        self.assertIn("影响: 这条消息未完成判定", lines[5])
+        self.assertEqual(lines[3], "发送者: member-1")
+        self.assertEqual(lines[4], "消息: 45678")
+        self.assertEqual(lines[5], "消息原文: 这段消息违反了群规")
+        self.assertEqual(lines[6], "时间: 11-24 14:03")
+        self.assertIn("影响: 这条消息未完成判定", lines[7])
         self.assertTrue(lines[-1].startswith("去处: "))
         self.assertLessEqual(len(sent[0]), MAX_NOTIFICATION_TEXT)
 
@@ -112,6 +115,47 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((scope.platform_id, scope.group_id, scope.message_id, scope.rule_id,
                           scope.action, scope.duration_seconds, scope.group_label),
                          ("p", "", "", "r", "", None, "产品群"))
+
+    async def test_message_preview_is_single_line_bounded_and_optional(self):
+        scope = notification_scope(message_text=" 第一行\n\t第二行  ")
+        self.assertEqual(scope.message_text, "第一行 第二行")
+        long_scope = notification_scope(message_text="x" * (MAX_MESSAGE_PREVIEW + 20))
+        self.assertEqual(len(long_scope.message_text), MAX_MESSAGE_PREVIEW)
+        self.assertTrue(long_scope.message_text.endswith("…"))
+        self.assertEqual(notification_scope(message_text=None).message_text, "")
+        self.assertEqual(notification_scope(message_text=123).message_text, "")
+
+    async def test_long_private_notice_keeps_impact_and_where_to_look(self):
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        scope = NotificationScope(platform_id="p", group_id="g", message_id="m", sender_id="user",
+                                  message_text="x" * MAX_MESSAGE_PREVIEW)
+        await service.notify("model_failed", scope, "decision_error")
+        self.assertIn("消息原文: " + "x" * MAX_MESSAGE_PREVIEW, sent[0])
+        self.assertIn("影响: 这条消息未完成判定", sent[0])
+        self.assertTrue(sent[0].splitlines()[-1].startswith("去处: "))
+        self.assertLessEqual(len(sent[0]), MAX_NOTIFICATION_TEXT)
+
+    async def test_message_text_is_resolved_from_identifiers_when_missing(self):
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        async def resolve(scope):
+            self.assertEqual((scope.platform_id, scope.group_id, scope.message_id), ("p", "g", "m"))
+            return "保留的消息原文"
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, resolve_message_text=resolve)
+        await service.notify("model_failed", NotificationScope(platform_id="p", group_id="g", message_id="m"))
+        self.assertIn("消息原文: 保留的消息原文", sent[0])
 
     async def test_scope_rejects_free_text_and_unexpected_values(self):
         for value in ({"group_id": "g"}, "g"):
