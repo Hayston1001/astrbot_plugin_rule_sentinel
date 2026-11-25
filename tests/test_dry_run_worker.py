@@ -59,9 +59,11 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             raise sqlite3.OperationalError("database unavailable")
         self.queue.claim = fail
         notifications = []
+        def record(code, scope=None, reason=""):
+            notifications.append(code)
         async def decide(item):
             self.fail("failed claim reached model")
-        worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1, notify=notifications.append)
+        worker = DryRunWorker(self.queue, decide, concurrency=1, timeout_seconds=1, notify=record)
         with self.assertRaises(sqlite3.OperationalError):
             await worker.drain_group("p", "g")
         self.assertEqual(notifications, ["storage_failed"])

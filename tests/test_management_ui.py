@@ -222,6 +222,16 @@ class ManagementUiTests(unittest.TestCase):
                       (root / "views" / "management" / "index.html").read_text(encoding="utf-8"))
         self.assertIn('bridge.apiPost("notification-test", {})', script)
 
+    def test_notification_records_render_readable_chinese_summary(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('el("notifications").addEventListener("click", () => showNotifications());', script)
+        self.assertIn('bridge.apiGet("notifications", {limit: 50})', script)
+        self.assertIn('submitted: "已提交", failed: "发送失败", unknown: "结果不明"', script)
+        self.assertIn('row.label || "通知"', script)
+        self.assertIn('row.summary', script)
+        self.assertIn('还没有通知记录.', script)
+
     def test_raw_record_copy_button_is_icon_only(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "views" / "management" / "app.js").read_text(encoding="utf-8")

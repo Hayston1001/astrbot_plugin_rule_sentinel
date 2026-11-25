@@ -301,4 +301,10 @@ class ManagementService:
     def list_notifications(self, actor, after_id=0, limit=50):
         if not self.actor_allowed(actor):
             raise PermissionError("not authorized")
-        return self.queue.list_notifications(after_id=after_id, limit=limit)
+        from .notifications import NOTICE_SPECS
+        rows = self.queue.list_notifications(after_id=after_id, limit=limit)
+        for row in rows:
+            spec = NOTICE_SPECS.get(row["code"])
+            # The label lets the page name the failure without exposing internal codes.
+            row["label"] = spec.label if spec is not None else "测试通知"
+        return rows

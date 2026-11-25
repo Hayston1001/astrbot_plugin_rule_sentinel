@@ -304,6 +304,34 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(rows[0]["detail"], "old")
         self.assertIsNone(rows[0]["attempt_id"])
 
+    def test_notification_records_summary_and_old_schema(self):
+        old_path = self.path.parent / "old-notifications.sqlite"
+        with closing(sqlite3.connect(old_path)) as db:
+            db.execute("CREATE TABLE notification_events (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+                       "status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT 'time')")
+            db.execute("INSERT INTO notification_events VALUES (1, 'model_failed', 'unknown', 'time')")
+            db.commit()
+        old = DryRunQueue(old_path)
+        old.initialize()
+        rows = old.list_notifications()
+        self.assertEqual((rows[0]["code"], rows[0]["status"], rows[0]["summary"]),
+                         ("model_failed", "unknown", ""))
+        old.record_notification("queue_full", "submitted", "Rule Sentinel 失败提示")
+        self.assertEqual(old.list_notifications()[-1]["summary"], "Rule Sentinel 失败提示")
+        for summary in ("x" * 1001, None, 1):
+            with self.assertRaises(ValueError):
+                old.record_notification("queue_full", "submitted", summary)
+        with self.assertRaises(ValueError):
+            old.record_notification("unknown", "submitted", "text")
+
+    def test_group_label_prefers_alias_then_platform_name(self):
+        self.assertEqual(self.queue.group_label("p", "g"), "")
+        self.queue.ensure_group("p", "g", "平台群名")
+        self.assertEqual(self.queue.group_label("p", "g"), "平台群名")
+        self.queue.save_group_name("p", "g", "备注群名")
+        self.assertEqual(self.queue.group_label("p", "g"), "备注群名")
+        self.assertEqual(self.queue.group_label("p", "missing"), "")
+
     def test_concurrent_enqueues_respect_capacity(self):
         with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda index: self.enqueue(str(index), capacity=2), range(8)))

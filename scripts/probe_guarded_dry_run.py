@@ -128,8 +128,10 @@ def main():
                 raise AssertionError("provider timeout was not classified")
 
             notifications = []
+            def record_notice(code, scope=None, reason=""):
+                notifications.append(code)
             worker = DryRunWorker(queue, LlmDecider(rules, invoke, model="synthetic",
-                max_duration_seconds=300, queue=queue), concurrency=1, timeout_seconds=10, notify=notifications.append)
+                max_duration_seconds=300, queue=queue), concurrency=1, timeout_seconds=10, notify=record_notice)
             assert await worker.drain_group("p", "g") == 4
             events = queue.list_events(platform_id="p", group_id="g")
             assert [(event["message_id"], event["status"]) for event in events] == [

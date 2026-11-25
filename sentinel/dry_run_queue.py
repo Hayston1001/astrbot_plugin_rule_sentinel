@@ -21,6 +21,7 @@ from .violation_store import count_cumulative_mute, initialize_violation_store, 
 SYSTEM_PLATFORM = "__rule_sentinel_system__"
 OVERFLOW_GROUP = "__ingress_overflow__"
 MAX_AUDIT_DETAIL_CHARS = 100000
+MAX_NOTIFICATION_SUMMARY_CHARS = 1000
 AUDIT_DETAIL_VERSION = 1
 
 
@@ -172,6 +173,7 @@ class DryRunQueue:
                 CREATE INDEX IF NOT EXISTS message_previews_stored_at ON message_previews(stored_at);
                 CREATE TABLE IF NOT EXISTS notification_events (
                     id INTEGER PRIMARY KEY, code TEXT NOT NULL, status TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 );
                 CREATE INDEX IF NOT EXISTS notification_events_created_at ON notification_events(created_at);
@@ -195,6 +197,11 @@ class DryRunQueue:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(dry_run_events)")}
             if "attempt_id" not in columns:
                 db.execute("ALTER TABLE dry_run_events ADD COLUMN attempt_id TEXT")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(notification_events)")}
+            if "summary" not in columns:
+                # Pre-upgrade rows have no rendered text and stay empty rather
+                # than being given a fabricated description.
+                db.execute("ALTER TABLE notification_events ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
             for table in ("execution_intents", "execution_attempts"):
                 columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if "reason_code" not in columns:
@@ -1288,6 +1295,20 @@ class DryRunQueue:
         finally:
             db.close()
 
+    def group_label(self, platform_id: str, group_id: str) -> str:
+        """Return the dashboard alias, else the platform group name, else empty."""
+        if not isinstance(platform_id, str) or not isinstance(group_id, str):
+            return ""
+        db = self._connect()
+        try:
+            row = db.execute("SELECT alias, platform_name FROM dashboard_group_names "
+                             "WHERE platform_id=? AND group_id=?", (platform_id, group_id)).fetchone()
+            if row is None:
+                return ""
+            return row["alias"] or row["platform_name"] or ""
+        finally:
+            db.close()
+
     def ensure_group(self, platform_id: str, group_id: str, platform_name: str = "") -> dict:
         db = self._connect()
         try:
@@ -1444,14 +1465,17 @@ class DryRunQueue:
         finally:
             db.close()
 
-    def record_notification(self, code: str, status: str) -> None:
+    def record_notification(self, code: str, status: str, summary: str = "") -> None:
         if code not in {"model_failed", "model_timeout", "context_limit", "rule_snapshot_too_large", "queue_full", "storage_failed", "circuit_open", "action_rejected", "test"}:
             raise ValueError("invalid notification code")
         if status not in {"submitted", "failed", "unknown"}:
             raise ValueError("invalid notification status")
+        if not isinstance(summary, str) or len(summary) > MAX_NOTIFICATION_SUMMARY_CHARS:
+            raise ValueError("invalid notification summary")
         db = self._connect()
         try:
-            db.execute("INSERT INTO notification_events (code, status) VALUES (?, ?)", (code, status))
+            db.execute("INSERT INTO notification_events (code, status, summary) VALUES (?, ?, ?)",
+                       (code, status, summary))
             db.commit()
         finally:
             db.close()
@@ -1461,8 +1485,8 @@ class DryRunQueue:
             raise ValueError("invalid pagination")
         db = self._connect()
         try:
-            rows = db.execute("SELECT id, code, status, created_at FROM notification_events WHERE id>? ORDER BY id LIMIT ?",
-                              (after_id, limit)).fetchall()
+            rows = db.execute("SELECT id, code, status, summary, created_at FROM notification_events "
+                              "WHERE id>? ORDER BY id LIMIT ?", (after_id, limit)).fetchall()
             return [dict(row) for row in rows]
         finally:
             db.close()

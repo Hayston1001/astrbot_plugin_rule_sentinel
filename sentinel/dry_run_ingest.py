@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from .async_io import run_sync_safely
 from .monitoring_policy import eligibility
+from .notifications import notification_scope
 
 
 MAX_MESSAGE_CHARS = 65536
@@ -125,7 +126,9 @@ class DryRunAdmission:
                     self.chat_context.discard(token)
         if result == "queue_full" and self.notify is not None:
             try:
-                self.notify("queue_full")
+                self.notify("queue_full", notification_scope(platform_id=message.platform_id,
+                                                             group_id=message.group_id,
+                                                             message_id=message.message_id))
             except Exception:
                 pass
         return result

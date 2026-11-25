@@ -647,13 +647,18 @@ class ExecutionIntentTests(unittest.TestCase):
         self.enable_execution()
         self.queue.finish(self.item, status="proposed", detail=self.detail, rule_versions=(("r", 1),))
         offered = []
+        def record_notice(code, scope=None, reason=""):
+            offered.append((code, scope))
         class FakePlatform:
             async def verify_permission(self, *args): return True
             async def mute(self, *args): return {"outcome": "blocked", "reason_code": "protected_target"}
             async def send_group_message(self, *args, **kwargs): raise AssertionError("unexpected send")
-        executor = MuteExecutor(MuteExecutionStore(self.path), FakePlatform(), notify=offered.append)
+        executor = MuteExecutor(MuteExecutionStore(self.path), FakePlatform(), notify=record_notice)
         self.assertEqual(asyncio.run(executor.execute(1, mode="auto")), "blocked")
-        self.assertEqual(offered, ["action_rejected"])
+        self.assertEqual([code for code, scope in offered], ["action_rejected"])
+        scope = offered[0][1]
+        self.assertEqual((scope.platform_id, scope.group_id, scope.rule_id, scope.action, scope.duration_seconds),
+                         ("p", "g", "r", "mute", 60))
 
     def test_unknown_notice_is_not_retried(self):
         self.enable_execution()

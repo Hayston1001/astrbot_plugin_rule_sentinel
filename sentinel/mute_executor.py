@@ -3,16 +3,20 @@
 import asyncio
 
 from .async_io import run_sync_safely
+from .notifications import notification_scope
 
 
 class MuteExecutor:
     def __init__(self, store, platform, *, sleep=asyncio.sleep, notify=None):
         self.store, self.platform, self.sleep, self.notify = store, platform, sleep, notify
 
-    def _notify_rejected(self):
+    def _notify_rejected(self, intent):
         if self.notify is not None:
             try:
-                self.notify("action_rejected")
+                self.notify("action_rejected", notification_scope(
+                    platform_id=intent["platform_id"], group_id=intent["group_id"],
+                    message_id=intent["message_id"], rule_id=intent["rule_id"],
+                    action=intent["action"], duration_seconds=intent.get("duration_seconds")))
             except Exception:
                 pass
 
@@ -122,7 +126,7 @@ class MuteExecutor:
                                           trace_id=result.get("trace_id"), reason_code=result.get("reason_code"),
                                           retry_allowed=retry_allowed)
             if state == "blocked" and result.get("reason_code") == "protected_target":
-                self._notify_rejected()
+                self._notify_rejected(intent)
                 await self._send_notice(intent_id)
             if state != "pending_retry":
                 return state

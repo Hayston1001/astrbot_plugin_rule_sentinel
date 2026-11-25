@@ -717,7 +717,7 @@ class RuleSentinel(Star):
         data = await self._payload()
         if data != {}:
             return error_response("Invalid request", status_code=400)
-        from .sentinel.notifications import send_test_notifications, validate_notification_targets
+        from .sentinel.notifications import TEST_MESSAGE, send_test_notifications, validate_notification_targets
         try:
             targets = validate_notification_targets(self.config.get("notification_targets", []))
         except ValueError:
@@ -735,7 +735,7 @@ class RuleSentinel(Star):
             return error_response("Test notification failed", status_code=500)
         for status in results:
             try:
-                await run_sync_safely(self._queue.record_notification, "test", status)
+                await run_sync_safely(self._queue.record_notification, "test", status, TEST_MESSAGE)
             except Exception:
                 logger.error("Rule Sentinel could not record the test notification result")
         return json_response({status: results.count(status) for status in ("submitted", "failed", "unknown")})

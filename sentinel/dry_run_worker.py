@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 from .dry_run_queue import DryRunQueue, WorkItem, AUDIT_DETAIL_VERSION, MAX_AUDIT_DETAIL_CHARS
 from .decision_errors import AuditSnapshotTooLarge, AuditUnavailable, ContextLimitExceeded, ProviderIntegrityUnverified
 from .async_io import run_awaitable_safely, run_sync_safely
+from .notifications import notification_scope
 
 
 def _safe_error_fields(error):
@@ -96,10 +97,10 @@ class DryRunWorker:
     def request_stop(self):
         self.stopping = True
 
-    def _notify(self, code):
+    def _notify(self, code, scope=None, reason=""):
         if self.notify is not None:
             try:
-                self.notify(code)
+                self.notify(code, scope, reason)
             except Exception:
                 pass
 
@@ -112,7 +113,7 @@ class DryRunWorker:
                 try:
                     item = await run_sync_safely(self.queue.claim, platform_id, group_id)
                 except Exception:
-                    self._notify("storage_failed")
+                    self._notify("storage_failed", notification_scope(platform_id=platform_id, group_id=group_id))
                     raise
                 if item is None:
                     return finished
@@ -166,6 +167,8 @@ class DryRunWorker:
                     # permanently leased because its audit cannot be stored.
                     result = Decision("failed", _failure_detail(
                         "audit_detail_invalid_or_too_large", detail_truncated=True))
+                item_scope = notification_scope(platform_id=item.platform_id, group_id=item.group_id,
+                                                 message_id=item.message_id)
                 try:
                     finish_args = {"status": result.status, "detail": result.detail}
                     if result.rule_versions is not None and result.status in ("proposed", "no_action"):
@@ -174,24 +177,24 @@ class DryRunWorker:
                         finish_args["settings_fingerprint"] = result.settings_fingerprint
                     recorded = await run_sync_safely(self.queue.finish, item, **finish_args)
                 except Exception:
-                    self._notify("storage_failed")
+                    self._notify("storage_failed", item_scope)
                     raise
                 if not recorded:
-                    self._notify("storage_failed")
+                    self._notify("storage_failed", item_scope)
                     raise RuntimeError("queue lease lost before audit")
                 if self.on_finished is not None:
                     await self.on_finished(item)
                 if result.detail == "context_length_exceeded":
-                    self._notify("context_limit")
+                    self._notify("context_limit", item_scope, result.detail)
                 elif result.detail == "rule_snapshot_too_large":
-                    self._notify("rule_snapshot_too_large")
+                    self._notify("rule_snapshot_too_large", item_scope, result.detail)
                 elif result.detail == "evaluation_audit_unavailable":
-                    self._notify("storage_failed")
+                    self._notify("storage_failed", item_scope, result.detail)
                 elif result.status == "timed_out":
-                    self._notify("model_timeout")
+                    self._notify("model_timeout", item_scope, result.detail)
                 elif result.detail == "circuit_open":
-                    self._notify("circuit_open")
+                    self._notify("circuit_open", item_scope)
                 elif result.status == "failed":
-                    self._notify("model_failed")
+                    self._notify("model_failed", item_scope, result.detail)
                 finished += 1
         return finished

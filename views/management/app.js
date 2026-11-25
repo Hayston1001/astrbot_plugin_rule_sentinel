@@ -679,6 +679,25 @@ async function showQuery(endpoint, params) {
     if (requestRevision === outputRevision) el("output").textContent = JSON.stringify(data, null, 2);
   } catch (error) { if (requestRevision === outputRevision) showError(el("output"), error); }
 }
+const notificationStatusText = {submitted: "已提交", failed: "发送失败", unknown: "结果不明"};
+function notificationLine(row) {
+  const time = String(row.created_at || "").slice(0, 16).replace("T", " ");
+  const label = row.label || "通知";
+  const status = notificationStatusText[row.status] || "结果不明";
+  const summary = typeof row.summary === "string" ? row.summary.trim() : "";
+  return summary ? `${time}  ${label}  ${status}\n${summary}` : `${time}  ${label}  ${status}`;
+}
+async function showNotifications() {
+  const requestRevision = ++outputRevision;
+  el("audit-next").disabled = true;
+  el("output").textContent = "正在读取通知记录…";
+  try {
+    const data = await bridge.apiGet("notifications", {limit: 50});
+    if (requestRevision !== outputRevision) return;
+    const rows = Array.isArray(data) ? data : [];
+    el("output").textContent = rows.length ? rows.map(notificationLine).join("\n\n") : "还没有通知记录.";
+  } catch (error) { if (requestRevision === outputRevision) showError(el("output"), error); }
+}
 el("platforms").addEventListener("click", () => showQuery("platforms"));
 el("load").addEventListener("click", () => showQuery("rules", group()));
 el("history").addEventListener("click", async () => {
@@ -1682,7 +1701,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", stopLive);
 el("overflow").addEventListener("click", () => showQuery("audit", {platform_id: "__rule_sentinel_system__", group_id: "__ingress_overflow__", limit: 50}));
-el("notifications").addEventListener("click", () => showQuery("notifications", {limit: 50}));
+el("notifications").addEventListener("click", () => showNotifications());
 let actionRows = [];
 let actionSequence = 0;
 let actionDrag = null;

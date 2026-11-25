@@ -2,12 +2,14 @@ import asyncio
 import unittest
 import tempfile
 import threading
+from datetime import datetime
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
 
-from sentinel.notifications import (NotificationDispatcher, NotificationService, TEST_MESSAGE,
-                                   build_notification_dispatcher, send_test_notifications)
+from sentinel.notifications import (MAX_NOTIFICATION_TEXT, NotificationDispatcher, NotificationScope,
+                                   NotificationService, TEST_MESSAGE, build_notification_dispatcher,
+                                   notification_scope, send_test_notifications)
 from sentinel.dry_run_queue import DryRunQueue
 
 
@@ -17,15 +19,122 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         async def send(recipient, text):
             sent.append((recipient, text))
             raise RuntimeError("private error")
-        async def record(code, status):
-            audit.append((code, status))
+        async def record(code, status, summary):
+            audit.append((code, status, summary))
         service = NotificationService(recipients=["platform:FriendMessage:user"], interval_seconds=30,
                                       send=send, audit=record, clock=lambda: 10)
         result = await asyncio.gather(service.notify("model_failed"), service.notify("model_failed"))
         self.assertCountEqual(result, ["unknown", "rate_limited"])
         self.assertEqual(len(sent), 1)
-        self.assertEqual(audit, [("model_failed", "unknown")])
+        self.assertEqual([item[:2] for item in audit], [("model_failed", "unknown")])
+        self.assertIn("情况: 模型判定失败", sent[0][1])
         self.assertNotIn("private error", sent[0][1])
+        self.assertEqual(audit[0][2], sent[0][1])
+
+    async def test_notice_names_scope_impact_and_where_to_look(self):
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        scope = NotificationScope(platform_id="qq_official", group_id="123456789", message_id="45678",
+                                  group_label="产品群")
+        self.assertEqual(await service.notify("model_failed", scope, "decision_error"), "submitted")
+        lines = sent[0].splitlines()
+        self.assertEqual(lines[0], "Rule Sentinel 失败提示")
+        self.assertEqual(lines[1], "情况: 模型判定失败, 判定过程出错")
+        self.assertEqual(lines[2], "范围: 群 产品群 (qq_official)")
+        self.assertEqual(lines[3], "消息: 45678")
+        self.assertEqual(lines[4], "时间: 11-24 14:03")
+        self.assertIn("影响: 这条消息未完成判定", lines[5])
+        self.assertTrue(lines[-1].startswith("去处: "))
+        self.assertLessEqual(len(sent[0]), MAX_NOTIFICATION_TEXT)
+
+    async def test_action_rejection_names_rule_action_and_duration(self):
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        scope = NotificationScope(platform_id="qq", group_id="9", message_id="m", rule_id="r_1",
+                                  action="mute", duration_seconds=600)
+        await service.notify("action_rejected", scope)
+        text = sent[0]
+        self.assertIn("规则: r_1", text)
+        self.assertIn("动作: 禁言 600 秒", text)
+        self.assertIn("去处: 无需处理", text)
+
+    async def test_merged_failures_count_groups_and_reset_after_sending(self):
+        sent, now = [], [10.0]
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=60, send=send,
+                                      audit=record, clock=lambda: now[0], wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        await service.notify("queue_full", NotificationScope(platform_id="p", group_id="a"))
+        self.assertEqual(await service.notify("queue_full", NotificationScope(platform_id="p", group_id="b")),
+                         "rate_limited")
+        await service.notify("queue_full", NotificationScope(platform_id="p", group_id="c"))
+        now[0] = 100.0
+        await service.notify("queue_full", NotificationScope(platform_id="p", group_id="c"))
+        self.assertIn("合并: 自上次同类提示以来 3 次, 涉及 2 个群", sent[-1])
+        now[0] = 200.0
+        await service.notify("queue_full", NotificationScope(platform_id="p", group_id="b"))
+        self.assertNotIn("合并:", sent[-1])
+
+    async def test_group_label_lookup_is_optional_and_never_blocks_sending(self):
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        async def resolve(scope):
+            raise RuntimeError("lookup failed")
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, resolve_group_label=resolve, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        self.assertEqual(await service.notify("model_failed", NotificationScope(platform_id="p", group_id="g")),
+                         "submitted")
+        self.assertIn("范围: 群 g (p)", sent[0])
+
+    async def test_scope_helper_drops_unusable_values_instead_of_raising(self):
+        scope = notification_scope(platform_id="p", group_id="g" * 500, message_id="m" * 500,
+                                   rule_id="r", action="ban", duration_seconds="60",
+                                   group_label="产品群")
+        self.assertEqual((scope.platform_id, scope.group_id, scope.message_id, scope.rule_id,
+                          scope.action, scope.duration_seconds, scope.group_label),
+                         ("p", "", "", "r", "", None, "产品群"))
+
+    async def test_scope_rejects_free_text_and_unexpected_values(self):
+        for value in ({"group_id": "g"}, "g"):
+            with self.assertRaises(ValueError):
+                await NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1,
+                                          send=None, audit=None).notify("model_failed", value)
+        for field, value in (("group_id", "bad\nvalue"), ("rule_id", "x" * 129), ("action", "ban"),
+                             ("duration_seconds", 0), ("duration_seconds", 2592001),
+                             ("duration_seconds", "60"), ("group_label", "y" * 101)):
+            with self.assertRaises(ValueError):
+                NotificationScope(**{field: value})
+        # An unknown failure detail is dropped instead of being echoed.
+        sent = []
+        async def send(recipient, text):
+            sent.append(text)
+            return True
+        async def record(code, status, summary):
+            pass
+        service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send,
+                                      audit=record, wall_clock=lambda: datetime(2026, 11, 24, 14, 3))
+        await service.notify("model_failed", NotificationScope(platform_id="p"), "private group text")
+        self.assertNotIn("private group text", sent[0])
+        self.assertIn("范围: 实例 p", sent[0])
 
     async def test_invalid_configuration_and_unknown_code(self):
         with self.assertRaises(ValueError):
@@ -40,7 +149,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         results = []
         async def send(recipient, text):
             return True
-        async def audit(code, status):
+        async def audit(code, status, summary):
             results.append(status)
         service = NotificationService(recipients=["p:FriendMessage:u"], interval_seconds=1, send=send, audit=audit)
         self.assertEqual(await service.notify("model_failed"), "submitted")
@@ -79,7 +188,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
             if target == targets[0]:
                 raise RuntimeError("private error")
             return target != targets[1]
-        async def record(code, status):
+        async def record(code, status, summary):
             results.append((code, status))
         service = NotificationService(recipients=targets, interval_seconds=60,
                                       send=send, audit=record, clock=lambda: 10)
@@ -95,20 +204,30 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp:
             queue = DryRunQueue(Path(temp) / "state.sqlite")
             queue.initialize()
+            queue.save_group_name("p", "g", "产品群")
             class Context:
                 async def send_message(self, target, message):
                     self.target = target
+                    self.message = message
                     return False
             context = Context()
             dispatcher = build_notification_dispatcher(context=context, queue=queue,
                 recipients=["p:FriendMessage:admin"], interval_seconds=60, message_chain_factory=lambda text: text)
             dispatcher.start()
-            self.assertTrue(dispatcher.offer("model_failed"))
+            self.assertTrue(dispatcher.offer("model_failed",
+                                             NotificationScope(platform_id="p", group_id="g", message_id="m"),
+                                             "decision_error"))
             await dispatcher.close()
             self.assertEqual(context.target, "p:FriendMessage:admin")
+            self.assertIn("情况: 模型判定失败, 判定过程出错", context.message)
+            self.assertIn("范围: 群 产品群 (p)", context.message)
+            self.assertIn("消息: m", context.message)
             with closing(queue._connect()) as db:
-                result = db.execute("SELECT code, status FROM notification_events").fetchone()
-                self.assertEqual(tuple(result), ("model_failed", "failed"))
+                result = db.execute("SELECT code, status, summary FROM notification_events").fetchone()
+                self.assertEqual(tuple(result)[:2], ("model_failed", "failed"))
+                self.assertEqual(result["summary"], context.message)
+            record = queue.list_notifications()[0]
+            self.assertEqual(record["summary"], context.message)
 
     async def test_revoked_notification_authorization_does_not_send(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -177,7 +296,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_consumer_waits_for_notification_audit_thread(self):
         entered, release = threading.Event(), threading.Event()
         class Queue:
-            def record_notification(self, code, status):
+            def record_notification(self, code, status, summary=""):
                 entered.set()
                 if not release.wait(5):
                     raise RuntimeError("audit test timed out")
